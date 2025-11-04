@@ -53,7 +53,7 @@ install_deps() {
     case "$OS" in
         alpine)
             apk update || { err "apk update 失败"; exit 1; }
-            apk add --no-cache bash curl ca-certificates openssl openrc || {
+            apk add --no-cache bash curl ca-certificates openssl openrc jq || {
                 err "依赖安装失败"
                 exit 1
             }
@@ -91,7 +91,6 @@ install_deps
 # -----------------------
 # 端口和密码输入（支持环境变量）
 get_config() {
-    # 支持通过环境变量传参，方便自动化部署
     if [ -n "${SINGBOX_PORT:-}" ]; then
         PORT="$SINGBOX_PORT"
         info "使用环境变量端口: $PORT"
@@ -126,7 +125,6 @@ get_config
 install_singbox() {
     info "开始安装 sing-box..."
 
-    # 检查是否已安装
     if command -v sing-box >/dev/null 2>&1; then
         CURRENT_VERSION=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
         warn "检测到已安装 sing-box: $CURRENT_VERSION"
@@ -147,7 +145,6 @@ install_singbox() {
             }
             ;;
         debian|redhat)
-            # 原官方安装脚本
             bash <(curl -fsSL https://sing-box.app/install.sh) || {
                 err "sing-box 安装失败"
                 err "请检查网络连接或手动安装"
@@ -160,7 +157,6 @@ install_singbox() {
             ;;
     esac
 
-    # 验证安装
     if ! command -v sing-box >/dev/null 2>&1; then
         err "sing-box 安装后未找到可执行文件"
         exit 1
@@ -183,27 +179,16 @@ generate_psk() {
         info "使用指定密码"
     else
         info "自动生成密码..."
-        
-        # 优先使用 sing-box
         if command -v sing-box >/dev/null 2>&1; then
             PSK=$(sing-box generate rand --base64 "$KEY_BYTES" 2>/dev/null | tr -d '\n\r' || true)
         fi
-        
-        # 备选: openssl
         if [ -z "${PSK:-}" ] && command -v openssl >/dev/null 2>&1; then
             PSK=$(openssl rand -base64 "$KEY_BYTES" | tr -d '\n\r')
         fi
-        
-        # 最后备选: /dev/urandom
         if [ -z "${PSK:-}" ]; then
             PSK=$(head -c "$KEY_BYTES" /dev/urandom | base64 | tr -d '\n\r')
         fi
-        
-        if [ -z "${PSK:-}" ]; then
-            err "密码生成失败"
-            exit 1
-        fi
-        
+        [ -z "${PSK:-}" ] && { err "密码生成失败"; exit 1; }
         info "密码生成成功"
     fi
 }
@@ -244,7 +229,6 @@ create_config() {
 }
 EOF
 
-    # 验证配置
     if command -v sing-box >/dev/null 2>&1; then
         if sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1; then
             info "配置文件验证通过"
@@ -262,7 +246,6 @@ setup_service() {
     info "配置系统服务..."
     
     if [ "$OS" = "alpine" ]; then
-        # Alpine OpenRC 服务
         SERVICE_PATH="/etc/init.d/sing-box"
         
         cat > "$SERVICE_PATH" <<'OPENRC'
@@ -298,11 +281,7 @@ start_post() {
 OPENRC
         
         chmod +x "$SERVICE_PATH"
-        
-        # 添加到开机自启
         rc-update add sing-box default >/dev/null 2>&1 || warn "添加开机自启失败"
-        
-        # 启动服务
         rc-service sing-box restart || {
             err "服务启动失败，查看日志："
             tail -20 /var/log/sing-box.err 2>/dev/null || tail -20 /var/log/sing-box.log 2>/dev/null || true
@@ -310,7 +289,6 @@ OPENRC
         }
         
         sleep 2
-        
         if rc-service sing-box status >/dev/null 2>&1; then
             info "✅ OpenRC 服务已启动"
         else
@@ -319,7 +297,6 @@ OPENRC
         fi
         
     else
-        # Systemd 服务
         SERVICE_PATH="/etc/systemd/system/sing-box.service"
         
         cat > "$SERVICE_PATH" <<'SYSTEMD'
@@ -352,7 +329,6 @@ SYSTEMD
         }
         
         sleep 2
-        
         if systemctl is-active sing-box >/dev/null 2>&1; then
             info "✅ Systemd 服务已启动"
         else
@@ -400,7 +376,6 @@ generate_uri() {
     local tag="singbox-ss2022"
     local userinfo="${METHOD}:${PSK}"
     
-    # SIP002 格式 (URL编码)
     local encoded_userinfo
     if command -v python3 >/dev/null 2>&1; then
         encoded_userinfo=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$userinfo" 2>/dev/null || echo "$userinfo")
@@ -408,7 +383,6 @@ generate_uri() {
         encoded_userinfo=$(printf "%s" "$userinfo" | sed 's/:/%3A/g; s/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
     fi
     
-    # Base64 格式
     local base64_userinfo=$(printf "%s" "$userinfo" | base64 -w0 2>/dev/null || printf "%s" "$userinfo" | base64 | tr -d '\n')
     
     echo "ss://${encoded_userinfo}@${host}:${PORT}#${tag}"
@@ -416,49 +390,7 @@ generate_uri() {
 }
 
 # -----------------------
-# 最终输出
-echo ""
-echo "=========================================="
-info "🎉 Sing-box 部署完成！"
-echo "=========================================="
-echo ""
-info "📋 配置信息："
-echo "   端口: $PORT"
-echo "   方法: $METHOD"
-echo "   密码: $PSK"
-echo "   服务器: $PUB_IP"
-echo ""
-info "📁 文件位置："
-echo "   配置: $CONFIG_PATH"
-echo "   服务: $SERVICE_PATH"
-echo ""
-info "🔗 客户端链接："
-generate_uri | while IFS= read -r line; do
-    echo "   $line"
-done
-echo ""
-info "🔧 管理命令："
-if [ "$OS" = "alpine" ]; then
-    echo "   启动: rc-service sing-box start"
-    echo "   停止: rc-service sing-box stop"
-    echo "   重启: rc-service sing-box restart"
-    echo "   状态: rc-service sing-box status"
-    echo "   日志: tail -f /var/log/sing-box.log"
-else
-    echo "   启动: systemctl start sing-box"
-    echo "   停止: systemctl stop sing-box"
-    echo "   重启: systemctl restart sing-box"
-    echo "   状态: systemctl status sing-box"
-    echo "   日志: journalctl -u sing-box -f"
-fi
-echo ""
-echo "=========================================="
-
-# -----------------------
-# Create `sb` management script at /usr/local/bin/sb
-# (Do not modify other parts of the original script; sb is added as a separate tool)
-# -----------------------
-# Create sb management script (重置端口/密码已删除)
+# 创建 sb 管理脚本
 SB_PATH="/usr/local/bin/sb"
 info "正在创建 sb 管理脚本: $SB_PATH"
 
@@ -476,134 +408,107 @@ BIN_PATH="/usr/bin/sing-box"
 SERVICE_NAME="sing-box"
 
 detect_os() {
-    if [ -f /etc/os-release ]; then . /etc/os-release; ID="${ID:-}"; ID_LIKE="${ID_LIKE:-}"; else ID=""; ID_LIKE=""; fi
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        ID="${ID:-}"
+        ID_LIKE="${ID_LIKE:-}"
+    else
+        ID=""
+        ID_LIKE=""
+    fi
     if echo "$ID $ID_LIKE" | grep -qi "alpine"; then OS="alpine"
     elif echo "$ID $ID_LIKE" | grep -Ei "debian|ubuntu" >/dev/null; then OS="debian"
     elif echo "$ID $ID_LIKE" | grep -Ei "centos|rhel|fedora" >/dev/null; then OS="redhat"
     else OS="unknown"; fi
 }
+
 detect_os
 
 service_start() { [ "$OS" = "alpine" ] && rc-service "$SERVICE_NAME" start || systemctl start "$SERVICE_NAME"; }
 service_stop()  { [ "$OS" = "alpine" ] && rc-service "$SERVICE_NAME" stop  || systemctl stop "$SERVICE_NAME"; }
 service_restart(){ [ "$OS" = "alpine" ] && rc-service "$SERVICE_NAME" restart || systemctl restart "$SERVICE_NAME"; }
-service_status(){ [ "$OS" = "alpine" ] && rc-service "$SERVICE_NAME" status  || systemctl status "$SERVICE_NAME" --no-pager; }
+service_status() { [ "$OS" = "alpine" ] && rc-service "$SERVICE_NAME" status || systemctl status "$SERVICE_NAME"; }
 
-read_config_fields() {
-    [ ! -f "$CONFIG_PATH" ] && { err "未找到配置文件"; return 1; }
-    if command -v python3 >/dev/null 2>&1; then
-        METHOD=$(python3 -c 'import json; c=json.load(open("'"$CONFIG_PATH"'")); print(c["inbounds"][0].get("method",""))')
-        PSK=$(python3 -c 'import json; c=json.load(open("'"$CONFIG_PATH"'")); print(c["inbounds"][0].get("password",""))')
-        PORT=$(python3 -c 'import json; c=json.load(open("'"$CONFIG_PATH"'")); print(c["inbounds"][0].get("listen_port",""))')
+# -----------------------
+# 重置端口/密码
+action_reset_port_pwd() {
+    [ -f "$CONFIG_PATH" ] || { err "配置文件不存在"; return 1; }
+    read -p "输入新端口（回车随机 10000-60000）： " new_port
+    [ -z "$new_port" ] && new_port=$((RANDOM % 50001 + 10000))
+    read -p "输入新密码（回车随机生成 Base64 密钥）： " new_pwd
+    [ -z "$new_pwd" ] && new_pwd=$(head -c 16 /dev/urandom | base64 | tr -d '\n\r')
+    if command -v jq >/dev/null 2>&1; then
+        tmpfile=$(mktemp)
+        jq --arg port "$new_port" --arg pwd "$new_pwd" \
+           '.inbounds[0].listen_port=($port|tonumber) | .inbounds[0].password=$pwd' \
+           "$CONFIG_PATH" > "$tmpfile" && mv "$tmpfile" "$CONFIG_PATH"
     else
-        METHOD=$(grep -m1 '"method"' "$CONFIG_PATH" 2>/dev/null | sed -E 's/.*"method"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
-        PSK=$(grep -m1 '"password"' "$CONFIG_PATH" 2>/dev/null | sed -E 's/.*"password"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
-        PORT=$(grep -m1 '"listen_port"' "$CONFIG_PATH" 2>/dev/null | sed -E 's/.*"listen_port"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/' || true)
+        sed -E -i "s/(\"listen_port\"[[:space:]]*:[[:space:]]*)[0-9]+/\1${new_port}/" "$CONFIG_PATH" || true
+        sed -E -i "0,/(\"password\"[[:space:]]*:[[:space:]]*\")([^\"\n]*)\"/s//\"password\": \"${new_pwd}\"/" "$CONFIG_PATH" || true
     fi
+    info "已写入新端口($new_port)与新密码(隐藏)，正在重启服务..."
+    service_restart || warn "重启失败"
 }
 
-generate_and_save_uri() {
-    read_config_fields || return 1
-    PUBLIC_IP=""
-    for url in "https://api.ipify.org" "https://ipinfo.io/ip" "https://ifconfig.me" "https://icanhazip.com" "https://ipecho.net/plain"; do
-        PUBLIC_IP=$(curl -s --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]' || true)
-        [ -n "$PUBLIC_IP" ] && break
-    done
-    [ -z "$PUBLIC_IP" ] && PUBLIC_IP="YOUR_SERVER_IP"
-    userinfo="${METHOD}:${PSK}"
-    if command -v python3 >/dev/null 2>&1; then
-        encoded_userinfo=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$userinfo")
-    else
-        encoded_userinfo=$(printf "%s" "$userinfo" | sed 's/:/%3A/g; s/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
-    fi
-    base64_userinfo=$(printf "%s" "$userinfo" | base64 -w0 2>/dev/null || printf "%s" "$userinfo" | base64 | tr -d '\n')
-    echo "ss://${encoded_userinfo}@${PUBLIC_IP}:${PORT}#singbox-ss2022" > "$SS_URI_PATH"
-    echo "ss://${base64_userinfo}@${PUBLIC_IP}:${PORT}#singbox-ss2022" >> "$SS_URI_PATH"
-    info "SS URI 已写入: $SS_URI_PATH"
-}
-
-action_view_uri() { [ -f "$SS_URI_PATH" ] && sed -n '1,200p' "$SS_URI_PATH" || (warn "未找到 URI，尝试生成..."; generate_and_save_uri && sed -n '1,200p' "$SS_URI_PATH"); }
-action_view_config() { echo "$CONFIG_PATH"; }
-action_edit_config() { [ ! -f "$CONFIG_PATH" ] && { err "配置文件不存在"; return 1; }; ${EDITOR:-nano} "$CONFIG_PATH"; command -v sing-box >/dev/null 2>&1 && sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1 && service_restart && generate_and_save_uri || warn "配置校验失败"; }
-
-action_update() { info "开始更新 sing-box..."; [ "$OS" = "alpine" ] && { apk update || warn "apk update 失败"; apk add --upgrade --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community sing-box || bash <(curl -fsSL https://sing-box.app/install.sh) || err "更新失败"; } || bash <(curl -fsSL https://sing-box.app/install.sh) || err "更新失败"; [ -x "$(command -v sing-box)" ] && service_restart; info "更新完成"; }
-
+# -----------------------
+# 卸载 sing-box
 action_uninstall() {
-action_uninstall() {
-    info "正在卸载 sing-box（直接全部删除，无确认）..."
-
-    # 停止服务
+    info "正在卸载 sing-box..."
     service_stop || true
-
     if [ "$OS" = "alpine" ]; then
-        # 删除 OpenRC 服务注册和脚本
         rc-update del "$SERVICE_NAME" default >/dev/null 2>&1 || true
         [ -f "/etc/init.d/$SERVICE_NAME" ] && rm -f "/etc/init.d/$SERVICE_NAME"
-
-        # 卸载 sing-box apk 包
-        if apk info | grep -q '^sing-box$'; then
-            apk del sing-box >/dev/null 2>&1 || warn "卸载 sing-box apk 包失败"
-        fi
+        apk del sing-box >/dev/null 2>&1 || true
     else
-        # systemd 系统
         systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
         systemctl disable "$SERVICE_NAME" >/dev/null 2>&1 || true
         [ -f "/etc/systemd/system/$SERVICE_NAME.service" ] && rm -f "/etc/systemd/system/$SERVICE_NAME.service"
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
-
-    # 删除配置、日志、可执行文件
-    rm -rf /etc/sing-box >/dev/null 2>&1 || true
-    rm -f /var/log/sing-box.log /var/log/sing-box.err >/dev/null 2>&1 || true
-    rm -f "$SS_URI_PATH" >/dev/null 2>&1 || true
-    rm -f "$BIN_PATH" >/dev/null 2>&1 || true
-
-    # 删除 sb 管理脚本
-    [ -f "/usr/local/bin/sb" ] && rm -f "/usr/local/bin/sb"
-
-    info "卸载完成，所有配置、日志、可执行文件、sb 管理脚本及 Alpine 包已删除"
+    rm -rf /etc/sing-box /var/log/sing-box* /usr/local/bin/sb "$BIN_PATH" >/dev/null 2>&1 || true
+    info "卸载完成"
 }
 
-}
-
+# -----------------------
+# SB 面板主循环
 while true; do
     cat <<'MENU'
 
 ==========================
- Sing-box 管理面板 (快捷指令 sb)
+ Sing-box 管理面板 (快捷指令sb)
 ==========================
 1) 查看 SS URI
 2) 查看配置文件路径
 3) 编辑配置文件
-4) 启动服务
-5) 停止服务
-6) 重启服务
-7) 查看状态
-8) 更新 sing-box
-9) 卸载 sing-box（无确认）
+4) 重置密码/端口
+5) 启动服务
+6) 停止服务
+7) 重启服务
+8) 查看状态
+9) 更新 sing-box
+10) 卸载 sing-box（无确认）
 0) 退出
 ==========================
 MENU
+
     read -p "请输入选项: " opt
     case "${opt:-}" in
-        1) action_view_uri ;;
-        2) action_view_config ;;
-        3) action_edit_config ;;
-        4) service_start && info "已发送启动命令" ;;
-        5) service_stop && info "已发送停止命令" ;;
-        6) service_restart && info "已发送重启命令" ;;
-        7) service_status ;;
-        8) action_update ;;
-        9) action_uninstall; exit 0 ;;
-        0) exit 0 ;;
-        *) warn "无效选项" ;;
+        1) cat /etc/sing-box/ss_uri.txt 2>/dev/null || echo "未生成 SS URI";;
+        2) echo "$CONFIG_PATH";;
+        3) ${EDITOR:-nano} "$CONFIG_PATH"; service_restart || true;;
+        4) action_reset_port_pwd;;
+        5) service_start;;
+        6) service_stop;;
+        7) service_restart;;
+        8) service_status;;
+        9) bash <(curl -fsSL https://sing-box.app/install.sh) || warn "更新失败"; service_restart;;
+        10) action_uninstall; exit 0;;
+        0) exit 0;;
+        *) warn "无效选项";;
     esac
-    echo ""
 done
 SB_SCRIPT
 
 chmod +x "$SB_PATH" || warn "无法设置 $SB_PATH 为可执行"
-info "sb 已创建：请输入 sb 运行管理面板"
 
-
-# end of script
+info "安装完成，使用 sb 管理 Sing-box"
