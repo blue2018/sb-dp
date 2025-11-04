@@ -1,321 +1,439 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-info(){ echo -e "\033[1;34m[INFO]\033[0m $*"; }
-warn(){ echo -e "\033[1;33m[WARN]\033[0m $*"; }
-err(){ echo -e "\033[1;31m[ERR]\033[0m $*" >&2; }
+# -----------------------
+# 颜色输出函数
+info() { echo -e "\033[1;34m[INFO]\033[0m $*"; }
+warn() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
+err()  { echo -e "\033[1;31m[ERR]\033[0m $*" >&2; }
 
 # -----------------------
-# detect OS / arch
-detect_env(){
-    OS="unknown"
-    OS_ID=""
-    OS_LIKE=""
+# 检测系统类型
+detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         OS_ID="${ID:-}"
-        OS_LIKE="${ID_LIKE:-}"
-    fi
-
-    case "$OS_ID" in
-        alpine) OS="alpine" ;;
-        debian|ubuntu) OS="debian" ;;
-        centos|rhel|rocky|almalinux) OS="centos" ;;
-        *) 
-            if echo "$OS_LIKE" | grep -Ei "debian" >/dev/null 2>&1; then
-                OS="debian"
-            elif echo "$OS_LIKE" | grep -Ei "rhel|fedora|centos" >/dev/null 2>&1; then
-                OS="centos"
-            fi
-            ;;
-    esac
-
-    # arch map
-    UNAME_M="$(uname -m)"
-    case "$UNAME_M" in
-        x86_64|amd64) BOX_ARCH="amd64" ;;
-        aarch64|arm64) BOX_ARCH="arm64" ;;
-        *) err "不支持的架构: $UNAME_M"; exit 1 ;;
-    esac
-
-    info "检测到系统: ${OS:-unknown}, 架构: $BOX_ARCH"
-}
-
-# -----------------------
-# prompt port / password
-prompt_user(){
-    read -p "请输入端口（留空则随机 10000-60000）: " USER_PORT
-    if [ -z "$USER_PORT" ]; then
-        PORT=$(shuf -i 10000-60000 -n 1)
-        info "使用随机端口: $PORT"
+        OS_ID_LIKE="${ID_LIKE:-}"
     else
-        if ! [[ "$USER_PORT" =~ ^[0-9]+$ ]] || [ "$USER_PORT" -lt 1 ] || [ "$USER_PORT" -gt 65535 ]; then
-            err "端口必须为 1-65535 的数字"
-            exit 1
-        fi
-        PORT="$USER_PORT"
+        OS_ID=""
+        OS_ID_LIKE=""
     fi
 
-    read -p "请输入密码（留空则自动生成符合 SS2022 的 Base64 PSK）: " USER_PWD
+    if echo "$OS_ID $OS_ID_LIKE" | grep -qi "alpine"; then
+        OS="alpine"
+    elif echo "$OS_ID $OS_ID_LIKE" | grep -Ei "debian|ubuntu" >/dev/null; then
+        OS="debian"
+    elif echo "$OS_ID $OS_ID_LIKE" | grep -Ei "centos|rhel|fedora" >/dev/null; then
+        OS="redhat"
+    else
+        OS="unknown"
+    fi
 }
 
+detect_os
+info "检测到系统: $OS (${OS_ID:-unknown})"
+
 # -----------------------
-# install packages
-install_deps(){
-    info "安装/检查依赖（curl, ca-certificates, tar, gzip, openssl, bash）"
+# 检查 root 权限
+check_root() {
+    if [ "$(id -u)" != "0" ]; then
+        err "此脚本需要 root 权限运行"
+        err "请使用: sudo bash -c \"\$(curl -fsSL ...)\" 或切换到 root 用户"
+        exit 1
+    fi
+}
+
+check_root
+
+# -----------------------
+# 安装依赖
+install_deps() {
+    info "安装系统依赖..."
+    
     case "$OS" in
         alpine)
-            apk add --no-cache curl ca-certificates tar gzip openssl bash coreutils
-            ;;
-        debian)
-            apt-get update -y
-            DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates tar gzip openssl bash jq coreutils
-            ;;
-        centos)
-            if command -v dnf >/dev/null 2>&1; then
-                dnf install -y curl ca-certificates tar gzip openssl bash jq coreutils
-            else
-                yum install -y curl ca-certificates tar gzip openssl bash jq coreutils
+            apk update || { err "apk update 失败"; exit 1; }
+            apk add --no-cache bash curl ca-certificates openssl openrc || {
+                err "依赖安装失败"
+                exit 1
+            }
+            
+            # 确保 OpenRC 运行
+            if ! rc-service --list 2>/dev/null | grep -q "^openrc"; then
+                rc-update add openrc boot >/dev/null 2>&1 || true
+                rc-service openrc start >/dev/null 2>&1 || true
             fi
             ;;
+        debian)
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -y || { err "apt update 失败"; exit 1; }
+            apt-get install -y curl ca-certificates openssl || {
+                err "依赖安装失败"
+                exit 1
+            }
+            ;;
+        redhat)
+            yum install -y curl ca-certificates openssl || {
+                err "依赖安装失败"
+                exit 1
+            }
+            ;;
         *)
-            warn "未知发行版，尝试安装常用工具（请按需手动安装）"
+            warn "未识别的系统类型，尝试继续..."
             ;;
     esac
+    
+    info "依赖安装完成"
 }
 
+install_deps
+
 # -----------------------
-# download & install sing-box
-install_singbox(){
-    info "准备安装 sing-box（二进制）"
-
-    # get latest tag (GitHub API)
-    # We'll try to query releases API; if that fails, user can set SINGBOX_VERSION env var
-    SINGBOX_VERSION="${SINGBOX_VERSION:-}"
-    if [ -z "$SINGBOX_VERSION" ]; then
-        info "查询最新版本..."
-        SINGBOX_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-            | awk -F'"' '/"tag_name":/ {print $4; exit}')
-    fi
-    if [ -z "$SINGBOX_VERSION" ]; then
-        err "无法获取 sing-box 最新版本，请设置环境变量 SINGBOX_VERSION，比如 SINGBOX_VERSION=v1.12.3"
-        exit 1
-    fi
-    info "将安装 sing-box $SINGBOX_VERSION"
-
-    TMPDIR="$(mktemp -d)"
-    trap 'rm -rf "$TMPDIR"' EXIT
-
-    # construct download URL candidates
-    # for alpine -> prefer musl artifact: sing-box-<tag>-linux-<arch>-musl.tar.gz
-    # for other -> prefer glibc artifact: sing-box-<tag>-linux-<arch>.tar.gz
-    if [ "$OS" = "alpine" ]; then
-        FILE="sing-box-${SINGBOX_VERSION}-linux-${BOX_ARCH}-musl.tar.gz"
+# 端口和密码输入（支持环境变量）
+get_config() {
+    # 支持通过环境变量传参，方便自动化部署
+    if [ -n "${SINGBOX_PORT:-}" ]; then
+        PORT="$SINGBOX_PORT"
+        info "使用环境变量端口: $PORT"
     else
-        FILE="sing-box-${SINGBOX_VERSION}-linux-${BOX_ARCH}.tar.gz"
-    fi
-
-    URL="https://github.com/SagerNet/sing-box/releases/download/${SINGBOX_VERSION}/${FILE}"
-
-    info "下载 $URL"
-    if ! curl -fSL "$URL" -o "$TMPDIR/singbox.tar.gz"; then
-        warn "第一次下载失败，尝试补充后缀或 musl/glibc 备选"
-        # try alternative names
-        if [ "$OS" = "alpine" ]; then
-            ALT="sing-box-${SINGBOX_VERSION}-linux-${BOX_ARCH}.tar.gz"
+        echo ""
+        read -p "请输入端口（留空则随机 10000-60000）: " USER_PORT
+        if [ -z "$USER_PORT" ]; then
+            PORT=$(shuf -i 10000-60000 -n 1 2>/dev/null || echo $((RANDOM % 50001 + 10000)))
+            info "使用随机端口: $PORT"
         else
-            ALT="sing-box-${SINGBOX_VERSION}-linux-${BOX_ARCH}-musl.tar.gz"
-        fi
-        ALTURL="https://github.com/SagerNet/sing-box/releases/download/${SINGBOX_VERSION}/${ALT}"
-        info "尝试 $ALTURL"
-        curl -fSL "$ALTURL" -o "$TMPDIR/singbox.tar.gz" || {
-            err "下载 sing-box 二进制失败，请检查网络或指定 SINGBOX_VERSION 环境变量"
-            exit 1
-        }
-    fi
-
-    tar -xzf "$TMPDIR/singbox.tar.gz" -C "$TMPDIR"
-    # find sing-box binary directory
-    SB_DIR=$(find "$TMPDIR" -maxdepth 2 -type f -name "sing-box" -printf '%h\n' | head -n1 || true)
-    if [ -z "$SB_DIR" ]; then
-        # maybe binary is at root of tar
-        if [ -f "$TMPDIR/sing-box" ]; then
-            SB_DIR="$TMPDIR"
-        else
-            err "解压后未找到 sing-box 可执行文件"
-            exit 1
+            if ! [[ "$USER_PORT" =~ ^[0-9]+$ ]] || [ "$USER_PORT" -lt 1 ] || [ "$USER_PORT" -gt 65535 ]; then
+                err "端口必须为 1-65535 的数字"
+                exit 1
+            fi
+            PORT="$USER_PORT"
         fi
     fi
 
-    info "安装 sing-box 到 /usr/bin/sing-box"
-    install -m 0755 "$SB_DIR/sing-box" /usr/bin/sing-box
-    if [ ! -x /usr/bin/sing-box ]; then
-        err "安装失败：/usr/bin/sing-box 不存在或不可执行"
-        exit 1
+    if [ -n "${SINGBOX_PASSWORD:-}" ]; then
+        USER_PWD="$SINGBOX_PASSWORD"
+        info "使用环境变量密码"
+    else
+        echo ""
+        read -p "请输入密码（留空则自动生成 Base64 密钥）: " USER_PWD
     fi
-
-    info "sing-box 已安装：$(/usr/bin/sing-box --version 2>&1 | head -n1 || true)"
 }
 
-# -----------------------
-# generate PSK
-generate_psk(){
-    KEY_BYTES=16
-    METHOD="2022-blake3-aes-128-gcm"
+get_config
 
+# -----------------------
+# 安装 sing-box
+install_singbox() {
+    info "开始安装 sing-box..."
+    
+    # 检查是否已安装
+    if command -v sing-box >/dev/null 2>&1; then
+        CURRENT_VERSION=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
+        warn "检测到已安装 sing-box: $CURRENT_VERSION"
+        read -p "是否重新安装？(y/N): " REINSTALL
+        if [[ ! "$REINSTALL" =~ ^[Yy]$ ]]; then
+            info "跳过 sing-box 安装"
+            return 0
+        fi
+    fi
+    
+    # 使用官方安装脚本
+    bash <(curl -fsSL https://sing-box.app/install.sh) || {
+        err "sing-box 安装失败"
+        err "请检查网络连接或手动安装"
+        exit 1
+    }
+    
+    # 验证安装
+    if ! command -v sing-box >/dev/null 2>&1; then
+        err "sing-box 安装后未找到可执行文件"
+        exit 1
+    fi
+    
+    INSTALLED_VERSION=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
+    info "sing-box 安装成功: $INSTALLED_VERSION"
+}
+
+install_singbox
+
+# -----------------------
+# 生成密码
+KEY_BYTES=16
+METHOD="2022-blake3-aes-128-gcm"
+
+generate_psk() {
     if [ -n "${USER_PWD:-}" ]; then
         PSK="$USER_PWD"
-        info "使用你输入的密码，请确保为 Base64（或符合协议的字符串）"
+        info "使用指定密码"
     else
-        PSK=""
+        info "自动生成密码..."
+        
+        # 优先使用 sing-box
         if command -v sing-box >/dev/null 2>&1; then
-            PSK="$(sing-box generate rand --base64 "$KEY_BYTES" 2>/dev/null || true)"
+            PSK=$(sing-box generate rand --base64 "$KEY_BYTES" 2>/dev/null | tr -d '\n\r' || true)
         fi
-        if [ -z "$PSK" ] && command -v openssl >/dev/null 2>&1; then
-            PSK="$(openssl rand -base64 "$KEY_BYTES" | tr -d '\n')"
+        
+        # 备选: openssl
+        if [ -z "${PSK:-}" ] && command -v openssl >/dev/null 2>&1; then
+            PSK=$(openssl rand -base64 "$KEY_BYTES" | tr -d '\n\r')
         fi
-        if [ -z "$PSK" ] && command -v python3 >/dev/null 2>&1; then
-            PSK="$(python3 - <<PY
-import base64,os
-print(base64.b64encode(os.urandom($KEY_BYTES)).decode())
-PY
-)"
+        
+        # 最后备选: /dev/urandom
+        if [ -z "${PSK:-}" ]; then
+            PSK=$(head -c "$KEY_BYTES" /dev/urandom | base64 | tr -d '\n\r')
         fi
-        if [ -z "$PSK" ]; then
-            err "无法生成 PSK，请确保系统安装了 openssl 或 python3，或提供密码"
+        
+        if [ -z "${PSK:-}" ]; then
+            err "密码生成失败"
             exit 1
         fi
-        info "自动生成 PSK: $PSK"
+        
+        info "密码生成成功"
     fi
 }
 
+generate_psk
+
 # -----------------------
-# write config
-write_config(){
-    CONFIG_PATH="/etc/sing-box/config.json"
+# 生成配置文件
+CONFIG_PATH="/etc/sing-box/config.json"
+
+create_config() {
+    info "生成配置文件: $CONFIG_PATH"
+    
     mkdir -p "$(dirname "$CONFIG_PATH")"
+    
     cat > "$CONFIG_PATH" <<EOF
 {
-  "log": {"level":"info"},
-  "inbounds":[{"type":"shadowsocks","listen":"::","listen_port":$PORT,"method":"$METHOD","password":"$PSK","tag":"ss2022-in"}],
-  "outbounds":[{"type":"direct","tag":"direct-out"}]
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "shadowsocks",
+      "listen": "::",
+      "listen_port": $PORT,
+      "method": "$METHOD",
+      "password": "$PSK",
+      "tag": "ss2022-in"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct-out"
+    }
+  ]
 }
 EOF
-    info "配置写入 $CONFIG_PATH"
+
+    # 验证配置
+    if command -v sing-box >/dev/null 2>&1; then
+        if sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1; then
+            info "配置文件验证通过"
+        else
+            warn "配置文件验证失败，但将继续..."
+        fi
+    fi
 }
+
+create_config
 
 # -----------------------
-# install service (OpenRC for alpine, systemd otherwise)
-install_service(){
+# 设置服务
+setup_service() {
+    info "配置系统服务..."
+    
     if [ "$OS" = "alpine" ]; then
+        # Alpine OpenRC 服务
         SERVICE_PATH="/etc/init.d/sing-box"
-        info "生成 OpenRC 服务: $SERVICE_PATH"
-        cat > "$SERVICE_PATH" <<'EOF'
+        
+        cat > "$SERVICE_PATH" <<'OPENRC'
 #!/sbin/openrc-run
-command=/usr/bin/sing-box
-command_args="run -c /etc/sing-box/config.json"
-command_background="yes"
-pidfile="/run/sing-box.pid"
+
 name="sing-box"
-description="Sing-box Shadowsocks Server"
+description="Sing-box Proxy Server"
+command="/usr/bin/sing-box"
+command_args="run -c /etc/sing-box/config.json"
+pidfile="/run/${RC_SVCNAME}.pid"
+command_background="yes"
+output_log="/var/log/sing-box.log"
+error_log="/var/log/sing-box.err"
+
 depend() {
     need net
+    after firewall
 }
-EOF
-        chmod +x "$SERVICE_PATH"
-        rc-update add sing-box default || warn "rc-update add 失败"
-        rc-service sing-box start || warn "rc-service start 失败，请手动尝试：rc-service sing-box start"
-        info "OpenRC 服务已尝试启动并添加开机自启"
+
+start_pre() {
+    checkpath --directory --mode 0755 /var/log
+    checkpath --directory --mode 0755 /run
+}
+
+start_post() {
+    sleep 1
+    if [ -f "$pidfile" ]; then
+        einfo "Sing-box started successfully (PID: $(cat $pidfile))"
     else
-        if command -v systemctl >/dev/null 2>&1; then
-            SERVICE_PATH="/etc/systemd/system/sing-box.service"
-            info "生成 systemd 服务: $SERVICE_PATH"
-            cat > "$SERVICE_PATH" <<'UNIT'
+        ewarn "Sing-box may not have started correctly"
+    fi
+}
+OPENRC
+        
+        chmod +x "$SERVICE_PATH"
+        
+        # 添加到开机自启
+        rc-update add sing-box default >/dev/null 2>&1 || warn "添加开机自启失败"
+        
+        # 启动服务
+        rc-service sing-box restart || {
+            err "服务启动失败，查看日志："
+            tail -20 /var/log/sing-box.err 2>/dev/null || tail -20 /var/log/sing-box.log 2>/dev/null || true
+            exit 1
+        }
+        
+        sleep 2
+        
+        if rc-service sing-box status >/dev/null 2>&1; then
+            info "✅ OpenRC 服务已启动"
+        else
+            err "服务状态异常"
+            exit 1
+        fi
+        
+    else
+        # Systemd 服务
+        SERVICE_PATH="/etc/systemd/system/sing-box.service"
+        
+        cat > "$SERVICE_PATH" <<'SYSTEMD'
 [Unit]
-Description=Sing-box Shadowsocks Server
-After=network.target
+Description=Sing-box Proxy Server
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
+Wants=network.target
 
 [Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/sing-box
 ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
+RestartSec=10s
 LimitNOFILE=1048576
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
-UNIT
-            systemctl daemon-reload || true
-            systemctl enable --now sing-box || warn "systemctl enable/start 失败，请手动运行 systemctl start sing-box"
+SYSTEMD
+        
+        systemctl daemon-reload
+        systemctl enable sing-box >/dev/null 2>&1
+        systemctl restart sing-box || {
+            err "服务启动失败，查看日志："
+            journalctl -u sing-box -n 30 --no-pager
+            exit 1
+        }
+        
+        sleep 2
+        
+        if systemctl is-active sing-box >/dev/null 2>&1; then
+            info "✅ Systemd 服务已启动"
         else
-            warn "未检测到 systemd，跳过自动安装服务。你可以手动用 /usr/bin/sing-box run -c /etc/sing-box/config.json 启动"
+            err "服务状态异常"
+            systemctl status sing-box --no-pager
+            exit 1
         fi
     fi
+    
+    info "服务配置完成: $SERVICE_PATH"
 }
 
+setup_service
+
 # -----------------------
-# get public IP (best-effort)
-get_public_ip(){
-    for url in "https://ipinfo.io/ip" "https://ipv4.icanhazip.com" "https://ifconfig.co/ip" "https://api.ipify.org"; do
-        ip=$(curl -fsm5 "$url" || true)
-        if [ -n "$ip" ]; then
-            echo "$ip" | tr -d '[:space:]'
+# 获取公网 IP
+get_public_ip() {
+    local ip=""
+    for url in \
+        "https://api.ipify.org" \
+        "https://ipinfo.io/ip" \
+        "https://ifconfig.me" \
+        "https://icanhazip.com" \
+        "https://ipecho.net/plain"; do
+        ip=$(curl -s --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]' || true)
+        if [ -n "$ip" ] && [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "$ip"
             return 0
         fi
     done
     return 1
 }
 
-# -----------------------
-# generate SS links
-make_ss_links(){
-    HOST="$1"
-    TAG="singbox-ss2022"
-    USERINFO="${METHOD}:${PSK}"
+PUB_IP=$(get_public_ip || echo "YOUR_SERVER_IP")
+if [ "$PUB_IP" = "YOUR_SERVER_IP" ]; then
+    warn "无法获取公网 IP，请手动替换"
+else
+    info "检测到公网 IP: $PUB_IP"
+fi
 
+# -----------------------
+# 生成 SS URI
+generate_uri() {
+    local host="$PUB_IP"
+    local tag="singbox-ss2022"
+    local userinfo="${METHOD}:${PSK}"
+    
+    # SIP002 格式 (URL编码)
+    local encoded_userinfo
     if command -v python3 >/dev/null 2>&1; then
-        ENC_USERINFO=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$USERINFO")
-        BASE64_USERINFO=$(python3 -c "import base64,sys; s=sys.argv[1].encode(); print(base64.b64encode(s).decode())" "$USERINFO")
+        encoded_userinfo=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$userinfo', safe=''))" 2>/dev/null || echo "$userinfo")
     else
-        ENC_USERINFO=$(printf "%s" "$USERINFO" | jq -s -R -r @uri 2>/dev/null || printf "%s" "$USERINFO")
-        BASE64_USERINFO=$(printf "%s" "$USERINFO" | base64 | tr -d '\n')
+        encoded_userinfo=$(printf "%s" "$userinfo" | sed 's/:/%3A/g; s/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
     fi
-
-    SS_SIP002="ss://${ENC_USERINFO}@${HOST}:${PORT}#${TAG}"
-    SS_BASE64="ss://${BASE64_USERINFO}@${HOST}:${PORT}#${TAG}"
-
-    echo "$SS_SIP002"
-    echo "$SS_BASE64"
+    
+    # Base64 格式
+    local base64_userinfo=$(printf "%s" "$userinfo" | base64 -w0 2>/dev/null || printf "%s" "$userinfo" | base64 | tr -d '\n')
+    
+    echo "ss://${encoded_userinfo}@${host}:${PORT}#${tag}"
+    echo "ss://${base64_userinfo}@${host}:${PORT}#${tag}"
 }
 
 # -----------------------
-# main
-main(){
-    detect_env
-    prompt_user
-    install_deps
-    install_singbox
-    generate_psk
-    write_config
-    install_service
-
-    PUB_IP="$(get_public_ip || true)"
-    if [ -z "$PUB_IP" ]; then
-        warn "无法自动获取公网 IP，请手动使用服务器 IP 生成客户端链接"
-        PUB_IP="YOUR_SERVER_IP"
-    else
-        info "检测到公网 IP: $PUB_IP"
-    fi
-
-    info ""
-    info "==================== 生成的 ss 链接 ===================="
-    make_ss_links "$PUB_IP" | sed -e 's/^/    /'
-    info "======================================================="
-    info "部署完成 ✅"
-    info "端口: $PORT"
-    info "PSK: $PSK"
-    info "配置文件: $CONFIG_PATH"
-    info "服务路径: ${SERVICE_PATH:-手动启动}"
-}
-
-# run
-main "$@"
+# 最终输出
+echo ""
+echo "=========================================="
+info "🎉 Sing-box 部署完成！"
+echo "=========================================="
+echo ""
+info "📋 配置信息："
+echo "   端口: $PORT"
+echo "   方法: $METHOD"
+echo "   密码: $PSK"
+echo "   服务器: $PUB_IP"
+echo ""
+info "📁 文件位置："
+echo "   配置: $CONFIG_PATH"
+echo "   服务: $SERVICE_PATH"
+echo ""
+info "🔗 客户端链接："
+generate_uri | while IFS= read -r line; do
+    echo "   $line"
+done
+echo ""
+info "🔧 管理命令："
+if [ "$OS" = "alpine" ]; then
+    echo "   启动: rc-service sing-box start"
+    echo "   停止: rc-service sing-box stop"
+    echo "   重启: rc-service sing-box restart"
+    echo "   状态: rc-service sing-box status"
+    echo "   日志: tail -f /var/log/sing-box.log"
+else
+    echo "   启动: systemctl start sing-box"
+    echo "   停止: systemctl stop sing-box"
+    echo "   重启: systemctl restart sing-box"
+    echo "   状态: systemctl status sing-box"
+    echo "   日志: journalctl -u sing-box -f"
+fi
+echo ""
+echo "=========================================="
