@@ -813,10 +813,10 @@ UUID=$(cat /proc/sys/kernel/random/uuid)
 info "生成 Reality 密钥对"
 # 生成 Reality 密钥对
 REALITY_KEYS=$(sing-box generate reality-keypair)
-# 提取私钥（服务器配置用）
-REALITY_PK=$(echo "$REALITY_KEYS" | awk '{print $2}')
-# 提取公钥（客户端链接用）
-REALITY_PUB=$(echo "$REALITY_KEYS" | awk '{print $4}')
+# 提取私钥（用最后一个字段）
+REALITY_PK=$(echo "$REALITY_KEYS" | awk '{print $NF}' | tail -1)
+# 提取公钥（用倒数第二行的最后一个字段）  
+REALITY_PUB=$(echo "$REALITY_KEYS" | awk 'NR==2 {print $NF}')
 # 生成随机 Short ID (8字节 hex)
 REALITY_SID=$(sing-box generate rand 8 --hex)
 info "Reality PK: $REALITY_PK"
