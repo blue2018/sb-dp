@@ -811,9 +811,9 @@ install_singbox() {
 install_singbox
 UUID=$(cat /proc/sys/kernel/random/uuid)
 info "生成 Reality 私钥"
-REALITY_PK=$(sing-box generate reality-keypair --disable-color | grep 'PrivateKey' | awk '{print $2}')
+REALITY_PK=$(sing-box generate reality-keypair)
 # 生成随机 Short ID (8字节 hex)
-REALITY_SID=$(xxd -p -l 8 /dev/urandom)
+REALITY_SID=$(sing-box generate rand 8 --hex)
 info "Reality PK: $REALITY_PK"
 info "Reality SID: $REALITY_SID"
 
@@ -842,7 +842,7 @@ cat > /etc/sing-box/config.json <<EOF
       "type": "vless",
       "listen": "::",
       "listen_port": $LISTEN_PORT,
-      "outbound": "relay-out",
+      "sniff": true,
       "users": [
         {
           "uuid": "$UUID",
@@ -861,7 +861,8 @@ cat > /etc/sing-box/config.json <<EOF
           "private_key": "$REALITY_PK",
           "short_id": [
             "$REALITY_SID"
-          ]
+          ],
+          "max_time_difference": "1m"
         }
       },
       "tag": "vless-in"
@@ -880,7 +881,15 @@ cat > /etc/sing-box/config.json <<EOF
       "type": "direct",
       "tag": "direct-out"
     }
-  ]
+  ],
+  "route": {
+    "rules": [
+      {
+        "inbound": "vless-in",
+        "outbound": "relay-out"
+      }
+    ]
+  }
 }
 EOF
 if [ "$OS" = "alpine" ]; then
