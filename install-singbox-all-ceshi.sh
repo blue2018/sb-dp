@@ -261,11 +261,10 @@ CONFIG_PATH="/etc/sing-box/config.json"
 
 create_config() {
     info "生成配置文件: $CONFIG_PATH"
-    
+
     mkdir -p "$(dirname "$CONFIG_PATH")"
-    
-    # 生成完整的 JSON 配置文件
-    cat > "$CONFIG_PATH" <<'CONFIGEOF'
+
+    cat > "$CONFIG_PATH" <<EOF
 {
   "log": {
     "level": "info",
@@ -275,19 +274,19 @@ create_config() {
     {
       "type": "shadowsocks",
       "listen": "::",
-      "listen_port": PORT_SS_VALUE,
+      "listen_port": $PORT_SS,
       "method": "2022-blake3-aes-128-gcm",
-      "password": "PSK_SS_VALUE",
+      "password": "$PSK_SS",
       "tag": "ss-in"
     },
     {
       "type": "hysteria2",
       "tag": "hy2-in",
       "listen": "::",
-      "listen_port": PORT_HY2_VALUE,
+      "listen_port": $PORT_HY2,
       "users": [
         {
-          "password": "PSK_HY2_VALUE"
+          "password": "$PSK_HY2"
         }
       ],
       "tls": {
@@ -301,72 +300,11 @@ create_config() {
       "type": "vless",
       "tag": "vless-in",
       "listen": "::",
-      "listen_port": PORT_REALITY_VALUE,
+      "listen_port": $PORT_REALITY,
       "users": [
         {
-          "uuid": "UUID_VALUE",
+          "uuid": "$UUID",
           "flow": "xtls-rprx-vision"
-        }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "addons.mozilla.org",
-        "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": "addons.mozilla.org",
-            "server_port": 443
-          },
-          "private_key": "REALITY_PK_VALUE",
-          "short_id": ["REALITY_SID_VALUE"]
-        }
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct-out"
-    }
-  ]
-}
-CONFIGEOF
-
-    # 替换占位符
-    sed -i "s|PORT_SS_VALUE|$PORT_SS|g" "$CONFIG_PATH"
-    sed -i "s|PSK_SS_VALUE|$PSK_SS|g" "$CONFIG_PATH"
-    sed -i "s|PORT_HY2_VALUE|$PORT_HY2|g" "$CONFIG_PATH"
-    sed -i "s|PSK_HY2_VALUE|$PSK_HY2|g" "$CONFIG_PATH"
-    sed -i "s|PORT_REALITY_VALUE|$PORT_REALITY|g" "$CONFIG_PATH"
-    sed -i "s|UUID_VALUE|$UUID|g" "$CONFIG_PATH"
-    sed -i "s|REALITY_PK_VALUE|$REALITY_PK|g" "$CONFIG_PATH"
-    sed -i "s|REALITY_SID_VALUE|$REALITY_SID|g" "$CONFIG_PATH"
-
-    if command -v sing-box >/dev/null 2>&1; then
-        if sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1; then
-            info "配置文件验证通过"
-        else
-            warn "配置文件验证失败，但将继续..."
-        fi
-    fi
-    
-    # 保存所有配置到独立文件供 sb 脚本读取
-    mkdir -p /etc/sing-box
-    cat > /etc/sing-box/.config_cache <<CACHEEOF
-SS_PORT=$PORT_SS
-SS_PSK=$PSK_SS
-SS_METHOD=2022-blake3-aes-128-gcm
-HY2_PORT=$PORT_HY2
-HY2_PSK=$PSK_HY2
-REALITY_PORT=$PORT_REALITY
-REALITY_UUID=$UUID
-REALITY_PK=$REALITY_PK
-REALITY_SID=$REALITY_SID
-REALITY_PUB=$REALITY_PUB
-CACHEEOF
-    
-    info "配置缓存已保存到 /etc/sing-box/.config_cache"
-}-rprx-vision"
         }
       ],
       "tls": {
@@ -391,17 +329,12 @@ CACHEEOF
     }
   ]
 }
-CONFIGEOF
+EOF
 
-    if command -v sing-box >/dev/null 2>&1; then
-        if sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1; then
-            info "配置文件验证通过"
-        else
-            warn "配置文件验证失败，但将继续..."
-        fi
-    fi
-    
-    # 保存所有配置到独立文件供 sb 脚本读取
+    sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1 \
+       && info "配置文件验证通过" \
+       || warn "配置文件验证失败，但继续执行"
+
     mkdir -p /etc/sing-box
     cat > /etc/sing-box/.config_cache <<CACHEEOF
 SS_PORT=$PORT_SS
@@ -415,7 +348,7 @@ REALITY_PK=$REALITY_PK
 REALITY_SID=$REALITY_SID
 REALITY_PUB=$REALITY_PUB
 CACHEEOF
-    
+
     info "配置缓存已保存到 /etc/sing-box/.config_cache"
 }
 
