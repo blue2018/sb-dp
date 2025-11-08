@@ -609,23 +609,15 @@ read_config_fields() {
         return 1
     fi
 
-    # 先尝试从缓存文件读取
-    if [ -f /etc/sing-box/.ss_port_cache ]; then
-        SS_PORT=$(cat /etc/sing-box/.ss_port_cache)
-    fi
-    if [ -f /etc/sing-box/.ss_psk_cache ]; then
-        SS_PSK=$(cat /etc/sing-box/.ss_psk_cache)
-    fi
-    if [ -f /etc/sing-box/.hy2_port_cache ]; then
-        HY2_PORT=$(cat /etc/sing-box/.hy2_port_cache)
-    fi
-    if [ -f /etc/sing-box/.hy2_psk_cache ]; then
-        HY2_PSK=$(cat /etc/sing-box/.hy2_psk_cache)
+    # 优先从缓存文件读取（最可靠）
+    if [ -f /etc/sing-box/.config_cache ]; then
+        source /etc/sing-box/.config_cache
+        return 0
     fi
 
-    # 使用 Python 作为主要方法（更可靠）
+    # 备选：使用 Python 解析 JSON
     if command -v python3 >/dev/null 2>&1; then
-        python3 <<'PYSCRIPT'
+        eval "$(python3 <<'PYSCRIPT'
 import json
 import sys
 
@@ -636,39 +628,33 @@ try:
     for ib in config.get('inbounds', []):
         if ib.get('type') == 'shadowsocks':
             print(f"SS_PORT={ib.get('listen_port', '')}")
-            print(f"SS_PSK={ib.get('password', '')}")
+            print(f"SS_PSK='{ib.get('password', '')}'")
             print(f"SS_METHOD={ib.get('method', '')}")
         elif ib.get('type') == 'hysteria2':
             print(f"HY2_PORT={ib.get('listen_port', '')}")
             users = ib.get('users', [])
             if users:
-                print(f"HY2_PSK={users[0].get('password', '')}")
+                print(f"HY2_PSK='{users[0].get('password', '')}'")
         elif ib.get('type') == 'vless':
             print(f"REALITY_PORT={ib.get('listen_port', '')}")
             users = ib.get('users', [])
             if users:
-                print(f"REALITY_UUID={users[0].get('uuid', '')}")
+                print(f"REALITY_UUID='{users[0].get('uuid', '')}'")
             tls = ib.get('tls', {})
             reality = tls.get('reality', {})
-            print(f"REALITY_PK={reality.get('private_key', '')}")
+            print(f"REALITY_PK='{reality.get('private_key', '')}'")
             short_ids = reality.get('short_id', [])
             if short_ids:
-                print(f"REALITY_SID={short_ids[0]}")
+                print(f"REALITY_SID='{short_ids[0]}'")
 except Exception as e:
-    print(f"# Error: {e}", file=sys.stderr)
+    pass
 PYSCRIPT
-    fi > /tmp/config_read.tmp
-    
-    # 从临时文件读取变量
-    [ -f /tmp/config_read.tmp ] && source /tmp/config_read.tmp
-    rm -f /tmp/config_read.tmp
-    
+)"
+    fi
+
     # 从保存的文件读取 Reality 相关信息
     if [ -f /etc/sing-box/.reality_pub ]; then
         REALITY_PUB=$(cat /etc/sing-box/.reality_pub)
-    fi
-    if [ -f /etc/sing-box/.reality_sid ]; then
-        REALITY_SID=$(cat /etc/sing-box/.reality_sid)
     fi
     
     # 设置默认值
@@ -811,9 +797,9 @@ with open('$CONFIG_PATH','w') as f:
     json.dump(c,f,indent=2)
 PY
 
-    # 保存到临时文件确保读取到新值
-    echo "$new_ss_port" > /etc/sing-box/.ss_port_cache
-    echo "$new_ss_psk" > /etc/sing-box/.ss_psk_cache
+    # 更新缓存
+    sed -i "s/^SS_PORT=.*/SS_PORT=$new_ss_port/" /etc/sing-box/.config_cache
+    sed -i "s/^SS_PSK=.*/SS_PSK=$new_ss_psk/" /etc/sing-box/.config_cache
 
     info "已更新 SS 端口($new_ss_port)与密码(隐藏)，正在启动服务..."
     service_start || warn "启动服务失败"
