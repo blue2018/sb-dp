@@ -642,8 +642,7 @@ rand_b64() {
 # encode only a small set of characters common in userinfo
 url_encode_min() {
     local s="$1"
-    # Replace: : + / = % -> percent-encode
-    printf "%s" "$s" | sed -e 's/%/%25/g' -e 's/:/%3A/g' -e 's/+/%2B/g' -e 's/\//%2F/g' -e 's/=/ %3D/g' -e 's/ //g'
+    printf "%s" "$s" | sed -e 's/%/%25/g' -e 's/:/%3A/g' -e 's/+/%2B/g' -e 's/\//%2F/g' -e 's/=/%%3D/g'
 }
 
 # read JSON fields from config using jq
@@ -705,8 +704,8 @@ generate_and_save_uris() {
     # percent encode minimal
     ss_encoded=$(url_encode_min "$ss_userinfo")
     ss_b64=$(printf "%s" "$ss_userinfo" | base64 -w0 2>/dev/null || printf "%s" "$ss_userinfo" | base64 | tr -d '\n')
-
-    hy2_uri="hy2://${HY2_PSK}@${PUBLIC_IP}:${HY2_PORT}/?sni=www.bing.com#singbox-hy2"
+    hy2_encoded=$(url_encode_min "$HY2_PSK")
+    hy2_uri="hy2://${hy2_encoded}@${PUBLIC_IP}:${HY2_PORT}/?sni=www.bing.com#singbox-hy2"
 
     # reality pubkey read file or from config (fallback)
     if [ -f "$REALITY_PUB_FILE" ]; then
