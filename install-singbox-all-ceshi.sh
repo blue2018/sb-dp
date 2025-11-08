@@ -626,26 +626,24 @@ read_config_fields() {
         return 1
     fi
 
-    # 优先从缓存文件读取（最可靠）
+    # 优先从缓存文件读取
     if [ -f /etc/sing-box/.config_cache ]; then
         source /etc/sing-box/.config_cache
         return 0
     fi
 
-    # 备选：使用 jq 解析 JSON
-    if command -v jq >/dev/null 2>&1; then
-        SS_PORT=$(jq -r '.inbounds[] | select(.type=="shadowsocks") | .listen_port' "$CONFIG_PATH" 2>/dev/null | head -1)
-        SS_PSK=$(jq -r '.inbounds[] | select(.type=="shadowsocks") | .password' "$CONFIG_PATH" 2>/dev/null | head -1)
-        SS_METHOD=$(jq -r '.inbounds[] | select(.type=="shadowsocks") | .method' "$CONFIG_PATH" 2>/dev/null | head -1)
-        
-        HY2_PORT=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' "$CONFIG_PATH" 2>/dev/null | head -1)
-        HY2_PSK=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .users[0].password' "$CONFIG_PATH" 2>/dev/null | head -1)
-        
-        REALITY_PORT=$(jq -r '.inbounds[] | select(.type=="vless") | .listen_port' "$CONFIG_PATH" 2>/dev/null | head -1)
-        REALITY_UUID=$(jq -r '.inbounds[] | select(.type=="vless") | .users[0].uuid' "$CONFIG_PATH" 2>/dev/null | head -1)
-        REALITY_PK=$(jq -r '.inbounds[] | select(.type=="vless") | .tls.reality.private_key' "$CONFIG_PATH" 2>/dev/null | head -1)
-        REALITY_SID=$(jq -r '.inbounds[] | select(.type=="vless") | .tls.reality.short_id[0]' "$CONFIG_PATH" 2>/dev/null | head -1)
-    fi
+    # 使用纯 sed 解析（兼容所有系统）
+    SS_PORT=$(sed -n '/"type": "shadowsocks"/,/}/p' "$CONFIG_PATH" | sed -n 's/.*"listen_port": \([0-9]*\).*/\1/p' | head -1)
+    SS_PSK=$(sed -n '/"type": "shadowsocks"/,/}/p' "$CONFIG_PATH" | sed -n 's/.*"password": "\([^"]*\)".*/\1/p' | head -1)
+    SS_METHOD=$(sed -n '/"type": "shadowsocks"/,/}/p' "$CONFIG_PATH" | sed -n 's/.*"method": "\([^"]*\)".*/\1/p' | head -1)
+
+    HY2_PORT=$(sed -n '/"type": "hysteria2"/,/}/p' "$CONFIG_PATH" | sed -n 's/.*"listen_port": \([0-9]*\).*/\1/p' | head -1)
+    HY2_PSK=$(sed -n '/"type": "hysteria2"/,/]/p' "$CONFIG_PATH" | sed -n 's/.*"password": "\([^"]*\)".*/\1/p' | head -1)
+
+    REALITY_PORT=$(sed -n '/"type": "vless"/,/}/p' "$CONFIG_PATH" | sed -n 's/.*"listen_port": \([0-9]*\).*/\1/p' | head -1)
+    REALITY_UUID=$(sed -n '/"type": "vless"/,/]/p' "$CONFIG_PATH" | sed -n 's/.*"uuid": "\([^"]*\)".*/\1/p' | head -1)
+    REALITY_PK=$(sed -n '/"reality"/,/}/p' "$CONFIG_PATH" | sed -n 's/.*"private_key": "\([^"]*\)".*/\1/p' | head -1)
+    REALITY_SID=$(sed -n '/"short_id"/,/]/p' "$CONFIG_PATH" | sed -n 's/.*"\([^"]*\)".*/\1/p' | head -1)
 
     # 从保存的文件读取 Reality 相关信息
     if [ -f /etc/sing-box/.reality_pub ]; then
@@ -778,23 +776,13 @@ action_reset_ss() {
     info "正在停止服务..."
     service_stop || warn "停止服务失败"
 
-    # Update SS inbound only
-    python3 - <<PY
-import json
-with open('$CONFIG_PATH') as f:
-    c=json.load(f)
-for ib in c.get('inbounds',[]):
-    if ib.get('type')=='shadowsocks':
-        ib['listen_port']=$new_ss_port
-        ib['password']='$new_ss_psk'
-        break
-with open('$CONFIG_PATH','w') as f:
-    json.dump(c,f,indent=2)
-PY
+    # Update SS inbound using sed
+    sed -i "/\"type\": \"shadowsocks\"/,/}/s/\"listen_port\": [0-9]*/\"listen_port\": $new_ss_port/" "$CONFIG_PATH"
+    sed -i "/\"type\": \"shadowsocks\"/,/}/s/\"password\": \"[^\"]*\"/\"password\": \"$new_ss_psk\"/" "$CONFIG_PATH"
 
     # 更新缓存
-    sed -i "s/^SS_PORT=.*/SS_PORT=$new_ss_port/" /etc/sing-box/.config_cache
-    sed -i "s/^SS_PSK=.*/SS_PSK=$new_ss_psk/" /etc/sing-box/.config_cache
+    [ -f /etc/sing-box/.config_cache ] && sed -i "s/^SS_PORT=.*/SS_PORT=$new_ss_port/" /etc/sing-box/.config_cache
+    [ -f /etc/sing-box/.config_cache ] && sed -i "s/^SS_PSK=.*/SS_PSK=$new_ss_psk/" /etc/sing-box/.config_cache
 
     info "已更新 SS 端口($new_ss_port)与密码(隐藏)，正在启动服务..."
     service_start || warn "启动服务失败"
@@ -816,24 +804,13 @@ action_reset_hy2() {
     info "正在停止服务..."
     service_stop || warn "停止服务失败"
 
-    python3 - <<PY
-import json
-with open('$CONFIG_PATH') as f:
-    c=json.load(f)
-for ib in c.get('inbounds',[]):
-    if ib.get('type')=='hysteria2':
-        ib['listen_port']=$new_hy2_port
-        users=ib.get('users',[])
-        if users:
-            users[0]['password']='$new_hy2_psk'
-        break
-with open('$CONFIG_PATH','w') as f:
-    json.dump(c,f,indent=2)
-PY
+    # Update HY2 inbound using sed
+    sed -i "/\"type\": \"hysteria2\"/,/}/s/\"listen_port\": [0-9]*/\"listen_port\": $new_hy2_port/" "$CONFIG_PATH"
+    sed -i "/\"type\": \"hysteria2\"/,/}/s/\"password\": \"[^\"]*\"/\"password\": \"$new_hy2_psk\"/" "$CONFIG_PATH"
 
     # 更新缓存
-    sed -i "s/^HY2_PORT=.*/HY2_PORT=$new_hy2_port/" /etc/sing-box/.config_cache
-    sed -i "s/^HY2_PSK=.*/HY2_PSK=$new_hy2_psk/" /etc/sing-box/.config_cache
+    [ -f /etc/sing-box/.config_cache ] && sed -i "s/^HY2_PORT=.*/HY2_PORT=$new_hy2_port/" /etc/sing-box/.config_cache
+    [ -f /etc/sing-box/.config_cache ] && sed -i "s/^HY2_PSK=.*/HY2_PSK=$new_hy2_psk/" /etc/sing-box/.config_cache
 
     info "已更新 HY2 端口($new_hy2_port)与密码(隐藏)，正在启动服务..."
     service_start || warn "启动服务失败"
@@ -857,20 +834,13 @@ action_reset_reality() {
     info "正在停止服务..."
     service_stop || warn "停止服务失败"
 
-    python3 - <<PY
-import json
-with open('$CONFIG_PATH') as f:
-    c=json.load(f)
-for ib in c.get('inbounds',[]):
-    if ib.get('type')=='vless':
-        ib['listen_port']=$new_reality_port
-        users=ib.get('users',[])
-        if users:
-            users[0]['uuid']='$new_reality_uuid'
-        break
-with open('$CONFIG_PATH','w') as f:
-    json.dump(c,f,indent=2)
-PY
+    # Update Reality inbound using sed
+    sed -i "/\"type\": \"vless\"/,/}/s/\"listen_port\": [0-9]*/\"listen_port\": $new_reality_port/" "$CONFIG_PATH"
+    sed -i "/\"type\": \"vless\"/,/}/s/\"uuid\": \"[^\"]*\"/\"uuid\": \"$new_reality_uuid\"/" "$CONFIG_PATH"
+
+    # 更新缓存
+    [ -f /etc/sing-box/.config_cache ] && sed -i "s/^REALITY_PORT=.*/REALITY_PORT=$new_reality_port/" /etc/sing-box/.config_cache
+    [ -f /etc/sing-box/.config_cache ] && sed -i "s/^REALITY_UUID=.*/REALITY_UUID=$new_reality_uuid/" /etc/sing-box/.config_cache
 
     info "已更新 Reality 端口($new_reality_port)与 UUID(隐藏)，正在启动服务..."
     service_start || warn "启动服务失败"
