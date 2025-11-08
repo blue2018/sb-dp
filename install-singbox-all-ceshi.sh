@@ -282,7 +282,7 @@ create_config() {
     {
       "type": "hysteria2",
       "tag": "hy2-in",
-      "listen": "0.0.0.0",
+      "listen": "::",
       "listen_port": $PORT_HY2,
       "users": [
         {
