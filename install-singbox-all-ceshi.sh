@@ -66,13 +66,13 @@ install_deps() {
         debian)
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -y || { err "apt update 失败"; exit 1; }
-            apt-get install -y curl ca-certificates openssl || {
+            apt-get install -y curl ca-certificates openssl jq || {
                 err "依赖安装失败"
                 exit 1
             }
             ;;
         redhat)
-            yum install -y curl ca-certificates openssl || {
+            yum install -y curl ca-certificates openssl jq || {
                 err "依赖安装失败"
                 exit 1
             }
@@ -216,9 +216,14 @@ install_singbox
 generate_reality_keys() {
     info "生成 Reality 密钥对..."
     REALITY_KEYS=$(sing-box generate reality-keypair)
-    REALITY_PK=$(echo "$REALITY_KEYS" | grep "PrivateKey" | awk '{print $NF}')
-    REALITY_PUB=$(echo "$REALITY_KEYS" | grep "PublicKey" | awk '{print $NF}')
+    REALITY_PK=$(echo "$REALITY_KEYS" | grep "PrivateKey" | awk '{print $NF}' | tr -d '\r')
+    REALITY_PUB=$(echo "$REALITY_KEYS" | grep "PublicKey" | awk '{print $NF}' | tr -d '\r')
     REALITY_SID=$(sing-box generate rand 8 --hex)
+    
+    # 立即保存公钥和 SID
+    mkdir -p /etc/sing-box
+    echo -n "$REALITY_PUB" > /etc/sing-box/.reality_pub
+    echo -n "$REALITY_SID" > /etc/sing-box/.reality_sid
     
     info "Reality PK: $REALITY_PK"
     info "Reality PUB: $REALITY_PUB"
@@ -259,7 +264,8 @@ create_config() {
     
     mkdir -p "$(dirname "$CONFIG_PATH")"
     
-    cat > "$CONFIG_PATH" <<EOF
+    # 生成完整的 JSON 配置文件
+    cat > "$CONFIG_PATH" <<CONFIGEOF
 {
   "log": {
     "level": "info",
@@ -324,7 +330,7 @@ create_config() {
     }
   ]
 }
-EOF
+CONFIGEOF
 
     if command -v sing-box >/dev/null 2>&1; then
         if sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1; then
@@ -336,7 +342,7 @@ EOF
     
     # 保存所有配置到独立文件供 sb 脚本读取
     mkdir -p /etc/sing-box
-    cat > /etc/sing-box/.config_cache <<CACHE
+    cat > /etc/sing-box/.config_cache <<CACHEEOF
 SS_PORT=$PORT_SS
 SS_PSK=$PSK_SS
 SS_METHOD=2022-blake3-aes-128-gcm
@@ -347,7 +353,58 @@ REALITY_UUID=$UUID
 REALITY_PK=$REALITY_PK
 REALITY_SID=$REALITY_SID
 REALITY_PUB=$REALITY_PUB
-CACHE
+CACHEEOF
+    
+    info "配置缓存已保存到 /etc/sing-box/.config_cache"
+}-rprx-vision"
+        }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "addons.mozilla.org",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "addons.mozilla.org",
+            "server_port": 443
+          },
+          "private_key": "$REALITY_PK",
+          "short_id": ["$REALITY_SID"]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct-out"
+    }
+  ]
+}
+CONFIGEOF
+
+    if command -v sing-box >/dev/null 2>&1; then
+        if sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1; then
+            info "配置文件验证通过"
+        else
+            warn "配置文件验证失败，但将继续..."
+        fi
+    fi
+    
+    # 保存所有配置到独立文件供 sb 脚本读取
+    mkdir -p /etc/sing-box
+    cat > /etc/sing-box/.config_cache <<CACHEEOF
+SS_PORT=$PORT_SS
+SS_PSK=$PSK_SS
+SS_METHOD=2022-blake3-aes-128-gcm
+HY2_PORT=$PORT_HY2
+HY2_PSK=$PSK_HY2
+REALITY_PORT=$PORT_REALITY
+REALITY_UUID=$UUID
+REALITY_PK=$REALITY_PK
+REALITY_SID=$REALITY_SID
+REALITY_PUB=$REALITY_PUB
+CACHEEOF
     
     info "配置缓存已保存到 /etc/sing-box/.config_cache"
 }
@@ -541,7 +598,6 @@ else
 fi
 echo ""
 echo "=========================================="
-
 # -----------------------
 # Create `sb` management script at /usr/local/bin/sb
 
@@ -757,20 +813,21 @@ PY
     fi
     ss_b64=$(printf "%s" "$ss_userinfo" | base64 -w0 2>/dev/null || printf "%s" "$ss_userinfo" | base64 | tr -d '\n')
 
-    # HY2 URI
-    hy2_uri="hy2://${HY2_PSK}@${PUBLIC_IP}:${HY2_PORT}/?sni=www.bing.com#singbox-hy2"
+    # HY2 URI - 去掉密码中的换行符和空格
+    HY2_PSK_CLEAN=$(echo -n "$HY2_PSK" | tr -d '\n\r ')
+    hy2_uri="hy2://${HY2_PSK_CLEAN}@${PUBLIC_IP}:${HY2_PORT}/?sni=www.bing.com#singbox-hy2"
 
     # Read pub key from stored file
     if [ -f "$REALITY_PUB_FILE" ]; then
-        REALITY_PUB=$(cat "$REALITY_PUB_FILE")
+        REALITY_PUB=$(cat "$REALITY_PUB_FILE" | tr -d '\n\r ')
     else
         REALITY_PUB="UNKNOWN"
     fi
     
     # Read SID from stored file or config
-    if [ -z "$REALITY_SID" ]; then
+    if [ -z "$REALITY_SID" ] || [ "$REALITY_SID" = "UNKNOWN" ]; then
         if [ -f "/etc/sing-box/.reality_sid" ]; then
-            REALITY_SID=$(cat /etc/sing-box/.reality_sid)
+            REALITY_SID=$(cat /etc/sing-box/.reality_sid | tr -d '\n\r ')
         else
             REALITY_SID="UNKNOWN"
         fi
