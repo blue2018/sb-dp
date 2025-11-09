@@ -568,7 +568,7 @@ SB_PATH="/usr/local/bin/sb"
 
 info "正在创建 sb 管理脚本: $SB_PATH"
 
-cat > "$SB_PATH" <<SB_SCRIPT
+cat > "$SB_PATH" <<'SB_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 # 用户输入的后缀
