@@ -562,11 +562,11 @@ generate_uris() {
     echo ""
     
     echo "=== Hysteria2 (HY2) ==="
-    echo "hy2://${hy2_encoded}@${host}:${PORT_HY2}/?sni=www.bing.com&insecure=1#hy2${suffix}"
+    echo "hy2://${hy2_encoded}@${host}:${PORT_HY2}/?sni=www.bing.com&alpn=h3&insecure=1#hy2${suffix}"
     echo ""
 
     echo "=== TUIC ==="
-    echo "tuic://${UUID_TUIC}:${tuic_encoded}@${host}:${PORT_TUIC}/?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=www.bing.com&allow_insecure=1#tuic${suffix}"
+    echo "tuic://${UUID_TUIC}:${tuic_encoded}@${host}:${PORT_TUIC}/?congestion_control=bbr&alpn=h3&sni=www.bing.com&insecure=1#tuic${suffix}"
     echo ""
     
     echo "=== VLESS Reality ==="
@@ -808,10 +808,10 @@ generate_and_save_uris() {
         echo "ss://${ss_b64}@${PUBLIC_IP}:${SS_PORT}#ss${node_suffix}"
         echo ""
         echo "=== Hysteria2 (HY2) ==="
-        echo "hy2://${hy2_encoded}@${PUBLIC_IP}:${HY2_PORT}/?sni=www.bing.com&insecure=1#hy2${node_suffix}"
+        echo "hy2://${hy2_encoded}@${PUBLIC_IP}:${HY2_PORT}/?sni=www.bing.com&alpn=h3&insecure=1#hy2${node_suffix}"
         echo ""
         echo "=== TUIC ==="
-        echo "tuic://${TUIC_UUID}:${tuic_encoded}@${PUBLIC_IP}:${TUIC_PORT}/?congestion_control=bbr&udp_relay_mode=native&alpn=h3&sni=www.bing.com&allow_insecure=1#tuic${node_suffix}"
+        echo "tuic://${TUIC_UUID}:${tuic_encoded}@${PUBLIC_IP}:${TUIC_PORT}/?congestion_control=bbr&alpn=h3&sni=www.bing.com&insecure=1#tuic${node_suffix}"
         echo ""
         echo "=== VLESS Reality ==="
         echo "vless://${REALITY_UUID}@${PUBLIC_IP}:${REALITY_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=addons.mozilla.org&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}#reality${node_suffix}"
