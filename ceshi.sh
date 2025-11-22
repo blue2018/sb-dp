@@ -134,6 +134,7 @@ select_protocols() {
     echo "请输入要部署的协议编号(多个用空格分隔,如: 1 2 4):"
     read -r protocol_input
     
+    # 使用全局变量
     ENABLE_SS=false
     ENABLE_HY2=false
     ENABLE_TUIC=false
@@ -154,7 +155,8 @@ select_protocols() {
         exit 1
     fi
     
-    # 保存协议选择
+    # 保存协议选择到文件（确保持久化）
+    mkdir -p /etc/sing-box
     cat > /etc/sing-box/.protocols <<EOF
 ENABLE_SS=$ENABLE_SS
 ENABLE_HY2=$ENABLE_HY2
@@ -167,6 +169,12 @@ EOF
     $ENABLE_HY2 && echo "  - Hysteria2"
     $ENABLE_TUIC && echo "  - TUIC"
     $ENABLE_REALITY && echo "  - VLESS Reality"
+    
+    # 导出为全局变量（确保后续脚本可以访问）
+    export ENABLE_SS
+    export ENABLE_HY2
+    export ENABLE_TUIC
+    export ENABLE_REALITY
 }
 
 # 创建配置目录
