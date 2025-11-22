@@ -83,6 +83,33 @@ install_deps() {
 install_deps
 
 # -----------------------
+# 工具函数
+# 生成随机端口
+rand_port() {
+    local port
+    port=$(shuf -i 10000-60000 -n 1 2>/dev/null) || port=$((RANDOM % 50001 + 10000))
+    echo "$port"
+}
+
+# 生成随机密码
+rand_pass() {
+    local pass
+    pass=$(openssl rand -base64 16 2>/dev/null | tr -d '\n\r') || pass=$(head -c 16 /dev/urandom | base64 2>/dev/null | tr -d '\n\r')
+    echo "$pass"
+}
+
+# 生成UUID
+rand_uuid() {
+    local uuid
+    if [ -f /proc/sys/kernel/random/uuid ]; then
+        uuid=$(cat /proc/sys/kernel/random/uuid)
+    else
+        uuid=$(openssl rand -hex 16 | sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\1\2\3\4-\5\6-\7\8-\9\10-\11\12\13\14\15\16/')
+    fi
+    echo "$uuid"
+}
+
+# -----------------------
 # 配置节点名称后缀
 echo "请输入节点名称(留空则默认协议名):"
 read -r user_name
@@ -164,6 +191,8 @@ rand_uuid() {
 # -----------------------
 # 配置端口和密码
 get_config() {
+    info "开始配置端口和密码..."
+    
     if $ENABLE_SS; then
         info "=== 配置 Shadowsocks (SS) ==="
         if [ -n "${SINGBOX_PORT_SS:-}" ]; then
@@ -216,9 +245,13 @@ get_config() {
         info "Reality 端口: $PORT_REALITY"
         info "Reality UUID 已自动生成"
     fi
+    
+    info "配置完成，继续安装..."
 }
 
 get_config
+
+info "开始安装 sing-box..."
 
 # -----------------------
 # 安装 sing-box
@@ -271,14 +304,33 @@ install_singbox
 # 生成 Reality 密钥对
 generate_reality_keys() {
     if ! $ENABLE_REALITY; then
+        info "跳过 Reality 密钥生成（未选择 Reality 协议）"
         return 0
     fi
     
     info "生成 Reality 密钥对..."
-    REALITY_KEYS=$(sing-box generate reality-keypair)
+    
+    if ! command -v sing-box >/dev/null 2>&1; then
+        err "sing-box 未安装，无法生成 Reality 密钥"
+        exit 1
+    fi
+    
+    REALITY_KEYS=$(sing-box generate reality-keypair 2>&1) || {
+        err "生成 Reality 密钥失败"
+        exit 1
+    }
+    
     REALITY_PK=$(echo "$REALITY_KEYS" | grep "PrivateKey" | awk '{print $NF}' | tr -d '\r')
     REALITY_PUB=$(echo "$REALITY_KEYS" | grep "PublicKey" | awk '{print $NF}' | tr -d '\r')
-    REALITY_SID=$(sing-box generate rand 8 --hex)
+    REALITY_SID=$(sing-box generate rand 8 --hex 2>&1) || {
+        err "生成 Reality ShortID 失败"
+        exit 1
+    }
+    
+    if [ -z "$REALITY_PK" ] || [ -z "$REALITY_PUB" ] || [ -z "$REALITY_SID" ]; then
+        err "Reality 密钥生成结果为空"
+        exit 1
+    fi
     
     mkdir -p /etc/sing-box
     echo -n "$REALITY_PUB" > /etc/sing-box/.reality_pub
