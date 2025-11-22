@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# 临时禁用 -u 选项来调试
+set -eo pipefail
 
 # -----------------------
 # 彩色输出函数
