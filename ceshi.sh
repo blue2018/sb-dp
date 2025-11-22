@@ -325,24 +325,22 @@ create_config() {
 
     mkdir -p "$(dirname "$CONFIG_PATH")"
 
-    # 构建 inbounds 数组
-    INBOUNDS=""
+    # 构建 inbounds 数组（使用数组避免逗号问题）
+    INBOUNDS_ARRAY=()
     
     if $ENABLE_SS; then
-        INBOUNDS="$INBOUNDS"'
-    {
+        INBOUNDS_ARRAY+=('    {
       "type": "shadowsocks",
       "listen": "::",
       "listen_port": '"$PORT_SS"',
       "method": "2022-blake3-aes-128-gcm",
       "password": "'"$PSK_SS"'",
       "tag": "ss-in"
-    },'
+    }')
     fi
     
     if $ENABLE_HY2; then
-        INBOUNDS="$INBOUNDS"'
-    {
+        INBOUNDS_ARRAY+=('    {
       "type": "hysteria2",
       "tag": "hy2-in",
       "listen": "::",
@@ -358,12 +356,11 @@ create_config() {
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem"
       }
-    },'
+    }')
     fi
     
     if $ENABLE_TUIC; then
-        INBOUNDS="$INBOUNDS"'
-    {
+        INBOUNDS_ARRAY+=('    {
       "type": "tuic",
       "tag": "tuic-in",
       "listen": "::",
@@ -381,12 +378,11 @@ create_config() {
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem"
       }
-    },'
+    }')
     fi
     
     if $ENABLE_REALITY; then
-        INBOUNDS="$INBOUNDS"'
-    {
+        INBOUNDS_ARRAY+=('    {
       "type": "vless",
       "tag": "vless-in",
       "listen": "::",
@@ -410,11 +406,12 @@ create_config() {
           "short_id": ["'"$REALITY_SID"'"]
         }
       }
-    },'
+    }')
     fi
     
-    # 移除最后的逗号
-    INBOUNDS="${INBOUNDS%,}"
+    # 使用 printf 和逗号分隔符连接数组元素
+    INBOUNDS=$(printf ",\n%s" "${INBOUNDS_ARRAY[@]}")
+    INBOUNDS="${INBOUNDS:2}"  # 移除开头的逗号和换行
 
     cat > "$CONFIG_PATH" <<EOF
 {
@@ -422,7 +419,8 @@ create_config() {
     "level": "info",
     "timestamp": true
   },
-  "inbounds": [$INBOUNDS
+  "inbounds": [
+$INBOUNDS
   ],
   "outbounds": [
     {
@@ -1246,43 +1244,70 @@ show_menu() {
     cat <<'MENU'
 
 ==========================
- Sing-box 管理面板 (快捷指令 sb )
+ Sing-box 管理面板 (快捷指令sb)
 ==========================
 1) 查看协议链接
 2) 查看配置文件路径
 3) 编辑配置文件
 MENU
 
+    # 构建协议重置选项映射
+    declare -g -A MENU_MAP
     local option=4
     
     if [ "${ENABLE_SS:-false}" = "true" ]; then
         echo "$option) 重置 SS 端口"
+        MENU_MAP[$option]="reset_ss"
         option=$((option + 1))
     fi
     
     if [ "${ENABLE_HY2:-false}" = "true" ]; then
         echo "$option) 重置 HY2 端口"
+        MENU_MAP[$option]="reset_hy2"
         option=$((option + 1))
     fi
     
     if [ "${ENABLE_TUIC:-false}" = "true" ]; then
         echo "$option) 重置 TUIC 端口"
+        MENU_MAP[$option]="reset_tuic"
         option=$((option + 1))
     fi
     
     if [ "${ENABLE_REALITY:-false}" = "true" ]; then
         echo "$option) 重置 Reality 端口"
+        MENU_MAP[$option]="reset_reality"
         option=$((option + 1))
     fi
     
+    # 固定功能选项
+    MENU_MAP[$option]="start"
+    echo "$option) 启动服务"
+    option=$((option + 1))
+    
+    MENU_MAP[$option]="stop"
+    echo "$((option))) 停止服务"
+    option=$((option + 1))
+    
+    MENU_MAP[$option]="restart"
+    echo "$((option))) 重启服务"
+    option=$((option + 1))
+    
+    MENU_MAP[$option]="status"
+    echo "$((option))) 查看状态"
+    option=$((option + 1))
+    
+    MENU_MAP[$option]="update"
+    echo "$((option))) 更新 sing-box"
+    option=$((option + 1))
+    
+    MENU_MAP[$option]="relay"
+    echo "$((option))) 生成线路机脚本（本机ss出口）"
+    option=$((option + 1))
+    
+    MENU_MAP[$option]="uninstall"
+    echo "$((option))) 卸载 sing-box"
+    
     cat <<MENU2
-$option) 启动服务
-$((option + 1))) 停止服务
-$((option + 2))) 重启服务
-$((option + 3))) 查看状态
-$((option + 4))) 更新 sing-box
-$((option + 5))) 生成线路机脚本（出口为本机ss协议）
-$((option + 6))) 卸载 sing-box
 0) 退出
 ==========================
 MENU2
@@ -1293,55 +1318,34 @@ while true; do
     show_menu
     read -p "请输入选项: " opt
     
-    read_config 2>/dev/null || true
+    # 处理退出
+    if [ "$opt" = "0" ]; then
+        exit 0
+    fi
     
-    # 动态计算选项
-    reset_ss_opt=4
-    reset_hy2_opt=$reset_ss_opt
-    reset_tuic_opt=$reset_ss_opt
-    reset_reality_opt=$reset_ss_opt
-    
-    [ "${ENABLE_SS:-false}" = "true" ] && reset_hy2_opt=$((reset_hy2_opt + 1))
-    [ "${ENABLE_SS:-false}" = "true" ] && reset_tuic_opt=$((reset_tuic_opt + 1))
-    [ "${ENABLE_SS:-false}" = "true" ] && reset_reality_opt=$((reset_reality_opt + 1))
-    
-    [ "${ENABLE_HY2:-false}" = "true" ] && reset_tuic_opt=$((reset_tuic_opt + 1))
-    [ "${ENABLE_HY2:-false}" = "true" ] && reset_reality_opt=$((reset_reality_opt + 1))
-    
-    [ "${ENABLE_TUIC:-false}" = "true" ] && reset_reality_opt=$((reset_reality_opt + 1))
-    
-    # 计算固定功能选项
-    enabled_count=0
-    [ "${ENABLE_SS:-false}" = "true" ] && enabled_count=$((enabled_count + 1))
-    [ "${ENABLE_HY2:-false}" = "true" ] && enabled_count=$((enabled_count + 1))
-    [ "${ENABLE_TUIC:-false}" = "true" ] && enabled_count=$((enabled_count + 1))
-    [ "${ENABLE_REALITY:-false}" = "true" ] && enabled_count=$((enabled_count + 1))
-    
-    start_opt=$((4 + enabled_count))
-    stop_opt=$((start_opt + 1))
-    restart_opt=$((start_opt + 2))
-    status_opt=$((start_opt + 3))
-    update_opt=$((start_opt + 4))
-    relay_opt=$((start_opt + 5))
-    uninstall_opt=$((start_opt + 6))
-    
-    case "${opt:-}" in
+    # 处理固定选项
+    case "$opt" in
         1) action_view_uri ;;
         2) action_view_config ;;
         3) action_edit_config ;;
-        $reset_ss_opt) [ "${ENABLE_SS:-false}" = "true" ] && action_reset_ss ;;
-        $reset_hy2_opt) [ "${ENABLE_HY2:-false}" = "true" ] && action_reset_hy2 ;;
-        $reset_tuic_opt) [ "${ENABLE_TUIC:-false}" = "true" ] && action_reset_tuic ;;
-        $reset_reality_opt) [ "${ENABLE_REALITY:-false}" = "true" ] && action_reset_reality ;;
-        $start_opt) service_start && info "已启动" ;;
-        $stop_opt) service_stop && info "已停止" ;;
-        $restart_opt) service_restart && info "已重启" ;;
-        $status_opt) service_status ;;
-        $update_opt) action_update ;;
-        $relay_opt) action_generate_relay ;;
-        $uninstall_opt) action_uninstall; exit 0 ;;
-        0) exit 0 ;;
-        *) warn "无效选项" ;;
+        *)
+            # 处理动态选项
+            action="${MENU_MAP[$opt]:-}"
+            case "$action" in
+                reset_ss) action_reset_ss ;;
+                reset_hy2) action_reset_hy2 ;;
+                reset_tuic) action_reset_tuic ;;
+                reset_reality) action_reset_reality ;;
+                start) service_start && info "已启动" ;;
+                stop) service_stop && info "已停止" ;;
+                restart) service_restart && info "已重启" ;;
+                status) service_status ;;
+                update) action_update ;;
+                relay) action_generate_relay ;;
+                uninstall) action_uninstall; exit 0 ;;
+                *) warn "无效选项: $opt" ;;
+            esac
+            ;;
     esac
     
     echo ""
