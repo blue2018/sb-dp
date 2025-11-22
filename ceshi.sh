@@ -305,8 +305,6 @@ install_singbox() {
 
 install_singbox
 
-info "sing-box 安装完成，开始生成密钥和证书..."
-
 # -----------------------
 # 生成 Reality 密钥对（必须在 sing-box 安装之后）
 generate_reality_keys() {
@@ -346,10 +344,7 @@ generate_reality_keys() {
     info "Reality 密钥已生成"
 }
 
-# 调用 Reality 密钥生成
 generate_reality_keys
-
-info "密钥生成完成，准备生成证书..."
 
 # -----------------------
 # 生成 HY2/TUIC 自签证书(仅在需要时)
@@ -377,10 +372,7 @@ generate_cert() {
     fi
 }
 
-# 调用证书生成
 generate_cert
-
-info "证书生成完成，准备生成配置文件..."
 
 # -----------------------
 # 生成配置文件
