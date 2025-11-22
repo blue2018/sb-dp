@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eo pipefail
+set -euo pipefail
 
 # -----------------------
 # 彩色输出函数
@@ -91,6 +91,7 @@ if [[ -n "$user_name" ]]; then
     echo "$suffix" > /root/node_names.txt
 else
     suffix=""
+    echo "" > /root/node_names.txt
 fi
 
 # -----------------------
@@ -163,7 +164,7 @@ rand_uuid() {
 # -----------------------
 # 配置端口和密码
 get_config() {
-    if [ "$ENABLE_SS" = true ]; then
+    if $ENABLE_SS; then
         info "=== 配置 Shadowsocks (SS) ==="
         if [ -n "${SINGBOX_PORT_SS:-}" ]; then
             PORT_SS="$SINGBOX_PORT_SS"
@@ -176,7 +177,7 @@ get_config() {
         info "SS 密码已自动生成"
     fi
 
-    if [ "$ENABLE_HY2" = true ]; then
+    if $ENABLE_HY2; then
         info "=== 配置 Hysteria2 (HY2) ==="
         if [ -n "${SINGBOX_PORT_HY2:-}" ]; then
             PORT_HY2="$SINGBOX_PORT_HY2"
@@ -189,7 +190,7 @@ get_config() {
         info "HY2 密码已自动生成"
     fi
 
-    if [ "$ENABLE_TUIC" = true ]; then
+    if $ENABLE_TUIC; then
         info "=== 配置 TUIC ==="
         if [ -n "${SINGBOX_PORT_TUIC:-}" ]; then
             PORT_TUIC="$SINGBOX_PORT_TUIC"
@@ -203,7 +204,7 @@ get_config() {
         info "TUIC UUID 和密码已自动生成"
     fi
 
-    if [ "$ENABLE_REALITY" = true ]; then
+    if $ENABLE_REALITY; then
         info "=== 配置 VLESS Reality ==="
         if [ -n "${SINGBOX_PORT_REALITY:-}" ]; then
             PORT_REALITY="$SINGBOX_PORT_REALITY"
@@ -269,7 +270,7 @@ install_singbox
 # -----------------------
 # 生成 Reality 密钥对
 generate_reality_keys() {
-    if [ "$ENABLE_REALITY" != true ]; then
+    if ! $ENABLE_REALITY; then
         return 0
     fi
     
@@ -325,29 +326,39 @@ create_config() {
 
     mkdir -p "$(dirname "$CONFIG_PATH")"
 
-    # 构建 inbounds 数组（使用数组避免逗号问题）
-    INBOUNDS_ARRAY=()
+    # 构建 inbounds 内容（使用临时文件避免字符串处理问题）
+    local TEMP_INBOUNDS="/tmp/singbox_inbounds_$.json"
+    > "$TEMP_INBOUNDS"
     
-    if [ "$ENABLE_SS" = true ]; then
-        INBOUNDS_ARRAY+=('    {
+    local need_comma=false
+    
+    if $ENABLE_SS; then
+        cat >> "$TEMP_INBOUNDS" <<'INBOUND_SS'
+    {
       "type": "shadowsocks",
       "listen": "::",
-      "listen_port": '"$PORT_SS"',
+      "listen_port": PORT_SS_PLACEHOLDER,
       "method": "2022-blake3-aes-128-gcm",
-      "password": "'"$PSK_SS"'",
+      "password": "PSK_SS_PLACEHOLDER",
       "tag": "ss-in"
-    }')
+    }
+INBOUND_SS
+        sed -i "s/PORT_SS_PLACEHOLDER/$PORT_SS/g" "$TEMP_INBOUNDS"
+        sed -i "s/PSK_SS_PLACEHOLDER/$PSK_SS/g" "$TEMP_INBOUNDS"
+        need_comma=true
     fi
     
-    if [ "$ENABLE_HY2" = true ]; then
-        INBOUNDS_ARRAY+=('    {
+    if $ENABLE_HY2; then
+        $need_comma && echo "," >> "$TEMP_INBOUNDS"
+        cat >> "$TEMP_INBOUNDS" <<'INBOUND_HY2'
+    {
       "type": "hysteria2",
       "tag": "hy2-in",
       "listen": "::",
-      "listen_port": '"$PORT_HY2"',
+      "listen_port": PORT_HY2_PLACEHOLDER,
       "users": [
         {
-          "password": "'"$PSK_HY2"'"
+          "password": "PSK_HY2_PLACEHOLDER"
         }
       ],
       "tls": {
@@ -356,19 +367,25 @@ create_config() {
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem"
       }
-    }')
+    }
+INBOUND_HY2
+        sed -i "s/PORT_HY2_PLACEHOLDER/$PORT_HY2/g" "$TEMP_INBOUNDS"
+        sed -i "s/PSK_HY2_PLACEHOLDER/$PSK_HY2/g" "$TEMP_INBOUNDS"
+        need_comma=true
     fi
     
-    if [ "$ENABLE_TUIC" = true ]; then
-        INBOUNDS_ARRAY+=('    {
+    if $ENABLE_TUIC; then
+        $need_comma && echo "," >> "$TEMP_INBOUNDS"
+        cat >> "$TEMP_INBOUNDS" <<'INBOUND_TUIC'
+    {
       "type": "tuic",
       "tag": "tuic-in",
       "listen": "::",
-      "listen_port": '"$PORT_TUIC"',
+      "listen_port": PORT_TUIC_PLACEHOLDER,
       "users": [
         {
-          "uuid": "'"$UUID_TUIC"'",
-          "password": "'"$PSK_TUIC"'"
+          "uuid": "UUID_TUIC_PLACEHOLDER",
+          "password": "PSK_TUIC_PLACEHOLDER"
         }
       ],
       "congestion_control": "bbr",
@@ -378,18 +395,25 @@ create_config() {
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem"
       }
-    }')
+    }
+INBOUND_TUIC
+        sed -i "s/PORT_TUIC_PLACEHOLDER/$PORT_TUIC/g" "$TEMP_INBOUNDS"
+        sed -i "s/UUID_TUIC_PLACEHOLDER/$UUID_TUIC/g" "$TEMP_INBOUNDS"
+        sed -i "s/PSK_TUIC_PLACEHOLDER/$PSK_TUIC/g" "$TEMP_INBOUNDS"
+        need_comma=true
     fi
     
-    if [ "$ENABLE_REALITY" = true ]; then
-        INBOUNDS_ARRAY+=('    {
+    if $ENABLE_REALITY; then
+        $need_comma && echo "," >> "$TEMP_INBOUNDS"
+        cat >> "$TEMP_INBOUNDS" <<'INBOUND_REALITY'
+    {
       "type": "vless",
       "tag": "vless-in",
       "listen": "::",
-      "listen_port": '"$PORT_REALITY"',
+      "listen_port": PORT_REALITY_PLACEHOLDER,
       "users": [
         {
-          "uuid": "'"$UUID"'",
+          "uuid": "UUID_REALITY_PLACEHOLDER",
           "flow": "xtls-rprx-vision"
         }
       ],
@@ -402,25 +426,31 @@ create_config() {
             "server": "addons.mozilla.org",
             "server_port": 443
           },
-          "private_key": "'"$REALITY_PK"'",
-          "short_id": ["'"$REALITY_SID"'"]
+          "private_key": "REALITY_PK_PLACEHOLDER",
+          "short_id": ["REALITY_SID_PLACEHOLDER"]
         }
       }
-    }')
+    }
+INBOUND_REALITY
+        sed -i "s/PORT_REALITY_PLACEHOLDER/$PORT_REALITY/g" "$TEMP_INBOUNDS"
+        sed -i "s/UUID_REALITY_PLACEHOLDER/$UUID/g" "$TEMP_INBOUNDS"
+        sed -i "s/REALITY_PK_PLACEHOLDER/$REALITY_PK/g" "$TEMP_INBOUNDS"
+        sed -i "s/REALITY_SID_PLACEHOLDER/$REALITY_SID/g" "$TEMP_INBOUNDS"
     fi
-    
-    # 使用 printf 和逗号分隔符连接数组元素
-    INBOUNDS=$(printf ",\n%s" "${INBOUNDS_ARRAY[@]}")
-    INBOUNDS="${INBOUNDS:2}"  # 移除开头的逗号和换行
 
-    cat > "$CONFIG_PATH" <<EOF
+    # 生成最终配置
+    cat > "$CONFIG_PATH" <<'CONFIG_HEAD'
 {
   "log": {
     "level": "info",
     "timestamp": true
   },
   "inbounds": [
-$INBOUNDS
+CONFIG_HEAD
+    
+    cat "$TEMP_INBOUNDS" >> "$CONFIG_PATH"
+    
+    cat >> "$CONFIG_PATH" <<'CONFIG_TAIL'
   ],
   "outbounds": [
     {
@@ -429,7 +459,9 @@ $INBOUNDS
     }
   ]
 }
-EOF
+CONFIG_TAIL
+
+    rm -f "$TEMP_INBOUNDS"
 
     sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1 \
        && info "配置文件验证通过" \
@@ -597,7 +629,7 @@ fi
 generate_uris() {
     local host="$PUB_IP"
     
-    if [ "$ENABLE_SS" = true ]; then
+    if $ENABLE_SS; then
         local ss_userinfo="2022-blake3-aes-128-gcm:${PSK_SS}"
         ss_encoded=$(printf "%s" "$ss_userinfo" | sed 's/:/%3A/g; s/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
         ss_b64=$(printf "%s" "$ss_userinfo" | base64 -w0 2>/dev/null || printf "%s" "$ss_userinfo" | base64 | tr -d '\n')
@@ -608,21 +640,21 @@ generate_uris() {
         echo ""
     fi
     
-    if [ "$ENABLE_HY2" = true ]; then
+    if $ENABLE_HY2; then
         hy2_encoded=$(printf "%s" "$PSK_HY2" | sed 's/:/%3A/g; s/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
         echo "=== Hysteria2 (HY2) ==="
         echo "hy2://${hy2_encoded}@${host}:${PORT_HY2}/?sni=www.bing.com&alpn=h3&insecure=1#hy2${suffix}"
         echo ""
     fi
 
-    if [ "$ENABLE_TUIC" = true ]; then
+    if $ENABLE_TUIC; then
         tuic_encoded=$(printf "%s" "$PSK_TUIC" | sed 's/:/%3A/g; s/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
         echo "=== TUIC ==="
         echo "tuic://${UUID_TUIC}:${tuic_encoded}@${host}:${PORT_TUIC}/?congestion_control=bbr&alpn=h3&sni=www.bing.com&insecure=1#tuic${suffix}"
         echo ""
     fi
     
-    if [ "$ENABLE_REALITY" = true ]; then
+    if $ENABLE_REALITY; then
         echo "=== VLESS Reality ==="
         echo "vless://${UUID}@${host}:${PORT_REALITY}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=addons.mozilla.org&fp=chrome&pbk=${REALITY_PUB}&sid=${REALITY_SID}#reality${suffix}"
         echo ""
@@ -633,7 +665,7 @@ generate_uris() {
 # 最终输出
 echo ""
 echo "=========================================="
-info "🎉 Sing-box 部署完成!"
+info "🎉 Sing-box 多协议部署完成!"
 echo "=========================================="
 echo ""
 info "📋 配置信息:"
@@ -1229,12 +1261,6 @@ RELAY_EOF
     echo "----------------------------------------"
     cat "$RELAY_SCRIPT"
     echo "----------------------------------------"
-    echo ""
-    info "在线路机执行命令示例："
-    echo "   nano /tmp/relay-install.sh 保存后执行"
-    echo "   chmod +x /tmp/relay-install.sh && bash /tmp/relay-install.sh"
-    echo ""
-    info "复制执行完成后，即可在线路机完成 sing-box 中转节点部署。"
 }
 
 # 动态生成菜单
@@ -1244,7 +1270,7 @@ show_menu() {
     cat <<'MENU'
 
 ==========================
- Sing-box 管理面板 (快捷指令sb)
+ Sing-box 管理面板 (sb)
 ==========================
 1) 查看协议链接
 2) 查看配置文件路径
@@ -1301,7 +1327,7 @@ MENU
     option=$((option + 1))
     
     MENU_MAP[$option]="relay"
-    echo "$((option))) 生成线路机脚本（本机ss出口）"
+    echo "$((option))) 生成线路机脚本"
     option=$((option + 1))
     
     MENU_MAP[$option]="uninstall"
