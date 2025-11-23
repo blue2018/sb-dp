@@ -584,8 +584,9 @@ pidfile="/run/${RC_SVCNAME}.pid"
 command_background="yes"
 output_log="/var/log/sing-box.log"
 error_log="/var/log/sing-box.err"
-
-
+# 自动拉起（程序崩溃、OOM、被 kill 后自动恢复）
+supervisor=supervise-daemon
+supervise_daemon_args="--respawn-max 0 --respawn-delay 5"
 
 depend() {
     need net
@@ -1272,7 +1273,7 @@ command_background="yes"
 pidfile="/run/sing-box.pid"
 # 自动拉起（程序崩溃、OOM、被 kill 后自动恢复）
 supervisor=supervise-daemon
-supervise_daemon_args="--respawn --respawn-delay 5"
+supervise_daemon_args="--respawn-max 0 --respawn-delay 5"
 
 depend() { need net; }
 SVC
