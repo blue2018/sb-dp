@@ -400,8 +400,8 @@ create_config() {
       "tag": "ss-in"
     }
 INBOUND_SS
-        sed -i "s/PORT_SS_PLACEHOLDER/$PORT_SS/g" "$TEMP_INBOUNDS"
-        sed -i "s/PSK_SS_PLACEHOLDER/$PSK_SS/g" "$TEMP_INBOUNDS"
+        sed -i "s|PORT_SS_PLACEHOLDER|$PORT_SS|g" "$TEMP_INBOUNDS"
+        sed -i "s|PSK_SS_PLACEHOLDER|$PSK_SS|g" "$TEMP_INBOUNDS"
         need_comma=true
     fi
     
@@ -426,8 +426,8 @@ INBOUND_SS
       }
     }
 INBOUND_HY2
-        sed -i "s/PORT_HY2_PLACEHOLDER/$PORT_HY2/g" "$TEMP_INBOUNDS"
-        sed -i "s/PSK_HY2_PLACEHOLDER/$PSK_HY2/g" "$TEMP_INBOUNDS"
+        sed -i "s|PORT_HY2_PLACEHOLDER|$PORT_HY2|g" "$TEMP_INBOUNDS"
+        sed -i "s|PSK_HY2_PLACEHOLDER|$PSK_HY2|g" "$TEMP_INBOUNDS"
         need_comma=true
     fi
     
@@ -454,9 +454,9 @@ INBOUND_HY2
       }
     }
 INBOUND_TUIC
-        sed -i "s/PORT_TUIC_PLACEHOLDER/$PORT_TUIC/g" "$TEMP_INBOUNDS"
-        sed -i "s/UUID_TUIC_PLACEHOLDER/$UUID_TUIC/g" "$TEMP_INBOUNDS"
-        sed -i "s/PSK_TUIC_PLACEHOLDER/$PSK_TUIC/g" "$TEMP_INBOUNDS"
+        sed -i "s|PORT_TUIC_PLACEHOLDER|$PORT_TUIC|g" "$TEMP_INBOUNDS"
+        sed -i "s|UUID_TUIC_PLACEHOLDER|$UUID_TUIC|g" "$TEMP_INBOUNDS"
+        sed -i "s|PSK_TUIC_PLACEHOLDER|$PSK_TUIC|g" "$TEMP_INBOUNDS"
         need_comma=true
     fi
     
@@ -489,10 +489,10 @@ INBOUND_TUIC
       }
     }
 INBOUND_REALITY
-        sed -i "s/PORT_REALITY_PLACEHOLDER/$PORT_REALITY/g" "$TEMP_INBOUNDS"
-        sed -i "s/UUID_REALITY_PLACEHOLDER/$UUID/g" "$TEMP_INBOUNDS"
-        sed -i "s/REALITY_PK_PLACEHOLDER/$REALITY_PK/g" "$TEMP_INBOUNDS"
-        sed -i "s/REALITY_SID_PLACEHOLDER/$REALITY_SID/g" "$TEMP_INBOUNDS"
+        sed -i "s|PORT_REALITY_PLACEHOLDER|$PORT_REALITY|g" "$TEMP_INBOUNDS"
+        sed -i "s|UUID_REALITY_PLACEHOLDER|$UUID|g" "$TEMP_INBOUNDS"
+        sed -i "s|REALITY_PK_PLACEHOLDER|$REALITY_PK|g" "$TEMP_INBOUNDS"
+        sed -i "s|REALITY_SID_PLACEHOLDER|$REALITY_SID|g" "$TEMP_INBOUNDS"
     fi
 
     # 生成最终配置
@@ -1143,7 +1143,7 @@ action_generate_relay() {
             ' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
             
             # 更新缓存和协议标记
-            sed -i 's/ENABLE_SS=false/ENABLE_SS=true/' "$CACHE_FILE" 2>/dev/null || echo "ENABLE_SS=true" >> "$CACHE_FILE"
+            sd -i 's/ENABLE_SS=false/ENABLE_SS=true/' "$CACHE_FILE" 2>/dev/null || echo "ENABLE_SS=true" >> "$CACHE_FILE"
             echo "SS_PORT=$SS_PORT" >> "$CACHE_FILE"
             echo "SS_PSK=$SS_PSK" >> "$CACHE_FILE"
             echo "SS_METHOD=$SS_METHOD" >> "$CACHE_FILE"
