@@ -87,55 +87,64 @@ else
     echo "" > /root/node_names.txt
 fi
 
-# 选择协议
-mkdir -p /etc/sing-box
-info "=== 选择要部署的协议 ==="
-echo "1) Shadowsocks (SS)"
-echo "2) Hysteria2 (HY2)"
-echo "3) TUIC"
-echo "4) VLESS Reality"
-echo ""
-read -p "请输入要部署的协议编号(多个用空格分隔,如: 1 2 4): " protocol_input
-
-ENABLE_SS=false
-ENABLE_HY2=false
-ENABLE_TUIC=false
-ENABLE_REALITY=false
-
-for num in $protocol_input; do
-    case "$num" in
-        1) ENABLE_SS=true ;;
-        2) ENABLE_HY2=true ;;
-        3) ENABLE_TUIC=true ;;
-        4) ENABLE_REALITY=true ;;
-        *) warn "无效选项: $num" ;;
-    esac
-done
-
-if ! $ENABLE_SS && ! $ENABLE_HY2 && ! $ENABLE_TUIC && ! $ENABLE_REALITY; then
-    err "未选择任何协议,退出安装"
-    exit 1
-fi
-
-# 保存协议选择
-cat > /etc/sing-box/.protocols <<EOF
+# -----------------------
+# 选择要部署的协议
+select_protocols() {
+    info "=== 选择要部署的协议 ==="
+    echo "1) Shadowsocks (SS)"
+    echo "2) Hysteria2 (HY2)"
+    echo "3) TUIC"
+    echo "4) VLESS Reality"
+    echo ""
+    echo "请输入要部署的协议编号(多个用空格分隔,如: 1 2 4):"
+    read -r protocol_input
+    
+    # 使用全局变量
+    ENABLE_SS=false
+    ENABLE_HY2=false
+    ENABLE_TUIC=false
+    ENABLE_REALITY=false
+    
+    for num in $protocol_input; do
+        case "$num" in
+            1) ENABLE_SS=true ;;
+            2) ENABLE_HY2=true ;;
+            3) ENABLE_TUIC=true ;;
+            4) ENABLE_REALITY=true ;;
+            *) warn "无效选项: $num" ;;
+        esac
+    done
+    
+    if ! $ENABLE_SS && ! $ENABLE_HY2 && ! $ENABLE_TUIC && ! $ENABLE_REALITY; then
+        err "未选择任何协议,退出安装"
+        exit 1
+    fi
+    
+    # 保存协议选择到文件（确保持久化）
+    mkdir -p /etc/sing-box
+    cat > /etc/sing-box/.protocols <<EOF
 ENABLE_SS=$ENABLE_SS
 ENABLE_HY2=$ENABLE_HY2
 ENABLE_TUIC=$ENABLE_TUIC
 ENABLE_REALITY=$ENABLE_REALITY
 EOF
+    
+    info "已选择协议:"
+    $ENABLE_SS && echo "  - Shadowsocks"
+    $ENABLE_HY2 && echo "  - Hysteria2"
+    $ENABLE_TUIC && echo "  - TUIC"
+    $ENABLE_REALITY && echo "  - VLESS Reality"
+    
+    # 导出为全局变量（确保后续脚本可以访问）
+    export ENABLE_SS
+    export ENABLE_HY2
+    export ENABLE_TUIC
+    export ENABLE_REALITY
+}
 
-info "已选择协议:"
-$ENABLE_SS && echo "  - Shadowsocks"
-$ENABLE_HY2 && echo "  - Hysteria2"
-$ENABLE_TUIC && echo "  - TUIC"
-$ENABLE_REALITY && echo "  - VLESS Reality"
-
-# 导出为全局变量（确保后续脚本可以访问）
-export ENABLE_SS
-export ENABLE_HY2
-export ENABLE_TUIC
-export ENABLE_REALITY
+# 创建配置目录
+mkdir -p /etc/sing-box
+select_protocols
 
 # 配置入站IP
 info "=== 配置节点连接IP ==="
@@ -274,16 +283,23 @@ if $ENABLE_HY2 || $ENABLE_TUIC; then
     fi
 fi
 
+# -----------------------
 # 生成配置文件
 CONFIG_PATH="/etc/sing-box/config.json"
-info "生成配置文件..."
 
-TEMP_INBOUNDS="/tmp/singbox_inbounds_$$.json"
-> "$TEMP_INBOUNDS"
-need_comma=false
+create_config() {
+    info "生成配置文件: $CONFIG_PATH"
 
-if $ENABLE_SS; then
-    cat >> "$TEMP_INBOUNDS" <<'INBOUND_SS'
+    mkdir -p "$(dirname "$CONFIG_PATH")"
+
+    # 构建 inbounds 内容（使用临时文件避免字符串处理问题）
+    local TEMP_INBOUNDS="/tmp/singbox_inbounds_$.json"
+    > "$TEMP_INBOUNDS"
+    
+    local need_comma=false
+    
+    if $ENABLE_SS; then
+        cat >> "$TEMP_INBOUNDS" <<'INBOUND_SS'
     {
       "type": "shadowsocks",
       "listen": "::",
@@ -293,20 +309,24 @@ if $ENABLE_SS; then
       "tag": "ss-in"
     }
 INBOUND_SS
-    sed -i "s|PORT_SS_PLACEHOLDER|$PORT_SS|g" "$TEMP_INBOUNDS"
-    sed -i "s|PSK_SS_PLACEHOLDER|$PSK_SS|g" "$TEMP_INBOUNDS"
-    need_comma=true
-fi
-
-if $ENABLE_HY2; then
-    $need_comma && echo "," >> "$TEMP_INBOUNDS"
-    cat >> "$TEMP_INBOUNDS" <<'INBOUND_HY2'
+        sed -i "s|PORT_SS_PLACEHOLDER|$PORT_SS|g" "$TEMP_INBOUNDS"
+        sed -i "s|PSK_SS_PLACEHOLDER|$PSK_SS|g" "$TEMP_INBOUNDS"
+        need_comma=true
+    fi
+    
+    if $ENABLE_HY2; then
+        $need_comma && echo "," >> "$TEMP_INBOUNDS"
+        cat >> "$TEMP_INBOUNDS" <<'INBOUND_HY2'
     {
       "type": "hysteria2",
       "tag": "hy2-in",
       "listen": "::",
       "listen_port": PORT_HY2_PLACEHOLDER,
-      "users": [{"password": "PSK_HY2_PLACEHOLDER"}],
+      "users": [
+        {
+          "password": "PSK_HY2_PLACEHOLDER"
+        }
+      ],
       "tls": {
         "enabled": true,
         "alpn": ["h3"],
@@ -315,20 +335,25 @@ if $ENABLE_HY2; then
       }
     }
 INBOUND_HY2
-    sed -i "s|PORT_HY2_PLACEHOLDER|$PORT_HY2|g" "$TEMP_INBOUNDS"
-    sed -i "s|PSK_HY2_PLACEHOLDER|$PSK_HY2|g" "$TEMP_INBOUNDS"
-    need_comma=true
-fi
-
-if $ENABLE_TUIC; then
-    $need_comma && echo "," >> "$TEMP_INBOUNDS"
-    cat >> "$TEMP_INBOUNDS" <<'INBOUND_TUIC'
+        sed -i "s|PORT_HY2_PLACEHOLDER|$PORT_HY2|g" "$TEMP_INBOUNDS"
+        sed -i "s|PSK_HY2_PLACEHOLDER|$PSK_HY2|g" "$TEMP_INBOUNDS"
+        need_comma=true
+    fi
+    
+    if $ENABLE_TUIC; then
+        $need_comma && echo "," >> "$TEMP_INBOUNDS"
+        cat >> "$TEMP_INBOUNDS" <<'INBOUND_TUIC'
     {
       "type": "tuic",
       "tag": "tuic-in",
       "listen": "::",
       "listen_port": PORT_TUIC_PLACEHOLDER,
-      "users": [{"uuid": "UUID_TUIC_PLACEHOLDER", "password": "PSK_TUIC_PLACEHOLDER"}],
+      "users": [
+        {
+          "uuid": "UUID_TUIC_PLACEHOLDER",
+          "password": "PSK_TUIC_PLACEHOLDER"
+        }
+      ],
       "congestion_control": "bbr",
       "tls": {
         "enabled": true,
@@ -338,89 +363,116 @@ if $ENABLE_TUIC; then
       }
     }
 INBOUND_TUIC
-    sed -i "s|PORT_TUIC_PLACEHOLDER|$PORT_TUIC|g" "$TEMP_INBOUNDS"
-    sed -i "s|UUID_TUIC_PLACEHOLDER|$UUID_TUIC|g" "$TEMP_INBOUNDS"
-    sed -i "s|PSK_TUIC_PLACEHOLDER|$PSK_TUIC|g" "$TEMP_INBOUNDS"
-    need_comma=true
-fi
-
-if $ENABLE_REALITY; then
-    $need_comma && echo "," >> "$TEMP_INBOUNDS"
-    cat >> "$TEMP_INBOUNDS" <<'INBOUND_REALITY'
+        sed -i "s|PORT_TUIC_PLACEHOLDER|$PORT_TUIC|g" "$TEMP_INBOUNDS"
+        sed -i "s|UUID_TUIC_PLACEHOLDER|$UUID_TUIC|g" "$TEMP_INBOUNDS"
+        sed -i "s|PSK_TUIC_PLACEHOLDER|$PSK_TUIC|g" "$TEMP_INBOUNDS"
+        need_comma=true
+    fi
+    
+    if $ENABLE_REALITY; then
+        $need_comma && echo "," >> "$TEMP_INBOUNDS"
+        cat >> "$TEMP_INBOUNDS" <<'INBOUND_REALITY'
     {
       "type": "vless",
       "tag": "vless-in",
       "listen": "::",
       "listen_port": PORT_REALITY_PLACEHOLDER,
-      "users": [{"uuid": "UUID_REALITY_PLACEHOLDER", "flow": "xtls-rprx-vision"}],
+      "users": [
+        {
+          "uuid": "UUID_REALITY_PLACEHOLDER",
+          "flow": "xtls-rprx-vision"
+        }
+      ],
       "tls": {
         "enabled": true,
         "server_name": "REALITY_DOMAIN_PLACEHOLDER",
         "reality": {
           "enabled": true,
-          "handshake": {"server": "REALITY_DOMAIN_PLACEHOLDER", "server_port": 443},
+          "handshake": {
+            "server": "REALITY_DOMAIN_PLACEHOLDER",
+            "server_port": 443
+          },
           "private_key": "REALITY_PK_PLACEHOLDER",
           "short_id": ["REALITY_SID_PLACEHOLDER"]
         }
       }
     }
 INBOUND_REALITY
-    sed -i "s|PORT_REALITY_PLACEHOLDER|$PORT_REALITY|g" "$TEMP_INBOUNDS"
-    sed -i "s|UUID_REALITY_PLACEHOLDER|$UUID|g" "$TEMP_INBOUNDS"
-    sed -i "s|REALITY_DOMAIN_PLACEHOLDER|$REALITY_DOMAIN|g" "$TEMP_INBOUNDS"
-    sed -i "s|REALITY_PK_PLACEHOLDER|$REALITY_PK|g" "$TEMP_INBOUNDS"
-    sed -i "s|REALITY_SID_PLACEHOLDER|$REALITY_SID|g" "$TEMP_INBOUNDS"
-fi
+        sed -i "s|PORT_REALITY_PLACEHOLDER|$PORT_REALITY|g" "$TEMP_INBOUNDS"
+        sed -i "s|UUID_REALITY_PLACEHOLDER|$UUID|g" "$TEMP_INBOUNDS"
+        sed -i "s|REALITY_PK_PLACEHOLDER|$REALITY_PK|g" "$TEMP_INBOUNDS"
+        sed -i "s|REALITY_SID_PLACEHOLDER|$REALITY_SID|g" "$TEMP_INBOUNDS"
+    fi
 
-cat > "$CONFIG_PATH" <<'CONFIG_HEAD'
+    # 生成最终配置
+    cat > "$CONFIG_PATH" <<'CONFIG_HEAD'
 {
-  "log": {"level": "info", "timestamp": true},
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
   "inbounds": [
 CONFIG_HEAD
-
-cat "$TEMP_INBOUNDS" >> "$CONFIG_PATH"
-
-cat >> "$CONFIG_PATH" <<'CONFIG_TAIL'
+    
+    cat "$TEMP_INBOUNDS" >> "$CONFIG_PATH"
+    
+    cat >> "$CONFIG_PATH" <<'CONFIG_TAIL'
   ],
-  "outbounds": [{"type": "direct", "tag": "direct-out"}]
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct-out"
+    }
+  ]
 }
 CONFIG_TAIL
 
-rm -f "$TEMP_INBOUNDS"
-sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1 && info "配置文件验证通过" || warn "配置文件验证失败"
+    rm -f "$TEMP_INBOUNDS"
 
-# 保存配置缓存
-cat > /etc/sing-box/.config_cache <<CACHEEOF
+    sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1 \
+       && info "配置文件验证通过" \
+       || warn "配置文件验证失败,但继续执行"
+
+    # 保存配置缓存
+    cat > /etc/sing-box/.config_cache <<CACHEEOF
 ENABLE_SS=$ENABLE_SS
 ENABLE_HY2=$ENABLE_HY2
 ENABLE_TUIC=$ENABLE_TUIC
 ENABLE_REALITY=$ENABLE_REALITY
 CACHEEOF
 
-$ENABLE_SS && cat >> /etc/sing-box/.config_cache <<CACHEEOF
+    $ENABLE_SS && cat >> /etc/sing-box/.config_cache <<CACHEEOF
 SS_PORT=$PORT_SS
 SS_PSK=$PSK_SS
 SS_METHOD=2022-blake3-aes-128-gcm
 CACHEEOF
 
-$ENABLE_HY2 && cat >> /etc/sing-box/.config_cache <<CACHEEOF
+    $ENABLE_HY2 && cat >> /etc/sing-box/.config_cache <<CACHEEOF
 HY2_PORT=$PORT_HY2
 HY2_PSK=$PSK_HY2
 CACHEEOF
 
-$ENABLE_TUIC && cat >> /etc/sing-box/.config_cache <<CACHEEOF
+    $ENABLE_TUIC && cat >> /etc/sing-box/.config_cache <<CACHEEOF
 TUIC_PORT=$PORT_TUIC
 TUIC_UUID=$UUID_TUIC
 TUIC_PSK=$PSK_TUIC
 CACHEEOF
 
-$ENABLE_REALITY && cat >> /etc/sing-box/.config_cache <<CACHEEOF
+    $ENABLE_REALITY && cat >> /etc/sing-box/.config_cache <<CACHEEOF
 REALITY_PORT=$PORT_REALITY
 REALITY_UUID=$UUID
 REALITY_PK=$REALITY_PK
 REALITY_SID=$REALITY_SID
 REALITY_PUB=$REALITY_PUB
 CACHEEOF
+
+    info "配置缓存已保存到 /etc/sing-box/.config_cache"
+}
+
+# 调用配置生成
+create_config
+
+info "配置生成完成，准备设置服务..."
 
 # 设置服务
 info "配置系统服务..."
