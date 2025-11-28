@@ -89,20 +89,6 @@ fi
 
 # -----------------------
 # 选择要部署的协议
-# 在第一次使用协议前，添加以下初始化
-REALITY_PK=""
-REALITY_PUB=""
-REALITY_SID=""
-PORT_REALITY=""
-UUID=""
-SS_PORT=""
-PSK_SS=""
-PORT_HY2=""
-PSK_HY2=""
-PORT_TUIC=""
-PSK_TUIC=""
-UUID_TUIC=""
-
 select_protocols() {
     info "=== 选择要部署的协议 ==="
     echo "1) Shadowsocks (SS)"
@@ -536,7 +522,7 @@ fi
 # 生成链接
 generate_uris() {
     local host="$INBOUND_IP"
-    
+    local reality_domain=$(cat /etc/sing-box/.reality_domain 2>/dev/null || echo "addons.mozilla.org")
     $ENABLE_SS && {
         ss_userinfo="2022-blake3-aes-128-gcm:${PSK_SS}"
         ss_encoded=$(printf "%s" "$ss_userinfo" | sed 's/:/%3A/g; s/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
@@ -585,7 +571,8 @@ echo "   配置: $CONFIG_PATH"
 echo "   服务: $SERVICE_PATH"
 echo ""
 info "🔗 客户端链接:"
-generate_uris | while IFS= read -r line; do echo "   $line"; done
+generate_uris
+sed 's/^/   /' /etc/sing-box/uris.txt
 echo ""
 info "🔧 管理命令:"
 if [ "$OS" = "alpine" ]; then
