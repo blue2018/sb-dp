@@ -1009,7 +1009,7 @@ action_edit_config() {
     
     if command -v sing-box >/dev/null 2>&1; then
         if sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1; then
-            info "配置校验通过,尝试重启服务"
+            info "配置校验通过,已重启服务"
             service_restart || warn "重启失败"
             generate_uris || true
         else
@@ -1135,7 +1135,7 @@ action_update() {
         bash <(curl -fsSL https://sing-box.app/install.sh)
     fi
     
-    info "更新完成,尝试重启服务..."
+    info "更新完成,已重启服务..."
     if command -v sing-box >/dev/null 2>&1; then
         NEW_VER=$(sing-box version 2>/dev/null | head -n1)
         info "当前版本: $NEW_VER"
