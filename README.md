@@ -25,25 +25,33 @@
 
 ## 🙏 特别鸣谢
 
-<p align="center">
-  <a href="https://console.alice.ws/" target="_blank">
-    <img src="https://alicenetworks.net/assets/images/alice.png" alt="alicenetworks" width="60" />
-    <br>
-    <img src="https://img.shields.io/badge/alicenetworks-支持者-blue?style=for-the-badge" />
-  </a>
-  &nbsp;&nbsp;&nbsp;
-  <a href="https://lxc.lazycats.online/" target="_blank">
-    <img src="https://lxc.lazycats.online/themes/web/yunyoo/assets/img/logo/logo.png" alt="懒猫云" width="60" />
-    <br>
-    <img src="https://img.shields.io/badge/懒猫云-支持者-green?style=for-the-badge" />
-  </a>
-  &nbsp;&nbsp;&nbsp;
-  <a href="https://www.lxc.wiki/" target="_blank">
-    <img src="https://www.lxc.wiki/themes/web/starvm-phj/img/logo.png" alt="拼好鸡" width="60" />
-    <br>
-    <img src="https://img.shields.io/badge/拼好鸡-支持者-orange?style=for-the-badge" />
-  </a>
-</p>
+<div align="center">
+
+<table>
+  <tr>
+    <td align="center" width="220">
+      <a href="https://console.alice.ws/" target="_blank">
+        <img src="https://alicenetworks.net/assets/images/alice.png" width="100" alt="alicenetworks" />
+        <br><sub><b>alicenetworks</b></sub>
+      </a>
+    </td>
+    <td align="center" width="220">
+      <a href="https://lxc.lazycats.online/" target="_blank">
+        <img src="https://lxc.lazycats.online/themes/web/yunyoo/assets/img/logo/logo.png" width="100" alt="懒猫云" />
+        <br><sub><b>懒猫云</b></sub>
+      </a>
+    </td>
+    <td align="center" width="220">
+      <a href="https://www.lxc.wiki/" target="_blank">
+        <img src="https://www.lxc.wiki/themes/web/starvm-phj/img/logo.png" width="100" alt="拼好鸡" />
+        <br><sub><b>拼好鸡</b></sub>
+      </a>
+    </td>
+  </tr>
+</table>
+
+</div>
+
 
 
 ## ✅ 一键部署命令
