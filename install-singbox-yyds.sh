@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SBOX_ARCH=""   # <-- 预先声明，防止 unbound variable
+
 # -----------------------
 # TLS 指纹随机池（抗被动聚类）
 TLS_DOMAIN_POOL=(
