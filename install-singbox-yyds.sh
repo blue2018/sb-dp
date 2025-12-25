@@ -181,6 +181,27 @@ else
     read -p "请输入 HY2 端口(留空则随机 10000-60000): " USER_PORT_HY2
     PORT_HY2="${USER_PORT_HY2:-$(rand_port)}"
 fi
+
+# 询问带宽配置
+echo ""
+echo "请选择带宽配置模式:"
+echo "1) 自动检测（推荐，由 Hysteria2 自动适应）"
+echo "2) 手动设置（适合已知 VPS 带宽规格）"
+read -p "请选择 [1-2，默认1]: " BANDWIDTH_MODE
+BANDWIDTH_MODE="${BANDWIDTH_MODE:-1}"
+
+if [ "$BANDWIDTH_MODE" = "2" ]; then
+    read -p "请输入上行带宽 (Mbps，如: 500): " UP_MBPS
+    read -p "请输入下行带宽 (Mbps，如: 500): " DOWN_MBPS
+    UP_MBPS="${UP_MBPS:-1000}"
+    DOWN_MBPS="${DOWN_MBPS:-1000}"
+    USE_BANDWIDTH_LIMIT=true
+    info "已设置带宽: 上行 ${UP_MBPS}Mbps, 下行 ${DOWN_MBPS}Mbps"
+else
+    USE_BANDWIDTH_LIMIT=false
+    info "使用自动检测模式，Hysteria2 将自动适应网络带宽"
+fi
+
 PSK_HY2=$(rand_uuid)
 info "HY2 端口: $PORT_HY2"
 info "HY2 密码(UUID)已自动生成"
@@ -263,10 +284,19 @@ create_config() {
     info "生成配置文件: $CONFIG_PATH"
     mkdir -p "$(dirname "$CONFIG_PATH")"
 
+    # 根据用户选择生成带宽配置
+    if [ "$USE_BANDWIDTH_LIMIT" = "true" ]; then
+        BANDWIDTH_CONFIG="\"up_mbps\": $UP_MBPS,
+      \"down_mbps\": $DOWN_MBPS,
+      \"ignore_client_bandwidth\": true,"
+    else
+        BANDWIDTH_CONFIG=""
+    fi
+
     cat > "$CONFIG_PATH" <<EOF
 {
   "log": {
-    "level": "warn",
+    "level": "info",
     "timestamp": true
   },
   "inbounds": [
@@ -280,9 +310,7 @@ create_config() {
           "password": "$PSK_HY2"
         }
       ],
-      "up_mbps": 1000,
-      "down_mbps": 1000,
-      "ignore_client_bandwidth": false,
+      $BANDWIDTH_CONFIG
       "tls": {
         "enabled": true,
         "alpn": ["h3"],
@@ -294,10 +322,7 @@ create_config() {
   "outbounds": [
     {
       "type": "direct",
-      "tag": "direct-out",
-      "tcp_fast_open": true,
-      "tcp_multi_path": true,
-      "udp_fragment": true
+      "tag": "direct-out"
     }
   ]
 }
@@ -716,7 +741,6 @@ action_uninstall() {
     info "卸载完成"
 }
 
-# 显示菜单
 show_menu() {
     cat <<'MENU'
 
@@ -738,11 +762,9 @@ show_menu() {
 MENU
 }
 
-# 主循环
 while true; do
     show_menu
     read -p "请输入选项: " opt
-    
     case "$opt" in
         1) action_view_uri ;;
         2) action_view_config ;;
@@ -757,7 +779,6 @@ while true; do
         0) exit 0 ;;
         *) warn "无效选项: $opt" ;;
     esac
-    
     echo ""
 done
 SB_SCRIPT
