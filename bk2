@@ -161,15 +161,14 @@ rand_uuid() {
 }
 
 # -----------------------
-# 配置节点名称后缀
-echo "请输入节点名称(留空则默认协议名):"
-read -r user_name
-if [[ -n "$user_name" ]]; then
-    suffix="-${user_name}"
-    echo "$suffix" > /root/node_names.txt
-else
-    suffix=""
-fi
+# 自动设置节点名称（协议-服务器名）
+# 获取主机名作为服务器名称
+SERVER_NAME=$(hostname 2>/dev/null || echo "server")
+# 将名称保存到文件，去掉前面的横杠，只存名字
+echo "${SERVER_NAME}" > /root/node_names.txt
+# 这里的 suffix 用于安装完成时显示的备注：格式为 hy2-名字
+suffix="hy2-${SERVER_NAME}"
+info "节点备注已自动设置为: ${suffix}"
 
 # -----------------------
 # 创建配置目录
@@ -505,7 +504,8 @@ generate_uris() {
     local host="$PUB_IP"
     hy2_encoded=$(printf "%s" "$PSK_HY2" | sed 's/:/%3A/g; s/+/%2B/g; s/\//%2F/g; s/=/%3D/g')
     echo "=== Hysteria2 (HY2) ==="
-    echo "hy2://${hy2_encoded}@${host}:${PORT_HY2}/?sni=${TLS_DOMAIN}&alpn=h3&insecure=1#hy2${suffix}"
+    # 这里的 suffix 在前面已经定义为 "hy2-主机名"
+    echo "hy2://${hy2_encoded}@${host}:${PORT_HY2}/?sni=${TLS_DOMAIN}&alpn=h3&insecure=1#${suffix}"
     echo ""
 }
 
@@ -548,70 +548,49 @@ echo ""
 echo "=========================================="
 
 # -----------------------
+# -----------------------
 # 创建 sb 管理脚本
 SB_PATH="/usr/local/bin/sb"
 info "正在创建 sb 管理面板: $SB_PATH"
 
-cat > "$SB_PATH" <<'SB_SCRIPT'
+# 预先提取 detect_os 函数内容
+DETECT_OS_FUNC=$(declare -f detect_os)
+
+cat > "$SB_PATH" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 
-info() { echo -e "\033[1;34m[INFO]\033[0m $*"; }
-warn() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
-err()  { echo -e "\033[1;31m[ERR]\033[0m $*" >&2; }
+# 基础输出函数
+info() { echo -e "\033[1;34m[INFO]\033[0m \$*"; }
+warn() { echo -e "\033[1;33m[WARN]\033[0m \$*"; }
+err()  { echo -e "\033[1;31m[ERR]\033[0m \$*" >&2; }
 
 CONFIG_PATH="/etc/sing-box/config.json"
 CACHE_FILE="/etc/sing-box/.config_cache"
 SERVICE_NAME="sing-box"
+SBOX_ARCH=""
 
-detect_os() {
-    # OS 检测
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        ID="${ID:-}"
-        ID_LIKE="${ID_LIKE:-}"
-    else
-        ID=""
-        ID_LIKE=""
-    fi
-    if echo "$ID $ID_LIKE" | grep -qi "alpine"; then
-        OS="alpine"
-    elif echo "$ID $ID_LIKE" | grep -Ei "debian|ubuntu" >/dev/null; then
-        OS="debian"
-    elif echo "$ID $ID_LIKE" | grep -Ei "centos|rhel|fedora" >/dev/null; then
-        OS="redhat"
-    else
-        OS="unknown"
-    fi
-
-    # CPU 架构检测
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64)    SBOX_ARCH="amd64" ;;
-        aarch64)   SBOX_ARCH="arm64" ;;
-        armv7l)    SBOX_ARCH="armv7" ;;
-        armv6l)    SBOX_ARCH="armv6" ;;
-        i386|i686) SBOX_ARCH="386" ;;
-        *) err "不支持的 CPU 架构: $ARCH"; exit 1 ;;
-    esac
-}
-
-detect_os
+# 【自动注入】由安装脚本复印过来的环境检测函数
+$DETECT_OS_FUNC
 
 service_start() {
-    [ "$OS" = "alpine" ] && rc-service "$SERVICE_NAME" start || systemctl start "$SERVICE_NAME"
+    detect_os
+    [ "\$OS" = "alpine" ] && rc-service "\$SERVICE_NAME" start || systemctl start "\$SERVICE_NAME"
 }
 service_stop() {
-    [ "$OS" = "alpine" ] && rc-service "$SERVICE_NAME" stop || systemctl stop "$SERVICE_NAME"
+    detect_os
+    [ "\$OS" = "alpine" ] && rc-service "\$SERVICE_NAME" stop || systemctl stop "\$SERVICE_NAME"
 }
 service_restart() {
-    [ "$OS" = "alpine" ] && rc-service "$SERVICE_NAME" restart || systemctl restart "$SERVICE_NAME"
+    detect_os
+    [ "\$OS" = "alpine" ] && rc-service "\$SERVICE_NAME" restart || systemctl restart "\$SERVICE_NAME"
 }
 service_status() {
-    [ "$OS" = "alpine" ] && rc-service "$SERVICE_NAME" status || systemctl status "$SERVICE_NAME" --no-pager
+    detect_os
+    [ "\$OS" = "alpine" ] && rc-service "\$SERVICE_NAME" status || systemctl status "\$SERVICE_NAME" --no-pager
 }
 
-rand_port() { shuf -i 10000-60000 -n 1 2>/dev/null || echo $((RANDOM % 50001 + 10000)); }
+rand_port() { shuf -i 10000-60000 -n 1 2>/dev/null || echo \$((\$RANDOM % 50001 + 10000)); }
 rand_uuid() { 
     if [ -f /proc/sys/kernel/random/uuid ]; then
         cat /proc/sys/kernel/random/uuid
@@ -621,48 +600,50 @@ rand_uuid() {
 }
 
 url_encode() {
-    printf "%s" "$1" | sed -e 's/%/%25/g' -e 's/:/%3A/g' -e 's/+/%2B/g' -e 's/\//%2F/g' -e 's/=/%3D/g'
+    printf "%s" "\$1" | sed -e 's/%/%25/g' -e 's/:/%3A/g' -e 's/+/%2B/g' -e 's/\//%2F/g' -e 's/=/%3D/g'
 }
 
 read_config() {
-    if [ ! -f "$CONFIG_PATH" ]; then
-        err "未找到配置文件: $CONFIG_PATH"
+    if [ ! -f "\$CONFIG_PATH" ]; then
+        err "未找到配置文件: \$CONFIG_PATH"
         return 1
     fi
-    
-    if [ -f "$CACHE_FILE" ]; then
-        . "$CACHE_FILE"
-    fi
-    
-    CUSTOM_IP="${CUSTOM_IP:-}"
-    HY2_PORT=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port // empty' "$CONFIG_PATH" | head -n1)
-    HY2_PSK=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .users[0].password // empty' "$CONFIG_PATH" | head -n1)
+    if [ -f "\$CACHE_FILE" ]; then . "\$CACHE_FILE"; fi
+    CUSTOM_IP="\${CUSTOM_IP:-}"
+    HY2_PORT=\$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port // empty' "\$CONFIG_PATH" | head -n1)
+    HY2_PSK=\$(jq -r '.inbounds[] | select(.type=="hysteria2") | .users[0].password // empty' "\$CONFIG_PATH" | head -n1)
 }
 
 get_public_ip() {
     local ip=""
     for url in "https://api.ipify.org" "https://ipinfo.io/ip" "https://ifconfig.me"; do
-        ip=$(curl -s --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')
-        [ -n "$ip" ] && echo "$ip" && return 0
+        ip=\$(curl -s --max-time 5 "\$url" 2>/dev/null | tr -d '[:space:]')
+        [ -n "\$ip" ] && echo "\$ip" && return 0
     done
     echo "YOUR_SERVER_IP"
 }
 
 generate_uris() {
     read_config || return 1
-    if [ -n "${CUSTOM_IP:-}" ]; then
-        PUBLIC_IP="$CUSTOM_IP"
+    if [ -n "\${CUSTOM_IP:-}" ]; then
+        PUBLIC_IP="\$CUSTOM_IP"
     else
-        PUBLIC_IP=$(get_public_ip)
+        PUBLIC_IP=\$(get_public_ip)
     fi
-    node_suffix=$(cat /root/node_names.txt 2>/dev/null || echo "")
+    
+    # 自动获取保存的服务器名称并构造备注
+    S_NAME=\$(cat /root/node_names.txt 2>/dev/null || hostname || echo "server")
+    REMARK="hy2-\${S_NAME}"
+    
     URI_FILE="/etc/sing-box/uris.txt"
-    > "$URI_FILE"
-    hy2_encoded=$(url_encode "$HY2_PSK")
-    echo "=== Hysteria2 (HY2) ===" >> "$URI_FILE"
-    echo "hy2://${hy2_encoded}@${PUBLIC_IP}:${HY2_PORT}/?sni=www.bing.com&alpn=h3&insecure=1#hy2${node_suffix}" >> "$URI_FILE"
-    echo "" >> "$URI_FILE"
-    info "URI 已保存到: $URI_FILE"
+    > "\$URI_FILE"
+    hy2_encoded=\$(url_encode "\$HY2_PSK")
+    
+    echo "=== Hysteria2 (HY2) ===" >> "\$URI_FILE"
+    # 注意：TLS_DOMAIN 不加反斜杠，直接注入安装时选定的域名
+    echo "hy2://\${hy2_encoded}@\${PUBLIC_IP}:\${HY2_PORT}/?sni=${TLS_DOMAIN}&alpn=h3&insecure=1#\${REMARK}" >> "\$URI_FILE"
+    echo "" >> "\$URI_FILE"
+    info "URI 已保存到: \$URI_FILE"
 }
 
 action_view_uri() {
@@ -673,17 +654,17 @@ action_view_uri() {
 }
 
 action_view_config() {
-    echo "$CONFIG_PATH"
+    echo "\$CONFIG_PATH"
 }
 
 action_edit_config() {
-    if [ ! -f "$CONFIG_PATH" ]; then
-        err "配置文件不存在: $CONFIG_PATH"
+    if [ ! -f "\$CONFIG_PATH" ]; then
+        err "配置文件不存在: \$CONFIG_PATH"
         return 1
     fi
-    ${EDITOR:-nano} "$CONFIG_PATH" 2>/dev/null || ${EDITOR:-vi} "$CONFIG_PATH"
+    \${EDITOR:-nano} "\$CONFIG_PATH" 2>/dev/null || \${EDITOR:-vi} "\$CONFIG_PATH"
     if command -v sing-box >/dev/null 2>&1; then
-        if sing-box check -c "$CONFIG_PATH" >/dev/null 2>&1; then
+        if sing-box check -c "\$CONFIG_PATH" >/dev/null 2>&1; then
             info "配置校验通过,已重启服务"
             service_restart || warn "重启失败"
             generate_uris || true
@@ -695,13 +676,13 @@ action_edit_config() {
 
 action_reset_hy2() {
     read_config || return 1
-    read -p "输入新的 HY2 端口(回车保持 $HY2_PORT): " new_port
-    new_port="${new_port:-$HY2_PORT}"
+    read -p "输入新的 HY2 端口(回车保持 \$HY2_PORT): " new_port
+    new_port="\${new_port:-\$HY2_PORT}"
     info "正在停止服务..."
     service_stop || warn "停止服务失败"
-    cp "$CONFIG_PATH" "${CONFIG_PATH}.bak"
-    jq --argjson port "$new_port" '.inbounds |= map(if .type=="hysteria2" then .listen_port = $port else . end)' "$CONFIG_PATH" > "${CONFIG_PATH}.tmp" && mv "${CONFIG_PATH}.tmp" "$CONFIG_PATH"
-    info "已启动服务并更新 HY2 端口: $new_port"
+    cp "\$CONFIG_PATH" "\${CONFIG_PATH}.bak"
+    jq --argjson port "\$new_port" '.inbounds |= map(if .type=="hysteria2" then .listen_port = \$port else . end)' "\$CONFIG_PATH" > "\${CONFIG_PATH}.tmp" && mv "\${CONFIG_PATH}.tmp" "\$CONFIG_PATH"
+    info "已启动服务并更新 HY2 端口: \$new_port"
     service_start || warn "启动服务失败"
     sleep 1
     generate_uris || warn "生成 URI 失败"
@@ -710,53 +691,39 @@ action_reset_hy2() {
 action_update() {
     detect_os
     info "正在检查版本..."
-
-    # 获取本地版本并去掉 'v' (如 1.8.0)
-    LOCAL_VER=$(sing-box version 2>/dev/null | head -n1 | awk '{print $3}' | sed 's/^v//' || echo "0")
-    
-    # 获取远程最新版本并去掉 'v' (如 1.10.1)
-    REMOTE_TAG=$(curl -fsSL "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r '.tag_name' | sed 's/^v//')
-
-    # 验证远程版本合法性
-    [[ -z "$REMOTE_TAG" || "$REMOTE_TAG" == "null" ]] && { err "获取远程版本失败"; return 1; }
-
-    # 精准比对
-    if [[ "$LOCAL_VER" == "$REMOTE_TAG" ]]; then
-        info "✅ 当前已是最新版 (v$LOCAL_VER)，无需更新。"
+    LOCAL_VER=\$(sing-box version 2>/dev/null | head -n1 | awk '{print \$3}' | sed 's/^v//' || echo "0")
+    REMOTE_TAG=\$(curl -fsSL "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | jq -r '.tag_name' | sed 's/^v//')
+    [[ -z "\$REMOTE_TAG" || "\$REMOTE_TAG" == "null" ]] && { err "获取远程版本失败"; return 1; }
+    if [[ "\$LOCAL_VER" == "\$REMOTE_TAG" ]]; then
+        info "✅ 当前已是最新版 (v\$LOCAL_VER)，无需更新。"
         return 0
     fi
-
-    info "发现新版本: v$LOCAL_VER -> v$REMOTE_TAG"
-    read -p "确认更新? (y/n): " confirm && [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
-
-    # 执行下载安装流程
-    TMPDIR=$(mktemp -d)
-    info "正在下载更新 v$REMOTE_TAG..."
-    curl -fL "https://github.com/SagerNet/sing-box/releases/download/v${REMOTE_TAG}/sing-box-${REMOTE_TAG}-linux-${SBOX_ARCH}.tar.gz" -o "$TMPDIR/sb.tar.gz" \
-    && tar -xf "$TMPDIR/sb.tar.gz" -C "$TMPDIR" \
+    info "发现新版本: v\$LOCAL_VER -> v\$REMOTE_TAG"
+    read -p "确认更新? (y/n): " confirm && [[ ! "\$confirm" =~ ^[Yy]$ ]] && return 0
+    TMPDIR=\$(mktemp -d)
+    info "正在下载更新 v\$REMOTE_TAG..."
+    curl -fL "https://github.com/SagerNet/sing-box/releases/download/v\${REMOTE_TAG}/sing-box-\${REMOTE_TAG}-linux-\${SBOX_ARCH}.tar.gz" -o "\$TMPDIR/sb.tar.gz" \
+    && tar -xf "\$TMPDIR/sb.tar.gz" -C "\$TMPDIR" \
     && service_stop \
-    && install -m 755 "$TMPDIR"/sing-box-*/sing-box /usr/bin/sing-box \
-    && info "🎉 更新成功: v$REMOTE_TAG" \
+    && install -m 755 "\$TMPDIR"/sing-box-*/sing-box /usr/bin/sing-box \
+    && info "🎉 更新成功: v\$REMOTE_TAG" \
     || err "更新失败"
-
-    rm -rf "$TMPDIR" && service_start
+    rm -rf "\$TMPDIR" && service_start
 }
 
 action_uninstall() {
     read -p "确认卸载 sing-box?(y/N): " confirm
-    [[ ! "$confirm" =~ ^[Yy]$ ]] && info "已取消" && return 0
+    [[ ! "\$confirm" =~ ^[Yy]$ ]] && info "已取消" && return 0
     info "正在卸载..."
     service_stop || true
-    if [ "$OS" = "alpine" ]; then
+    detect_os
+    if [ "\$OS" = "alpine" ]; then
         rc-update del sing-box default 2>/dev/null || true
         rm -f /etc/init.d/sing-box
-        apk del sing-box 2>/dev/null || true
     else
-        systemctl stop sing-box 2>/dev/null || true
         systemctl disable sing-box 2>/dev/null || true
         rm -f /etc/systemd/system/sing-box.service
         systemctl daemon-reload 2>/dev/null || true
-        apt purge -y sing-box >/dev/null 2>&1 || true
     fi
     rm -rf /etc/sing-box /var/log/sing-box* /usr/local/bin/sb /usr/bin/sing-box /root/node_names.txt 2>/dev/null || true
     info "卸载完成"
@@ -786,7 +753,7 @@ MENU
 while true; do
     show_menu
     read -p "请输入选项: " opt
-    case "$opt" in
+    case "\$opt" in
         1) action_view_uri ;;
         2) action_view_config ;;
         3) action_edit_config ;;
@@ -798,11 +765,11 @@ while true; do
         9) action_update ;;
         10) action_uninstall; exit 0 ;;
         0) exit 0 ;;
-        *) warn "无效选项: $opt" ;;
+        *) warn "无效选项: \$opt" ;;
     esac
     echo ""
 done
-SB_SCRIPT
+EOF
 
 chmod +x "$SB_PATH"
 info "✅ 管理面板已创建,可输入 sb 打开管理面板"
