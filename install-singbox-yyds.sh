@@ -338,7 +338,7 @@ create_config() {
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem",
         "fallback": {
-          "server": "www.cloudflare.com",
+          "server": "www.bing.com",
           "server_port": 443
         }
       }
