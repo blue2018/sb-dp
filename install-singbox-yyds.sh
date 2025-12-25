@@ -234,33 +234,40 @@ install_singbox() {
         CURRENT_VERSION=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
         warn "检测到已安装 sing-box: $CURRENT_VERSION"
         read -p "是否重新安装?(y/N): " REINSTALL
-        [[ ! "$REINSTALL" =~ ^[Yy]$ ]] && info "跳过 sing-box 安装" && return 0
+        if [[ ! "$REINSTALL" =~ ^[Yy]$ ]]; then
+            info "跳过 sing-box 安装"
+            return 0
+        fi
     fi
 
-    # 获取官方最新 release
-    LATEST_VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-                 | grep '"tag_name":' | head -n1 | cut -d'"' -f4)
-    info "官方最新版本: $LATEST_VER"
-
-    # OS 类型与 CPU 架构
-    OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]')   # linux, darwin
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64) ARCH="amd64" ;;
-        aarch64|arm64) ARCH="arm64" ;;
-        *) err "暂不支持 CPU 架构: $ARCH" ; exit 1 ;;
+    case "$OS" in
+        alpine)
+            info "使用 Edge 仓库安装 sing-box"
+            apk update || { err "apk update 失败"; exit 1; }
+            apk add --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community sing-box || {
+                err "sing-box 安装失败"
+                exit 1
+            }
+            ;;
+        debian|redhat)
+            bash <(curl -fsSL https://sing-box.app/install.sh) || {
+                err "sing-box 安装失败"
+                exit 1
+            }
+            ;;
+        *)
+            err "未支持的系统,无法安装 sing-box"
+            exit 1
+            ;;
     esac
 
-    # 下载官方 release
-    URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_VER}/sing-box-${LATEST_VER}-${OS_TYPE}-${ARCH}.tar.gz"
-    TMPDIR=$(mktemp -d)
-    curl -L "$URL" -o "$TMPDIR/sing-box.tar.gz" || { err "下载失败"; exit 1; }
-    tar -xzf "$TMPDIR/sing-box.tar.gz" -C "$TMPDIR"
-    install -m 755 "$TMPDIR/sing-box" /usr/bin/sing-box
-    rm -rf "$TMPDIR"
+    if ! command -v sing-box >/dev/null 2>&1; then
+        err "sing-box 安装后未找到可执行文件"
+        exit 1
+    fi
 
     INSTALLED_VERSION=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
-    info "sing-box 安装完成: $INSTALLED_VERSION"
+    info "sing-box 安装成功: $INSTALLED_VERSION"
 }
 
 install_singbox
@@ -706,40 +713,17 @@ action_reset_hy2() {
 
 action_update() {
     info "开始更新 sing-box..."
-
-    if command -v sing-box >/dev/null 2>&1; then
-        CURRENT_VER=$(sing-box version 2>/dev/null | head -1 || echo "未安装")
+    if [ "$OS" = "alpine" ]; then
+        apk update && apk upgrade sing-box || bash <(curl -fsSL https://sing-box.app/install.sh)
     else
-        CURRENT_VER="未安装"
+        bash <(curl -fsSL https://sing-box.app/install.sh)
     fi
-    LATEST_VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-                 | grep '"tag_name":' | head -n1 | cut -d'"' -f4 || echo "未知")
-    info "当前已安装版本: $CURRENT_VER"
-    info "官方最新版本: $LATEST_VER"
-
-    read -p "是否升级到最新版本? [y/N]: " UPGRADE
-    [[ ! "$UPGRADE" =~ ^[Yy]$ ]] && info "已取消升级" && return 0
-
-    # OS 类型与 CPU 架构
-    OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]')
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64) ARCH="amd64" ;;
-        aarch64|arm64) ARCH="arm64" ;;
-        *) err "暂不支持 CPU 架构: $ARCH" ; return 1 ;;
-    esac
-
-    URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_VER}/sing-box-${LATEST_VER}-${OS_TYPE}-${ARCH}.tar.gz"
-
-    TMPDIR=$(mktemp -d)
-    curl -L "$URL" -o "$TMPDIR/sing-box.tar.gz" || { err "下载失败"; return 1; }
-    tar -xzf "$TMPDIR/sing-box.tar.gz" -C "$TMPDIR"
-    install -m 755 "$TMPDIR/sing-box" /usr/bin/sing-box
-    rm -rf "$TMPDIR"
-
-    NEW_VER=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
-    info "升级完成,当前版本: $NEW_VER"
-    service_restart || warn "服务重启失败"
+    info "更新完成,已重启服务..."
+    if command -v sing-box >/dev/null 2>&1; then
+        NEW_VER=$(sing-box version 2>/dev/null | head -n1)
+        info "当前版本: $NEW_VER"
+        service_restart || warn "重启失败"
+    fi
 }
 
 action_uninstall() {
