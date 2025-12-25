@@ -231,29 +231,42 @@ install_singbox() {
     info "开始安装 sing-box..."
 
     if command -v sing-box >/dev/null 2>&1; then
-        CURRENT_VERSION=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
-        warn "检测到已安装 sing-box: $CURRENT_VERSION"
-        read -p "是否重新安装?(y/N): " REINSTALL
-        if [[ ! "$REINSTALL" =~ ^[Yy]$ ]]; then
-            info "跳过 sing-box 安装"
-            return 0
-        fi
+        warn "已安装: $(sing-box version 2>/dev/null | head -1)"
+        read -p "是否重新安装?(y/N): " r
+        [[ ! "$r" =~ ^[Yy]$ ]] && info "跳过安装" && return 0
     fi
 
-    # 统一使用官方安装脚本
-    info "使用官方脚本安装 sing-box..."
-    bash <(curl -fsSL https://sing-box.app/install.sh) || {
-        err "sing-box 安装失败"
-        exit 1
-    }
-
-    if ! command -v sing-box >/dev/null 2>&1; then
-        err "sing-box 安装后未找到可执行文件"
-        exit 1
+    # 尝试官方脚本
+    info "使用官方脚本安装..."
+    if bash <(curl -fsSL https://sing-box.app/install.sh) 2>/dev/null && command -v sing-box >/dev/null 2>&1; then
+        info "✅ 安装成功: $(sing-box version 2>/dev/null | head -1)"
+        return 0
     fi
-
-    INSTALLED_VERSION=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
-    info "sing-box 安装成功: $INSTALLED_VERSION"
+    
+    # 手动安装
+    warn "切换到手动安装..."
+    VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -oP '"tag_name":\s*"v?\K[\d.]+')
+    [ -z "$VER" ] && err "获取版本失败" && exit 1
+    
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)  ARCH="amd64" ;;
+        aarch64) ARCH="arm64" ;;
+        armv7l)  ARCH="armv7" ;;
+        i686)    ARCH="386" ;;
+        *)       err "不支持的架构: $ARCH" && exit 1 ;;
+    esac
+    
+    URL="https://github.com/SagerNet/sing-box/releases/download/v${VER}/sing-box-${VER}-linux-${ARCH}.tar.gz"
+    info "下载 v${VER}..."
+    
+    curl -sL "$URL" -o /tmp/sb.tar.gz && \
+    tar -xzf /tmp/sb.tar.gz -C /tmp/ && \
+    mv $(find /tmp -name "sing-box" -type f -executable | head -n1) /usr/bin/sing-box && \
+    chmod +x /usr/bin/sing-box && \
+    rm -rf /tmp/sb* /tmp/sing-box* || { err "安装失败"; exit 1; }
+    
+    info "✅ 安装成功: $(sing-box version 2>/dev/null | head -1)"
 }
 
 install_singbox
@@ -698,22 +711,45 @@ action_reset_hy2() {
 }
 
 action_update() {
-    CURRENT=$(sing-box version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -n1)
-    LATEST=$(curl -s --max-time 10 https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -oP '"tag_name":\s*"v?\K[\d.]+')
+    CUR=$(sing-box version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -n1)
+    LAT=$(curl -s --max-time 10 https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep -oP '"tag_name":\s*"v?\K[\d.]+')
     
-    echo "当前: ${CURRENT:-unknown} | 最新: ${LATEST:-unknown}"
+    echo "当前: ${CUR:-未知} | 最新: ${LAT:-未知}"
     
-    if [ "$CURRENT" = "$LATEST" ] && [ -n "$LATEST" ]; then
+    if [ "$CUR" = "$LAT" ] && [ -n "$LAT" ]; then
         info "✅ 已是最新版本"
         read -p "强制重装? (y/N): " f
         [[ ! "$f" =~ ^[Yy]$ ]] && return 0
     fi
     
     read -p "确认更新? (Y/n): " c
-    [[ "${c:-Y}" =~ ^[Yy]$ ]] || return 0
+    [[ ! "${c:-Y}" =~ ^[Yy]$ ]] && info "已取消" && return 0
     
     info "更新中..."
-    bash <(curl -fsSL https://sing-box.app/install.sh) && service_restart && info "✅ 完成" || err "失败"
+    
+    # 尝试官方脚本
+    if bash <(curl -fsSL https://sing-box.app/install.sh) 2>/dev/null; then
+        info "✅ 完成: $(sing-box version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -n1)"
+        service_restart && info "✅ 已重启" || warn "重启失败"
+        return 0
+    fi
+    
+    # 手动更新
+    warn "切换到手动更新..."
+    [ -z "$LAT" ] && err "获取版本失败" && return 1
+    
+    ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/;s/armv7l/armv7/;s/i686/386/')
+    URL="https://github.com/SagerNet/sing-box/releases/download/v${LAT}/sing-box-${LAT}-linux-${ARCH}.tar.gz"
+    
+    info "下载 v${LAT}..."
+    service_stop || true
+    curl -sL "$URL" -o /tmp/sb.tar.gz && \
+    tar -xzf /tmp/sb.tar.gz -C /tmp/ && \
+    mv $(find /tmp -name "sing-box" -type f -executable | head -n1) /usr/bin/sing-box && \
+    chmod +x /usr/bin/sing-box && \
+    rm -rf /tmp/sb* /tmp/sing-box* && \
+    info "✅ 完成: $(sing-box version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -n1)" && \
+    service_restart && info "✅ 已重启" || { err "更新失败"; return 1; }
 }
 
 action_uninstall() {
