@@ -29,9 +29,7 @@ err()  { echo -e "\033[1;31m[ERR]\033[0m $*" >&2; }
 # -----------------------
 # 检测系统类型
 detect_os() {
-    # =========================
-    # CPU 架构检测（GitHub 用）
-    # =========================
+    # CPU 架构
     ARCH=$(uname -m)
     case "$ARCH" in
         x86_64)   SBOX_ARCH="amd64" ;;
@@ -39,26 +37,24 @@ detect_os() {
         armv7l)   SBOX_ARCH="armv7" ;;
         armv6l)   SBOX_ARCH="armv6" ;;
         i386|i686) SBOX_ARCH="386" ;;
-        *) err "不支持的CPU架构: $ARCH"; exit 1 ;;
+        *) err "不支持的 CPU 架构: $ARCH"; exit 1 ;;
     esac
 
-    # =========================
-    # OS 类型检测（服务用）
-    # =========================
+    # OS 类型
     if [ -f /etc/os-release ]; then
         . /etc/os-release
-        OS_ID="${ID:-}"
-        OS_ID_LIKE="${ID_LIKE:-}"
+        ID="${ID:-}"
+        ID_LIKE="${ID_LIKE:-}"
     else
-        OS_ID=""
-        OS_ID_LIKE=""
+        ID=""
+        ID_LIKE=""
     fi
 
-    if echo "$OS_ID $OS_ID_LIKE" | grep -qi "alpine"; then
+    if echo "$ID $ID_LIKE" | grep -qi "alpine"; then
         OS="alpine"
-    elif echo "$OS_ID $OS_ID_LIKE" | grep -Ei "debian|ubuntu" >/dev/null; then
+    elif echo "$ID $ID_LIKE" | grep -Ei "debian|ubuntu" >/dev/null; then
         OS="debian"
-    elif echo "$OS_ID $OS_ID_LIKE" | grep -Ei "centos|rhel|fedora" >/dev/null; then
+    elif echo "$ID $ID_LIKE" | grep -Ei "centos|rhel|fedora" >/dev/null; then
         OS="redhat"
     else
         OS="unknown"
@@ -761,8 +757,6 @@ show_menu() {
 ==========================
 MENU
 }
-
-detect_os
 
 while true; do
     show_menu
