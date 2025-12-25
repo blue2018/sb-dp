@@ -247,11 +247,7 @@ install_singbox() {
     API_DATA=$(curl -s --max-time 10 https://api.github.com/repos/SagerNet/sing-box/releases/latest)
     VER=$(extract_version "$API_DATA")
     
-    if [ -z "$VER" ]; then
-        err "获取版本失败"
-        exit 1
-    fi
-    
+    [ -z "$VER" ] && err "获取版本失败" && exit 1
     info "最新版本: v${VER}"
     
     # 检测架构
@@ -266,31 +262,23 @@ install_singbox() {
     
     info "系统架构: $ARCH"
     
-    # 多个下载源
+    # 直接使用 GitHub 官方源
     FILENAME="sing-box-${VER}-linux-${ARCH}.tar.gz"
-    URLS=(
-        "https://mirror.ghproxy.com/https://github.com/SagerNet/sing-box/releases/download/v${VER}/${FILENAME}"
-        "https://gh.api.99988866.xyz/https://github.com/SagerNet/sing-box/releases/download/v${VER}/${FILENAME}"
-        "https://github.com/SagerNet/sing-box/releases/download/v${VER}/${FILENAME}"
-    )
+    URL="https://github.com/SagerNet/sing-box/releases/download/v${VER}/${FILENAME}"
     
-    # 依次尝试下载
-    DOWNLOAD_SUCCESS=0
-    for URL in "${URLS[@]}"; do
-        SOURCE_NAME=$(echo "$URL" | cut -d'/' -f3)
-        info "尝试下载源: $SOURCE_NAME"
-        if curl -sL --max-time 60 "$URL" -o /tmp/sb.tar.gz 2>/dev/null && [ -s /tmp/sb.tar.gz ]; then
-            DOWNLOAD_SUCCESS=1
-            info "✅ 下载成功"
-            break
-        fi
-        warn "下载失败，尝试下一个源..."
-    done
-    
-    if [ $DOWNLOAD_SUCCESS -eq 0 ]; then
-        err "所有下载源均失败"
+    info "开始下载..."
+    if ! curl -L --progress-bar --max-time 300 "$URL" -o /tmp/sb.tar.gz; then
+        err "下载失败"
         exit 1
     fi
+    
+    if [ ! -s /tmp/sb.tar.gz ]; then
+        err "下载的文件为空"
+        rm -f /tmp/sb.tar.gz
+        exit 1
+    fi
+    
+    info "✅ 下载成功"
     
     # 安装
     info "正在安装..."
@@ -300,11 +288,7 @@ install_singbox() {
         exit 1
     fi
     
-    BINARY=$(find /tmp -type f -name "sing-box" -perm -111 2>/dev/null | head -n1)
-    if [ -z "$BINARY" ]; then
-        # 备用查找方式
-        BINARY=$(find /tmp -type f -name "sing-box" 2>/dev/null | head -n1)
-    fi
+    BINARY=$(find /tmp -type f -name "sing-box" 2>/dev/null | head -n1)
     
     if [ -z "$BINARY" ] || [ ! -f "$BINARY" ]; then
         err "未找到可执行文件"
@@ -783,6 +767,7 @@ action_update() {
     
     echo "当前版本: ${CUR:-未知}"
     echo "最新版本: ${LAT:-未知}"
+    echo ""
     
     if [ "$CUR" = "$LAT" ] && [ -n "$LAT" ]; then
         info "✅ 已是最新版本，无需更新"
@@ -808,28 +793,21 @@ action_update() {
     esac
     
     FILENAME="sing-box-${LAT}-linux-${ARCH}.tar.gz"
-    URLS=(
-        "https://mirror.ghproxy.com/https://github.com/SagerNet/sing-box/releases/download/v${LAT}/${FILENAME}"
-        "https://gh.api.99988866.xyz/https://github.com/SagerNet/sing-box/releases/download/v${LAT}/${FILENAME}"
-        "https://github.com/SagerNet/sing-box/releases/download/v${LAT}/${FILENAME}"
-    )
+    URL="https://github.com/SagerNet/sing-box/releases/download/v${LAT}/${FILENAME}"
     
-    # 下载
-    DOWNLOAD_SUCCESS=0
-    for URL in "${URLS[@]}"; do
-        SOURCE=$(echo "$URL" | cut -d'/' -f3)
-        info "尝试: $SOURCE"
-        if curl -sL --max-time 60 "$URL" -o /tmp/sb.tar.gz 2>/dev/null && [ -s /tmp/sb.tar.gz ]; then
-            DOWNLOAD_SUCCESS=1
-            info "✅ 下载成功"
-            break
-        fi
-    done
-    
-    if [ $DOWNLOAD_SUCCESS -eq 0 ]; then
+    info "开始下载..."
+    if ! curl -L --progress-bar --max-time 300 "$URL" -o /tmp/sb.tar.gz; then
         err "下载失败"
         return 1
     fi
+    
+    if [ ! -s /tmp/sb.tar.gz ]; then
+        err "下载的文件为空"
+        rm -f /tmp/sb.tar.gz
+        return 1
+    fi
+    
+    info "✅ 下载成功"
     
     # 停止服务
     info "停止服务..."
