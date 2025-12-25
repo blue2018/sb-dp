@@ -565,6 +565,7 @@ CACHE_FILE="/etc/sing-box/.config_cache"
 SERVICE_NAME="sing-box"
 
 detect_os() {
+    # OS 检测
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         ID="${ID:-}"
@@ -582,6 +583,17 @@ detect_os() {
     else
         OS="unknown"
     fi
+
+    # CPU 架构检测
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)    SBOX_ARCH="amd64" ;;
+        aarch64)   SBOX_ARCH="arm64" ;;
+        armv7l)    SBOX_ARCH="armv7" ;;
+        armv6l)    SBOX_ARCH="armv6" ;;
+        i386|i686) SBOX_ARCH="386" ;;
+        *) err "不支持的 CPU 架构: $ARCH"; exit 1 ;;
+    esac
 }
 
 detect_os
