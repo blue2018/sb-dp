@@ -327,19 +327,12 @@ create_config() {
       "users": [
         { "password": "$PSK_HY2" }
       ],
-      "_recv_window": 67108864,
-      "_send_window": 67108864,
-      "_max_conn_client": 4096,
       $BANDWIDTH_CONFIG
       "tls": {
         "enabled": true,
         "alpn": ["h3","h2","http/1.1"],
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-        "key_path": "/etc/sing-box/certs/privkey.pem",
-        "_fallback": {
-          "server": "www.bing.com",
-          "server_port": 443
-        }
+        "key_path": "/etc/sing-box/certs/privkey.pem"
       }
     }
   ],
