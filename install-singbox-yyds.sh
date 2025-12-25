@@ -28,6 +28,18 @@ err()  { echo -e "\033[1;31m[ERR]\033[0m $*" >&2; }
 
 # -----------------------
 # 检测系统类型
+detect_arch() {
+    ARCH=$(uname -m)
+    case "$ARCH" in
+        x86_64)   SBOX_ARCH="amd64" ;;
+        aarch64)  SBOX_ARCH="arm64" ;;
+        armv7l)   SBOX_ARCH="armv7" ;;
+        armv6l)   SBOX_ARCH="armv6" ;;
+        i386|i686) SBOX_ARCH="386" ;;
+        *) err "不支持的CPU架构: $ARCH"; return 1 ;;
+    esac
+}
+
 detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -145,18 +157,6 @@ rand_uuid() {
     else
         openssl rand -hex 16 | sed 's/\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)\(..\)/\1\2\3\4-\5\6-\7\8-\9\10-\11\12\13\14\15\16/'
     fi
-}
-
-detect_arch() {
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64)   SBOX_ARCH="amd64" ;;
-        aarch64)  SBOX_ARCH="arm64" ;;
-        armv7l)   SBOX_ARCH="armv7" ;;
-        armv6l)   SBOX_ARCH="armv6" ;;
-        i386|i686) SBOX_ARCH="386" ;;
-        *) err "不支持的CPU架构: $ARCH"; exit 1 ;;
-    esac
 }
 
 # -----------------------
@@ -701,7 +701,6 @@ action_update() {
 
     API="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
     TAG=$(curl -fsSL "$API" | jq -r '.tag_name')
-
     [ -z "$TAG" ] && err "获取最新版本失败" && return 1
 
     URL="https://github.com/SagerNet/sing-box/releases/download/${TAG}/sing-box-${TAG#v}-linux-${SBOX_ARCH}.tar.gz"
