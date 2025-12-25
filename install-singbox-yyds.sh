@@ -230,38 +230,44 @@ info "HY2 密码(UUID)已自动生成"
 install_singbox() {
     info "开始安装 sing-box..."
 
-    BIN_PATH="/usr/local/bin/sing-box"
-
     if command -v sing-box >/dev/null 2>&1; then
         CURRENT_VERSION=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
         warn "检测到已安装 sing-box: $CURRENT_VERSION"
-        read -p "是否重新安装/升级?(y/N): " REINSTALL
+        read -p "是否重新安装?(y/N): " REINSTALL
         if [[ ! "$REINSTALL" =~ ^[Yy]$ ]]; then
-            info "跳过安装/升级"
+            info "跳过 sing-box 安装"
             return 0
         fi
-
-        # 只有升级才显示可升级版本号
-        LATEST_VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
-        info "可升级版本: $LATEST_VER"
-    else
-        CURRENT_VERSION="none"
-        info "当前未安装 sing-box"
-        # 初装不显示可升级版本
     fi
 
-    ARCH="amd64"
-    info "正在下载 sing-box ..."
-    curl -Lo "$BIN_PATH" "https://github.com/SagerNet/sing-box/releases/download/${LATEST_VER:-v2.0.0}/sing-box-linux-$ARCH"
-    chmod +x "$BIN_PATH"
+    case "$OS" in
+        alpine)
+            info "使用 Edge 仓库安装 sing-box"
+            apk update || { err "apk update 失败"; exit 1; }
+            apk add --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community sing-box || {
+                err "sing-box 安装失败"
+                exit 1
+            }
+            ;;
+        debian|redhat)
+            bash <(curl -fsSL https://sing-box.app/install.sh) || {
+                err "sing-box 安装失败"
+                exit 1
+            }
+            ;;
+        *)
+            err "未支持的系统,无法安装 sing-box"
+            exit 1
+            ;;
+    esac
 
     if ! command -v sing-box >/dev/null 2>&1; then
-        err "sing-box 安装失败"
+        err "sing-box 安装后未找到可执行文件"
         exit 1
     fi
 
     INSTALLED_VERSION=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
-    info "sing-box 安装/升级完成: $INSTALLED_VERSION"
+    info "sing-box 安装成功: $INSTALLED_VERSION"
 }
 
 install_singbox
@@ -706,38 +712,18 @@ action_reset_hy2() {
 }
 
 action_update() {
-    info "获取本地已安装 sing-box 版本..."
-    if command -v sing-box >/dev/null 2>&1; then
-        CURRENT_VER=$(sing-box version 2>/dev/null | head -1 || echo "unknown")
-        info "当前已安装版本: $CURRENT_VER"
-    else
-        info "当前未安装 sing-box"
-        CURRENT_VER="none"
-    fi
-
-    info "查询官方最新版本..."
-    LATEST_VER=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-                 | jq -r '.tag_name' || echo "unknown")
-    info "可升级版本: $LATEST_VER"
-
-    read -p "是否升级到最新版本 ($LATEST_VER)? [Y/n]: " UPDATE_CHOICE
-    UPDATE_CHOICE="${UPDATE_CHOICE:-Y}"
-
-    if [[ ! "$UPDATE_CHOICE" =~ ^[Yy]$ ]]; then
-        info "已取消升级"
-        return 0
-    fi
-
-    info "开始升级 sing-box..."
+    info "开始更新 sing-box..."
     if [ "$OS" = "alpine" ]; then
         apk update && apk upgrade sing-box || bash <(curl -fsSL https://sing-box.app/install.sh)
     else
         bash <(curl -fsSL https://sing-box.app/install.sh)
     fi
-
-    NEW_VER=$(sing-box version 2>/dev/null | head -1)
-    info "升级完成,当前版本: $NEW_VER"
-    service_restart || warn "重启服务失败"
+    info "更新完成,已重启服务..."
+    if command -v sing-box >/dev/null 2>&1; then
+        NEW_VER=$(sing-box version 2>/dev/null | head -n1)
+        info "当前版本: $NEW_VER"
+        service_restart || warn "重启失败"
+    fi
 }
 
 action_uninstall() {
