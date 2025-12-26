@@ -342,7 +342,9 @@ while true; do
     echo "4) 更新内核   5) 重启服务   6) 卸载程序"
     echo "0) 退出"
     echo "=========================="
-    read -p "请选择 [0-6]: " opt
+    echo -n "请选择 [0-6]: "
+    # 使用 stty 预处理可以防止粘贴时的奇怪回显
+    read -r opt || break
     case "$opt" in
         1) source "$CORE" --show-only ;;
         2) vi /etc/sing-box/config.json && service_ctrl restart ;;
