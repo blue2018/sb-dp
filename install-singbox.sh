@@ -5,15 +5,17 @@ set -euo pipefail
 SBOX_ARCH=""
 OS_DISPLAY=""
 SBOX_CORE="/etc/sing-box/core_script.sh"
+SBOX_GOLIMIT="42MiB"
+SBOX_MEM_MAX="55M"
 
-# TLS 域名随机池 (针对中国大陆环境优化，避免跨区伪装风险)
+# TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
-  "www.bing.com"                # 推荐：全球 IP 分布，合法性高
-  "www.microsoft.com"           # 推荐：系统更新流量，极具迷惑性
-  "download.windowsupdate.com" # 推荐：大流量 UDP 伪装的首选
-  "www.icloud.com"               # 推荐：苹果用户常态化出境流量
-  "gateway.icloud.com"           # 推荐：iCloud 同步流量
-  "cdn.staticfile.org"           # 推荐：国内知名的开源库加速，常去境外取回数据
+  "www.bing.com"
+  "www.microsoft.com"
+  "download.windowsupdate.com"
+  "www.icloud.com"
+  "gateway.icloud.com"
+  "cdn.staticfile.org"
 )
 pick_tls_domain() { echo "${TLS_DOMAIN_POOL[$RANDOM % ${#TLS_DOMAIN_POOL[@]}]}"; }
 TLS_DOMAIN="$(pick_tls_domain)"
@@ -69,38 +71,59 @@ detect_os() {
 }
 
 
-# 系统内核优化
+# 系统内核优化 (从小到大递进逻辑)
 optimize_system() {
-    info "优化内核参数 (适配 64MB 极小内存 + 300Mbps 带宽)..."
+    local mem_total=$(free -m | awk '/Mem:/ {print $2}')
+    if [ -z "$mem_total" ]; then mem_total=64; fi 
+    
+    info "检测到系统可用内存: ${mem_total}MB"
 
-    # 完美版 Swap 自动处理逻辑
+    # --- 1. 阶梯变量设置 (基础 64M) ---
+    local go_limit="42MiB"
+    local udp_buffer="4194304" # 4MB
+    local mem_level="64M"
+
+    # 升档判断 (从小到大)
+    if [ "$mem_total" -ge 100 ] && [ "$mem_total" -lt 200 ]; then
+        go_limit="85MiB"
+        udp_buffer="8388608"  # 8MB
+        mem_level="128M"
+    elif [ "$mem_total" -ge 200 ]; then
+        go_limit="180MiB"
+        udp_buffer="16777216" # 16MB
+        mem_level="256M+"
+    fi
+
+    SBOX_GOLIMIT="$go_limit"
+    SBOX_MEM_MAX="$((mem_total * 85 / 100))M"
+    info "应用 ${mem_level} 级别优化 (Go限制: $SBOX_GOLIMIT, 物理封顶: $SBOX_MEM_MAX)"
+
+    # --- 2. Swap 状态侦测与提示 ---
     if [ "$OS" != "alpine" ]; then
-        local mem_total=$(free -m | grep -i "Mem:" | awk '{print $2}')
-        local swap_total=$(free -m | grep -i "Swap:" | awk '{print $2}')
-        
-        if [ -n "$mem_total" ] && [ -n "$swap_total" ]; then
-            if [ "$mem_total" -lt 100 ] && [ "$swap_total" -lt 10 ]; then
-                warn "检测到 Debian/Ubuntu 内存极小 ($mem_total MB)，正在创建 128MB 虚拟内存..."
-                fallocate -l 128M /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=128
-                chmod 600 /swapfile
-                mkswap /swapfile && swapon /swapfile
-                if ! grep -q "/swapfile" /etc/fstab; then
-                    echo "/swapfile none swap sw 0 0" >> /etc/fstab
-                fi
-                succ "虚拟内存创建成功"
+        local swap_total=$(free -m | awk '/Swap:/ {print $2}')
+        if [ "$swap_total" -gt 10 ]; then
+            succ "检测到系统已存在 Swap (${swap_total}MB)，跳过创建。"
+        elif [ "$mem_total" -lt 150 ]; then
+            warn "内存极小 (${mem_total}MB) 且无虚拟内存，正在创建 128MB 救急 Swap..."
+            if fallocate -l 128M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=128 2>/dev/null; then
+                chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+                grep -q "/swapfile" /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
+                succ "Swap 创建并挂载成功。"
+            else
+                err "Swap 创建失败 (可能是 OpenVZ/LXC 架构限制)。"
             fi
+        else
+            info "内存充足，系统未配置 Swap，保持现状。"
         fi
     else
-        info "检测到 Alpine 系统，保持内存运行模式，跳过 Swap 创建"
+        info "Alpine 系统默认采用内存运行模式，跳过 Swap 处理。"
     fi
     
-    # 开启 BBR
+    # --- 3. 内核网络栈参数 (匹配 300Mbps) ---
     modprobe tcp_bbr >/dev/null 2>&1 || true
-
-    # 内核网络栈优化
-    cat > /etc/sysctl.conf <<'SYSCTL'
-net.core.rmem_max = 4194304
-net.core.wmem_max = 4194304
+    cat > /etc/sysctl.conf <<SYSCTL
+net.core.rmem_max = $udp_buffer
+net.core.wmem_max = $udp_buffer
 net.ipv4.udp_mem = 2048 4096 8192
 net.ipv4.udp_rmem_min = 4096
 net.ipv4.udp_wmem_min = 4096
@@ -183,7 +206,6 @@ create_config() {
     local PORT_HY2="${1:-}"
     mkdir -p /etc/sing-box
     
-    # 端口处理保持不变
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then
             PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
@@ -192,17 +214,13 @@ create_config() {
         fi
     fi
 
-    # --- 核心改进：生成标准的 UUID 作为密码 ---
     local PSK
     if [ -f /etc/sing-box/config.json ]; then
-        # 如果已存在配置，保留原密码
         PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
     else
-        # 优先从系统内核读取 UUID，Alpine/Debian 通用
         if [ -f /proc/sys/kernel/random/uuid ]; then
             PSK=$(cat /proc/sys/kernel/random/uuid)
         else
-            # 备选方案：通过复杂的随机数模拟 UUID 格式
             PSK=$(printf '%s-%s-%s-%s-%s' "$(openssl rand -hex 4)" "$(openssl rand -hex 2)" "$(openssl rand -hex 2)" "$(openssl rand -hex 2)" "$(openssl rand -hex 6)")
         fi
     fi
@@ -230,19 +248,19 @@ EOF
 }
 
 
-# 配置系统服务
+# 配置系统服务 (应用阶梯优化变量)
 setup_service() {
-    info "配置系统服务并启动..."
+    info "配置系统服务并启动 (限制: $SBOX_MEM_MAX)..."
     if [ "$OS" = "alpine" ]; then
-        cat > /etc/init.d/sing-box <<'EOF'
+        cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
 export GOGC=50
-export GOMEMLIMIT=42MiB
+export GOMEMLIMIT=$SBOX_GOLIMIT
 command="/usr/bin/sing-box"
 command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
-pidfile="/run/${RC_SVCNAME}.pid"
+pidfile="/run/\${RC_SVCNAME}.pid"
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default && rc-service sing-box restart
@@ -257,10 +275,10 @@ Type=simple
 User=root
 WorkingDirectory=/etc/sing-box
 Environment=GOGC=50
-Environment=GOMEMLIMIT=42MiB
+Environment=GOMEMLIMIT=$SBOX_GOLIMIT
 ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
 Restart=on-failure
-MemoryMax=55M
+MemoryMax=$SBOX_MEM_MAX
 LimitNOFILE=1000000
 
 [Install]
@@ -302,19 +320,21 @@ show_info() {
 }
 
 
-# 创建 sb 管理脚本
+# 创建 sb 管理脚本 (固化优化变量)
 create_sb_tool() {
     mkdir -p /etc/sing-box
-
-    # --- 核心改进逻辑：解决 Alpine 管道安装和 GitHub 地址去中心化 ---
     echo "#!/usr/bin/env bash" > "$SBOX_CORE"
     echo "set -euo pipefail" >> "$SBOX_CORE"
     echo "SBOX_CORE='$SBOX_CORE'" >> "$SBOX_CORE"
+    
+    # 将阶梯变量持久化写入核心脚本
+    echo "SBOX_GOLIMIT='$SBOX_GOLIMIT'" >> "$SBOX_CORE"
+    echo "SBOX_MEM_MAX='$SBOX_MEM_MAX'" >> "$SBOX_CORE"
+    
     echo "TLS_DOMAIN_POOL=(${TLS_DOMAIN_POOL[@]})" >> "$SBOX_CORE"
     declare -f >> "$SBOX_CORE"
     
     cat >> "$SBOX_CORE" <<'EOF'
-# 自动检测逻辑入口
 if [[ "${1:-}" == "--detect-only" ]]; then
     detect_os
 elif [[ "${1:-}" == "--show-only" ]]; then
@@ -331,15 +351,12 @@ fi
 EOF
 
     chmod +x "$SBOX_CORE"
-
     local SB_PATH="/usr/local/bin/sb"
     cat > "$SB_PATH" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 CORE="/etc/sing-box/core_script.sh"
-
 if [ ! -f "$CORE" ]; then echo "核心文件丢失"; exit 1; fi
-
 source "$CORE" --detect-only
 
 info() { echo -e "\033[1;34m[INFO]\033[0m $*"; }
@@ -361,27 +378,27 @@ while true; do
         1) source "$CORE" --show-only ;;
         2) vi /etc/sing-box/config.json && service_ctrl restart ;;
         3) 
-           read -p "请输入新端口: " NEW_PORT
+           echo "请输入新端口:"
+           echo -n "> "
+           read -r NEW_PORT
            source "$CORE" --reset-port "$NEW_PORT"
            ;;
-        4) 
-           source "$CORE" --update-kernel || true
-           ;;
+        4) source "$CORE" --update-kernel || true ;;
         5) service_ctrl restart && info "服务已重启" ;;
         6) 
-           read -p "是否确定卸载？输入 y 确认，直接回车取消: " confirm
+           echo "是否确定卸载？[y/N]:"
+           echo -n "> "
+           read -r confirm
            if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
                service_ctrl stop
                [ -f /etc/init.d/sing-box ] && rc-update del sing-box
                rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/local/bin/SB /etc/systemd/system/sing-box.service /etc/init.d/sing-box "$CORE"
-               info "卸载完成！"
+               echo "[OK] 卸载完成"
                exit 0
-           else
-               info "已取消卸载。"
            fi
            ;;
         0) exit 0 ;;
-        *) echo "输入有误，请重新输入" ;;
+        *) echo "输入有误" ;;
     esac
 done
 EOF
@@ -398,33 +415,22 @@ elif [[ "${1:-}" == "--show-only" ]]; then
 elif [[ "${1:-}" == "--reset-port" ]]; then
     detect_os && create_config "$2" && setup_service && show_info
 elif [[ "${1:-}" == "--update-kernel" ]]; then
-    detect_os
-    if install_singbox "update"; then
-        setup_service
-    fi
+    detect_os && install_singbox "update" && setup_service
 else
     detect_os
     [ "$(id -u)" != "0" ] && err "请使用 root 运行" && exit 1
-    
     info "开始安装..."
     case "$OS" in
         alpine) apk add --no-cache bash curl jq openssl openrc iproute2 ;;
         debian) apt-get update && apt-get install -y curl jq openssl ;;
         redhat) yum install -y curl jq openssl ;;
     esac
-
-    # --- 恢复端口输入逻辑 ---
     echo -e "-----------------------------------------------"
     read -p "请输入 Hysteria2 运行端口 [回车随机生成]: " USER_PORT
-    # -----------------------------------------------
-
     optimize_system
     install_singbox "install"
     generate_cert
-    
-    # 将用户输入的端口传给配置生成函数
     create_config "$USER_PORT"
-    
     setup_service
     create_sb_tool
     show_info
