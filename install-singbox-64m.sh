@@ -72,8 +72,37 @@ detect_os() {
 # 系统内核优化
 optimize_system() {
     info "优化内核参数 (适配 64MB 极小内存 + 300Mbps 带宽)..."
+
+    # 完美版 Swap 自动处理逻辑
+    # 逻辑：只有当系统不是 Alpine，且内存 < 100MB，且当前 Swap 为 0 时才创建
+    if [ "$OS" != "alpine" ]; then
+        # 使用 awk 匹配行首并获取总计数值，适配更多版本的 free 命令
+        local mem_total=$(free -m | grep -i "Mem:" | awk '{print $2}')
+        local swap_total=$(free -m | grep -i "Swap:" | awk '{print $2}')
+        
+        # 兜底逻辑：如果 free 命令获取失败则跳过，防止脚本报错
+        if [ -n "$mem_total" ] && [ -n "$swap_total" ]; then
+            if [ "$mem_total" -lt 100 ] && [ "$swap_total" -lt 10 ]; then
+                warn "检测到 Debian/Ubuntu 内存极小 ($mem_total MB)，正在创建 128MB 虚拟内存..."
+                # 优先使用高性能的 fallocate，失败则回退到 dd
+                fallocate -l 128M /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=128
+                chmod 600 /swapfile
+                mkswap /swapfile && swapon /swapfile
+                # 检查是否已存在 fstab 条目，防止重复写入
+                if ! grep -q "/swapfile" /etc/fstab; then
+                    echo "/swapfile none swap sw 0 0" >> /etc/fstab
+                fi
+                succ "虚拟内存创建成功"
+            fi
+        fi
+    else
+        info "检测到 Alpine 系统，保持内存运行模式，跳过 Swap 创建"
+    fi
+    
+    # 开启 BBR
     modprobe tcp_bbr >/dev/null 2>&1 || true
 
+    # 内核网络栈优化
     cat > /etc/sysctl.conf <<'SYSCTL'
 net.core.rmem_max = 4194304
 net.core.wmem_max = 4194304
