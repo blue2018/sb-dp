@@ -291,11 +291,8 @@ show_info() {
 # 创建 sb 管理脚本
 create_sb_tool() {
     mkdir -p /etc/sing-box
-    if [ -f "$0" ] && grep -q "install_singbox" "$0"; then
-        cp -f "$0" "$SBOX_CORE"
-    else
-        curl -fsSL https://github.com/blue2018/sb-dp/raw/refs/heads/main/install-singbox.sh -o "$SBOX_CORE"
-    fi
+    cp -f "$0" "$SBOX_CORE"
+    chmod +x "$SBOX_CORE"
     chmod +x "$SBOX_CORE"
 
     local SB_PATH="/usr/local/bin/sb"
