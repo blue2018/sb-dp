@@ -355,20 +355,38 @@ show_info() {
 }
 
 
-# 创建 sb 管理脚本 (修正了导致 404 的下载逻辑)
+# 创建 sb 管理脚本 (修正了路径丢失和 404 问题)
 create_sb_tool() {
+    # 确保目录存在
     mkdir -p /etc/sing-box
-    # 修正：不再从失效的 URL 下载，而是直接将当前脚本自身复制作为备份
-    cp "$0" "$SBOX_CORE" 2>/dev/null || true
-    chmod +x "$SBOX_CORE"
+    
+    # 尝试备份当前脚本。如果 $0 无效（如管道运行），则创建一个空文件占位防止后续报错
+    if [ -f "$0" ]; then
+        cp -f "$0" "$SBOX_CORE" 2>/dev/null || touch "$SBOX_CORE"
+    else
+        # 如果是通过 curl | bash 运行的，$0 不可用，直接生成一个标记文件
+        touch "$SBOX_CORE"
+    fi
+    
+    # 确保文件存在后再执行 chmod
+    if [ -f "$SBOX_CORE" ]; then
+        chmod +x "$SBOX_CORE"
+    fi
 
     local SB_PATH="/usr/local/bin/sb"
+    # 确保 bin 目录存在
+    mkdir -p /usr/local/bin
+
     cat > "$SB_PATH" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 CORE="/etc/sing-box/core_script.sh"
 
-if [ ! -f "$CORE" ]; then echo "核心文件丢失"; exit 1; fi
+# 如果核心文件不可用（比如管道安装的），提示用户
+if [ ! -s "$CORE" ]; then 
+    echo -e "\033[1;31m[ERR]\033[0m 核心脚本未就绪。请手动下载安装脚本到 /etc/sing-box/core_script.sh"
+    exit 1 
+fi
 
 source "$CORE" --detect-only
 
@@ -397,15 +415,13 @@ while true; do
         4) source "$CORE" --update-kernel ;;
         5) service_ctrl restart && info "服务已重启" ;;
         6) 
-           read -p "是否确定卸载？输入 y 确认，直接回车取消: " confirm
+           read -p "是否确定卸载？输入 y 确认: " confirm
            if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
                service_ctrl stop
-               [ -f /etc/init.d/sing-box ] && rc-update del sing-box
+               [ -f /etc/init.d/sing-box ] && rc-update del sing-box 2>/dev/null || true
                rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/local/bin/SB /etc/systemd/system/sing-box.service /etc/init.d/sing-box "$CORE"
                info "卸载完成！"
                exit 0
-           else
-               info "已取消卸载。"
            fi
            ;;
         0) exit 0 ;;
@@ -414,7 +430,7 @@ while true; do
 done
 EOF
     chmod +x "$SB_PATH"
-    ln -sf "$SB_PATH" "/usr/local/bin/SB"
+    ln -sf "$SB_PATH" "/usr/local/bin/SB" 2>/dev/null || true
 }
 
 
