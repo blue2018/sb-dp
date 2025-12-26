@@ -68,18 +68,34 @@ detect_os() {
     esac
 }
 
+# 核心改进：获取虚化环境的真实内存限额 (避免读取到宿主机大内存)
+get_real_mem() {
+    local limit_bytes=0
+    if [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+        limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+    elif [ -f /sys/fs/cgroup/memory.max ]; then
+        limit_bytes=$(cat /sys/fs/cgroup/memory.max)
+    fi
+
+    # 如果读取失败或数值过大，回退到系统 free 命令
+    if [[ ! "$limit_bytes" =~ ^[0-9]+$ ]] || [ "$limit_bytes" -gt 9223372036854771712 ]; then
+        if [ "$OS" = "alpine" ]; then
+            echo $(free -m | grep "Mem" | awk '{print $2}')
+        else
+            echo $(free -m | grep -i "Mem:" | awk '{print $2}')
+        fi
+    else
+        echo $((limit_bytes / 1024 / 1024))
+    fi
+}
+
 
 # 系统内核优化 (改进：支持 64M/128M/256M 分级优化)
 optimize_system() {
-    # 获取物理内存总量
-    local mem_total
-    if [ "$OS" = "alpine" ]; then
-        mem_total=$(free -m | grep "Mem" | awk '{print $2}')
-    else
-        mem_total=$(free -m | grep -i "Mem:" | awk '{print $2}')
-    fi
+    # 获取虚化环境下的真实内存
+    local mem_total=$(get_real_mem)
 
-    info "优化内核参数 (当前检测到内存: ${mem_total}MB)..."
+    info "优化内核参数 (当前检测到真实限额: ${mem_total}MB)..."
 
     # 判定系统类型与 Swap 逻辑 (逻辑修正：先判断系统，Alpine 不动磁盘)
     if [ "$OS" != "alpine" ]; then
@@ -98,7 +114,7 @@ optimize_system() {
                 swap_size=512  # 默认档位
             fi
 
-            warn "检测到内存较小，正在创建 ${swap_size}MB 虚拟内存..."
+            warn "检测到内存较小且为虚化小鸡，正在创建 ${swap_size}MB 虚拟内存..."
             fallocate -l ${swap_size}M /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=$swap_size
             chmod 600 /swapfile
             mkswap /swapfile && swapon /swapfile
@@ -114,7 +130,7 @@ optimize_system() {
     # 开启 BBR
     modprobe tcp_bbr >/dev/null 2>&1 || true
 
-    # 内核网络栈优化 (带宽保持 300Mbps 优化)
+    # 内核网络栈优化 (恢复原有高性能参数)
     cat > /etc/sysctl.conf <<'SYSCTL'
 net.core.rmem_max = 4194304
 net.core.wmem_max = 4194304
@@ -125,7 +141,7 @@ net.core.netdev_max_backlog = 2000
 net.core.somaxconn = 1024
 net.core.default_qdisc = fq_codel
 net.ipv4.tcp_congestion_control = bbr
-vm.swappiness = 15
+vm.swappiness = 10
 SYSCTL
     sysctl -p >/dev/null 2>&1 || true
 }
@@ -168,7 +184,8 @@ install_singbox() {
     if curl -fL --retry 3 "$URL" -o "$TMP_D/sb.tar.gz"; then
         tar -xf "$TMP_D/sb.tar.gz" -C "$TMP_D"
         if pgrep sing-box >/dev/null; then 
-            systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true
+            if [ "$OS" = "alpine" ]; then rc-service sing-box stop 2>/dev/null || true
+            else systemctl stop sing-box 2>/dev/null || true; fi
         fi
         install -m 755 "$TMP_D"/sing-box-*/sing-box /usr/bin/sing-box
         rm -rf "$TMP_D"
@@ -201,13 +218,8 @@ create_config() {
     local PORT_HY2="${1:-}"
     mkdir -p /etc/sing-box
     
-    # 自动获取内存总量用于决策
-    local mem_total
-    if [ "$OS" = "alpine" ]; then
-        mem_total=$(free -m | grep "Mem" | awk '{print $2}')
-    else
-        mem_total=$(free -m | grep -i "Mem:" | awk '{print $2}')
-    fi
+    # 自动获取真实内存总量用于决策
+    local mem_total=$(get_real_mem)
 
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then
@@ -251,13 +263,8 @@ EOF
 
 # 配置系统服务 (改进：适配不同内存环境的运行时限制)
 setup_service() {
-    # 获取物理内存总量
-    local mem_total
-    if [ "$OS" = "alpine" ]; then
-        mem_total=$(free -m | grep "Mem" | awk '{print $2}')
-    else
-        mem_total=$(free -m | grep -i "Mem:" | awk '{print $2}')
-    fi
+    # 获取虚化环境真实内存
+    local mem_total=$(get_real_mem)
 
     # 默认值 (64M 档位)
     local gogc=45
@@ -266,7 +273,7 @@ setup_service() {
 
     # 分级调整优化策略
     if [ "$mem_total" -le 80 ]; then
-        # 64MB 环境
+        # 64MB 环境：极度紧缩
         gogc=45; gomemlimit="40MiB"; mem_max="52M"
     elif [ "$mem_total" -le 150 ]; then
         # 128MB 环境
@@ -360,11 +367,10 @@ create_sb_tool() {
     # 确保目录存在
     mkdir -p /etc/sing-box
     
-    # 尝试备份当前脚本。如果 $0 无效（如管道运行），则创建一个空文件占位防止后续报错
+    # 尝试备份当前脚本
     if [ -f "$0" ]; then
         cp -f "$0" "$SBOX_CORE" 2>/dev/null || touch "$SBOX_CORE"
     else
-        # 如果是通过 curl | bash 运行的，$0 不可用，直接生成一个标记文件
         touch "$SBOX_CORE"
     fi
     
@@ -374,7 +380,6 @@ create_sb_tool() {
     fi
 
     local SB_PATH="/usr/local/bin/sb"
-    # 确保 bin 目录存在
     mkdir -p /usr/local/bin
 
     cat > "$SB_PATH" <<'EOF'
@@ -382,7 +387,6 @@ create_sb_tool() {
 set -euo pipefail
 CORE="/etc/sing-box/core_script.sh"
 
-# 如果核心文件不可用（比如管道安装的），提示用户
 if [ ! -s "$CORE" ]; then 
     echo -e "\033[1;31m[ERR]\033[0m 核心脚本未就绪。请手动下载安装脚本到 /etc/sing-box/core_script.sh"
     exit 1 
