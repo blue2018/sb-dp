@@ -343,8 +343,8 @@ while true; do
     echo "0) 退出"
     echo "=========================="
     echo -n "请选择 [0-6]: "
-    # 使用 stty 预处理可以防止粘贴时的奇怪回显
-    read -r opt || break
+    echo -ne "\033[s" 
+    read -r opt
     case "$opt" in
         1) source "$CORE" --show-only ;;
         2) vi /etc/sing-box/config.json && service_ctrl restart ;;
