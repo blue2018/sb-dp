@@ -345,7 +345,7 @@ while true; do
            fi
            ;;
         0) exit 0 ;;
-        *) echo "输入错误" ;;
+        *) echo "输入错误，请重新输入" ;;
     esac
 done
 EOF
