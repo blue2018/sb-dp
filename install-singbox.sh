@@ -291,15 +291,12 @@ show_info() {
 # 创建 sb 管理脚本
 create_sb_tool() {
     mkdir -p /etc/sing-box
-    
-    # 核心修改：如果本地有文件则拷贝，如果没有（远程执行），则把自己拷贝过去
-    if [ -f "$0" ]; then
+    if [ -f "$0" ] && grep -q "install_singbox" "$0"; then
         cp -f "$0" "$SBOX_CORE"
     else
-        # 远程执行时，尝试通过 $BASH_SOURCE 查找，如果还不行，则跳过
-        [ -n "${BASH_SOURCE[0]:-}" ] && cp -f "${BASH_SOURCE[0]}" "$SBOX_CORE" 2>/dev/null || true
+        curl -fsSL https://github.com/blue2018/sb-dp/raw/refs/heads/main/install-singbox.sh -o "$SBOX_CORE"
     fi
-    chmod +x "$SBOX_CORE" 2>/dev/null || true
+    chmod +x "$SBOX_CORE"
 
     local SB_PATH="/usr/local/bin/sb"
     cat > "$SB_PATH" <<'EOF'
@@ -307,17 +304,11 @@ create_sb_tool() {
 set -euo pipefail
 CORE="/etc/sing-box/core_script.sh"
 
+if [ ! -f "$CORE" ]; then echo "核心文件丢失"; exit 1; fi
+
+source "$CORE" --detect-only
+
 info() { echo -e "\033[1;34m[INFO]\033[0m $*"; }
-err()  { echo -e "\033[1;31m[ERR]\033[0m $*" >&2; }
-
-# 如果核心文件丢失，sb 命令将无法使用高级功能
-check_core() {
-    if [ ! -f "$CORE" ]; then
-        err "核心管理脚本丢失，请重新运行安装脚本。"
-        exit 1
-    fi
-}
-
 service_ctrl() {
     if [ -f /etc/init.d/sing-box ]; then rc-service sing-box $1
     else systemctl $1 sing-box; fi
@@ -333,13 +324,13 @@ while true; do
     echo "=========================="
     read -p "请选择 [0-6]: " opt
     case "$opt" in
-        1) check_core; source "$CORE" --show-only ;;
+        1) source "$CORE" --show-only ;;
         2) vi /etc/sing-box/config.json && service_ctrl restart ;;
         3) 
            read -p "请输入新端口: " NEW_PORT
-           check_core; source "$CORE" --reset-port "$NEW_PORT"
+           source "$CORE" --reset-port "$NEW_PORT"
            ;;
-        4) check_core; source "$CORE" --update-kernel ;;
+        4) source "$CORE" --update-kernel ;;
         5) service_ctrl restart && info "服务已重启" ;;
         6) 
            read -p "是否确定卸载？输入 y 确认，直接回车取消: " confirm
