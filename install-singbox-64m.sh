@@ -22,13 +22,12 @@ TLS_DOMAIN="$(pick_tls_domain)"
 info() { echo -e "\033[1;34m[INFO]\033[0m $*"; }
 warn() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
 err()  { echo -e "\033[1;31m[ERR]\033[0m $*" >&2; }
-
+succ() { echo -e "\033[1;32m[OK]\033[0m $*"; }
 
 # OSC 52 自动复制到剪贴板函数
 copy_to_clipboard() {
     local content="$1"
     if [ -n "${SSH_TTY:-}" ] || [ -n "${DISPLAY:-}" ]; then
-        # 编码为 base64 并通过转义序列发送
         echo -ne "\033]52;c;$(echo -n "$content" | base64 | tr -d '\r\n')\a"
         echo -e "\033[1;32m[复制]\033[0m 节点链接已自动推送到本地剪贴板"
     fi
@@ -68,13 +67,12 @@ detect_os() {
 }
 
 
-# 系统内核优化 (针对 64MB 内存与 300Mbps 带宽)
+# 系统内核优化
 optimize_system() {
     info "优化内核参数 (适配 64MB 极小内存 + 300Mbps 带宽)..."
     modprobe tcp_bbr >/dev/null 2>&1 || true
 
     cat > /etc/sysctl.conf <<'SYSCTL'
-# 极限收缩 UDP 内存页并提升单包缓冲区上限
 net.core.rmem_max = 4194304
 net.core.wmem_max = 4194304
 net.ipv4.udp_mem = 2048 4096 8192
@@ -90,24 +88,64 @@ SYSCTL
 }
 
 
-# 安装 Sing-box 内核
+# 安装/更新 Sing-box 内核 (核心修改部分)
+# 参数 $1: "install" (强制安装) 或 "update" (检查版本)
 install_singbox() {
-    info "正在获取 GitHub 最新版本并安装..."
+    local MODE="${1:-install}"
+    
+    info "正在连接 GitHub API 获取云端版本信息..."
+    
+    # 获取云端 Tag
     local LATEST_TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
     if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" == "null" ]; then
         err "获取版本失败，请检查网络"
         exit 1
     fi
+    local REMOTE_VER="${LATEST_TAG#v}"
     
-    local VERSION_NUM="${LATEST_TAG#v}"
-    local URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/sing-box-${VERSION_NUM}-linux-${SBOX_ARCH}.tar.gz"
+    # 如果是更新模式，进行版本对比
+    if [[ "$MODE" == "update" ]]; then
+        local LOCAL_VER="未安装"
+        if [ -f /usr/bin/sing-box ]; then
+            # 获取本地版本，通常输出格式为 "sing-box version 1.8.0 ..."，取第三段
+            LOCAL_VER=$(/usr/bin/sing-box version | head -n1 | awk '{print $3}')
+        fi
+
+        echo -e "---------------------------------"
+        echo -e "当前已安装版本: \033[1;33m${LOCAL_VER}\033[0m"
+        echo -e "Github最新版本: \033[1;32m${REMOTE_VER}\033[0m"
+        echo -e "---------------------------------"
+
+        if [[ "$LOCAL_VER" == "$REMOTE_VER" ]]; then
+            succ "内核已是最新版本，无需更新。"
+            return 0
+        fi
+        
+        info "发现新版本，准备下载更新..."
+    else
+        info "准备安装版本: ${REMOTE_VER}"
+    fi
     
+    # 下载逻辑
+    local URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"
     local TMP_D=$(mktemp -d)
-    curl -fL "$URL" -o "$TMP_D/sb.tar.gz"
-    tar -xf "$TMP_D/sb.tar.gz" -C "$TMP_D"
-    install -m 755 "$TMP_D"/sing-box-*/sing-box /usr/bin/sing-box
-    rm -rf "$TMP_D"
-    info "内核安装成功: $(/usr/bin/sing-box version | head -n1)"
+    
+    if curl -fL --retry 3 "$URL" -o "$TMP_D/sb.tar.gz"; then
+        tar -xf "$TMP_D/sb.tar.gz" -C "$TMP_D"
+        
+        # 停止服务以防文件占用
+        if pgrep sing-box >/dev/null; then 
+            systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true
+        fi
+        
+        install -m 755 "$TMP_D"/sing-box-*/sing-box /usr/bin/sing-box
+        rm -rf "$TMP_D"
+        succ "内核安装/更新成功: $(/usr/bin/sing-box version | head -n1)"
+    else
+        rm -rf "$TMP_D"
+        err "下载失败"
+        exit 1
+    fi
 }
 
 
@@ -128,19 +166,22 @@ generate_cert() {
 # 生成 Sing-box 配置文件
 create_config() {
     info "配置 Hysteria2 参数..."
-    # 如果端口已存在则读取，否则询问
     local OLD_PORT=""
     if [ -f /etc/sing-box/config.json ]; then
         OLD_PORT=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
     fi
 
     if [ -z "${1:-}" ]; then
-        read -p "请输入 HY2 端口 (当前: ${OLD_PORT:-随机}): " USER_PORT
-        PORT_HY2="${USER_PORT:-$((RANDOM % 50000 + 10000))}"
+        if [ -z "${OLD_PORT}" ]; then
+            PORT_HY2="$((RANDOM % 50000 + 10000))"
+        else
+            PORT_HY2="$OLD_PORT"
+        fi
     else
         PORT_HY2="$1"
     fi
 
+    # 读取旧密码或生成新密码
     PSK_HY2=$([ -f /etc/sing-box/config.json ] && jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json || openssl rand -hex 16)
     
     mkdir -p /etc/sing-box
@@ -167,7 +208,7 @@ EOF
 }
 
 
-# 安装与启动系统服务 (极致内存控制)
+# 配置系统服务
 setup_service() {
     info "配置系统服务并启动..."
     if [ "$OS" = "alpine" ]; then
@@ -208,7 +249,7 @@ EOF
 }
 
 
-# 显示节点详细信息与自动复制
+# 显示信息
 show_info() {
     local IP=$(curl -s --max-time 5 https://api.ipify.org || echo "YOUR_IP")
     local VER_INFO=$(/usr/bin/sing-box version | head -n1)
@@ -219,7 +260,7 @@ show_info() {
     local PSK=$(jq -r '.inbounds[0].users[0].password' "$CONFIG")
     local PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG")
     local CERT_PATH=$(jq -r '.inbounds[0].tls.certificate_path' "$CONFIG")
-    local SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/')
+    local SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/' || echo "unknown")
     
     local LINK="hy2://$PSK@$IP:$PORT/?sni=$SNI&alpn=h3&insecure=1#$(hostname)"
     
@@ -239,30 +280,32 @@ show_info() {
 }
 
 
-# 创建管理面板 (sb)
+# 创建 sb 管理脚本
 create_sb_tool() {
-    local SB_PATH="/usr/local/bin/sb"
-    # 获取原始脚本的绝对路径
-    local ORIGIN_SCRIPT=$(realpath "$0")
+    # 备份自身作为核心逻辑库
+    local CORE_SCRIPT="/etc/sing-box/core_script.sh"
+    cp -f "$0" "$CORE_SCRIPT"
+    chmod +x "$CORE_SCRIPT"
 
+    local SB_PATH="/usr/local/bin/sb"
     cat > "$SB_PATH" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+CORE="$CORE_SCRIPT"
 
-# 关键修复：定义一个调用原始脚本的函数，避免递归
-call_origin() {
-    bash "$ORIGIN_SCRIPT" "\$@"
-}
+if [ ! -f "\$CORE" ]; then echo "错误: 核心脚本丢失，请重新安装"; exit 1; fi
+
+# 导入检测函数
+source "\$CORE" --detect-only
 
 info() { echo -e "\033[1;34m[INFO]\033[0m \$*"; }
-
 service_ctrl() {
     if [ -f /etc/init.d/sing-box ]; then rc-service sing-box \$1
     else systemctl \$1 sing-box; fi
 }
 
 while true; do
-    echo -e "\n=========================="
+    echo "=========================="
     echo " Sing-box HY2 管理 (快捷键: sb)"
     echo "=========================="
     echo "1) 查看链接   2) 编辑配置   3) 重置端口"
@@ -271,34 +314,40 @@ while true; do
     echo "=========================="
     read -p "请选择 [0-7]: " opt
     case "\$opt" in
-        1) call_origin --show-only ;;
-        2) vi /etc/sing-box/config.json && service_ctrl restart ;;
-        3) 
-           read -p "请输入新端口: " NEW_PORT
-           if [[ "\$NEW_PORT" =~ ^[0-9]+$ ]]; then
-               call_origin --reset-port "\$NEW_PORT"
-           else
-               echo "无效端口"
-           fi
+        1) source "\$CORE" --show-only ;;
+        2) 
+           # 优先使用 vi
+           if command -v vi >/dev/null; then vi /etc/sing-box/config.json
+           else echo "未找到编辑器，请手动编辑 /etc/sing-box/config.json"; read -p "按回车继续..."; fi
+           service_ctrl restart && info "配置已应用，服务已重启"
            ;;
-        4) call_origin --update-kernel ;;
+        3) 
+           read -p "请输入新端口 (留空则随机): " NEW_PORT
+           source "\$CORE" --reset-port "\$NEW_PORT"
+           ;;
+        4) source "\$CORE" --update-kernel ;;
         5) service_ctrl restart && info "服务已重启" ;;
         6) 
-           echo "--- 最近 50 条日志 ---"
-           if [ -f /etc/init.d/sing-box ]; then tail -n 50 /var/log/messages | grep sing-box || echo "暂无日志"
-           else journalctl -u sing-box -n 50 --no-pager; fi 
+           if [ -f /etc/init.d/sing-box ]; then 
+             tail -n 50 /var/log/messages | grep sing-box || echo "暂无日志或日志位置不同"
+           else 
+             journalctl -u sing-box -n 50 --no-pager
+           fi 
            ;;
         7) 
-           read -p "确认卸载？[y/N]: " confirm
-           [[ "\$confirm" != "y" ]] && continue
-           service_ctrl stop || true
-           [ -f /etc/init.d/sing-box ] && rc-update del sing-box || true
-           rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/local/bin/SB /etc/systemd/system/sing-box.service /etc/init.d/sing-box
-           info "卸载完成！"
-           exit 0 ;;
+           read -p "确定要卸载吗? [y/N]: " confirm
+           if [[ "\$confirm" == "y" || "\$confirm" == "Y" ]]; then
+               service_ctrl stop
+               [ -f /etc/init.d/sing-box ] && rc-update del sing-box
+               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/local/bin/SB /etc/systemd/system/sing-box.service /etc/init.d/sing-box "\$CORE"
+               info "卸载完成！"
+               exit 0
+           fi
+           ;;
         0) exit 0 ;;
         *) echo "输入错误" ;;
     esac
+    echo "" # 空行美观
 done
 EOF
     chmod +x "$SB_PATH"
@@ -306,21 +355,21 @@ EOF
 }
 
 
-# 主执行逻辑
+# 主逻辑分发
 if [[ "${1:-}" == "--detect-only" ]]; then
     detect_os
 elif [[ "${1:-}" == "--show-only" ]]; then
     detect_os && show_info
 elif [[ "${1:-}" == "--reset-port" ]]; then
-    detect_os && create_config "$2" && setup_service && info "端口已重置为 $2" && show_info
+    detect_os && create_config "$2" && setup_service && succ "端口已重置为: $(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)" && show_info
 elif [[ "${1:-}" == "--update-kernel" ]]; then
-    detect_os && install_singbox && setup_service && info "内核已更新"
+    detect_os && install_singbox "update" && setup_service
 else
-    # 完整安装流程
+    # 首次安装流程
     detect_os
     [ "$(id -u)" != "0" ] && err "请使用 root 运行" && exit 1
     
-    info "正在安装依赖..."
+    info "开始安装依赖..."
     case "$OS" in
         alpine) apk add --no-cache bash curl jq openssl openrc iproute2 ;;
         debian) apt-get update && apt-get install -y curl jq openssl ;;
@@ -328,11 +377,11 @@ else
     esac
 
     optimize_system
-    install_singbox
+    install_singbox "install" # 强制安装
     generate_cert
     create_config ""
     setup_service
     create_sb_tool
     show_info
-    info "安装完毕。现在你可以通过输入 'sb' 指令来管理服务。"
+    succ "安装完毕！现在你可以输入 'sb' 进入管理面板。"
 fi
