@@ -5,8 +5,9 @@ set -euo pipefail
 SBOX_ARCH=""
 OS_DISPLAY=""
 SBOX_CORE="/etc/sing-box/core_script.sh"
-SBOX_GOLIMIT="42MiB"
+SBOX_GOLIMIT="52MiB"
 SBOX_MEM_MAX="55M"
+SBOX_OPTIMIZE_LEVEL="未检测" # 新增：用于记录内存优化级别
 
 # TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
@@ -71,7 +72,7 @@ detect_os() {
 }
 
 
-# 系统内核优化 (针对 64M/128M/256M 阶梯优化 - 兼容版)
+# 系统内核优化 (针对 64M/128M/256M/512M 阶梯优化 - 兼容版)
 optimize_system() {
     # --- 1. 内存检测逻辑 (多路侦测) ---
     local mem_total=64
@@ -103,26 +104,39 @@ optimize_system() {
 
     info "检测到系统可用内存: ${mem_total}MB"
 
-    # --- 2. 阶梯变量设置 (从小到大逻辑) ---
-    local go_limit="42MiB"
-    local udp_buffer="4194304" # 4MB (针对64M)
-    local mem_level="64M"
+    # --- 2. 阶梯变量设置 (工整版逻辑) ---
+    local go_limit gogc udp_buffer mem_level
 
-    if [ "$mem_total" -ge 200 ]; then
-        go_limit="180MiB"
-        udp_buffer="16777216" # 16MB (针对256M+)
-        mem_level="256M+"
+    if [ "$mem_total" -ge 450 ]; then
+        go_limit="420MiB"       # 512M 环境: 目标 200~300Mbps
+        gogc="120"
+        udp_buffer="67108864"  # 64MB 缓存
+        mem_level="512M (专业版)"
+    elif [ "$mem_total" -ge 200 ]; then
+        go_limit="210MiB"       # 256M 环境: 目标 180~250Mbps
+        gogc="100"
+        udp_buffer="33554432"  # 32MB 缓存
+        mem_level="256M (进阶版)"
     elif [ "$mem_total" -ge 100 ]; then
-        go_limit="85MiB"
-        udp_buffer="8388608"  # 8MB (针对128M)
-        mem_level="128M"
+        go_limit="100MiB"       # 128M 环境: 目标 150~230Mbps
+        gogc="90"
+        udp_buffer="16777216"  # 16MB 缓存
+        mem_level="128M (标准版)"
+    else
+        go_limit="52MiB"        # 64M 环境: 目标 100~150Mbps
+        gogc="80"
+        udp_buffer="8388608"   # 8MB 缓存
+        mem_level="64M (稳定版)"
     fi
 
     SBOX_GOLIMIT="$go_limit"
-    SBOX_MEM_MAX="$((mem_total * 85 / 100))M"
+    SBOX_GOGC="$gogc"
+    SBOX_MEM_MAX="$((mem_total * 92 / 100))M"
+    SBOX_OPTIMIZE_LEVEL="$mem_level"
+
     info "应用 ${mem_level} 级别优化 (Go限制: $SBOX_GOLIMIT, 物理封顶: $SBOX_MEM_MAX)"
 
-    # --- 3. Swap 状态侦测与提示 (补全 Alpine 提示) ---
+    # --- 3. Swap 状态侦测与提示 ---
     if [ "$OS" = "alpine" ]; then
         info "Alpine 系统默认采用内存运行模式，跳过 Swap 处理。"
     else
@@ -148,14 +162,14 @@ optimize_system() {
     cat > /etc/sysctl.conf <<SYSCTL
 net.core.rmem_max = $udp_buffer
 net.core.wmem_max = $udp_buffer
-net.ipv4.udp_mem = 2048 4096 8192
-net.ipv4.udp_rmem_min = 4096
-net.ipv4.udp_wmem_min = 4096
-net.core.netdev_max_backlog = 2000
-net.core.somaxconn = 1024
-net.core.default_qdisc = fq_codel
+net.ipv4.udp_mem = 65536 131072 262144
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
+net.core.netdev_max_backlog = 5000
+net.core.somaxconn = 2048
+net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
-vm.swappiness = 10
+vm.swappiness = 5
 SYSCTL
     sysctl -p >/dev/null 2>&1 || true
 }
@@ -279,7 +293,7 @@ setup_service() {
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
-export GOGC=50
+export GOGC=${SBOX_GOGC:-80}
 export GOMEMLIMIT=$SBOX_GOLIMIT
 command="/usr/bin/sing-box"
 command_args="run -c /etc/sing-box/config.json"
@@ -298,7 +312,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/etc/sing-box
-Environment=GOGC=50
+Environment=GOGC=${SBOX_GOGC:-80}
 Environment=GOMEMLIMIT=$SBOX_GOLIMIT
 ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
 Restart=on-failure
@@ -333,6 +347,7 @@ show_info() {
     echo -e "\033[1;34m==========================================\033[0m"
     echo -e "系统版本: \033[1;33m$OS_DISPLAY\033[0m"
     echo -e "内核信息: \033[1;33m$VER_INFO\033[0m"
+    echo -e "优化级别: \033[1;32m${SBOX_OPTIMIZE_LEVEL:-未检测}\033[0m"
     echo -e "公网地址: \033[1;33m$IP\033[0m"
     echo -e "运行端口: \033[1;33m$PORT\033[0m"
     echo -e "伪装 SNI: \033[1;33m$SNI\033[0m"
@@ -351,7 +366,9 @@ create_sb_tool() {
     echo "set -euo pipefail" >> "$SBOX_CORE"
     echo "SBOX_CORE='$SBOX_CORE'" >> "$SBOX_CORE"
     echo "SBOX_GOLIMIT='$SBOX_GOLIMIT'" >> "$SBOX_CORE"
+    echo "SBOX_GOGC='${SBOX_GOGC:-80}'" >> "$SBOX_CORE"
     echo "SBOX_MEM_MAX='$SBOX_MEM_MAX'" >> "$SBOX_CORE"
+    echo "SBOX_OPTIMIZE_LEVEL='$SBOX_OPTIMIZE_LEVEL'" >> "$SBOX_CORE"
     echo "TLS_DOMAIN_POOL=(${TLS_DOMAIN_POOL[@]})" >> "$SBOX_CORE"
     declare -f >> "$SBOX_CORE"
     
