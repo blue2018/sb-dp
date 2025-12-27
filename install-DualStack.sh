@@ -80,7 +80,7 @@ optimize_system() {
 }
 
 # ==========================================
-# 3. 安装与配置生成
+# 3. 安装与配置生成 (修复模式判断)
 # ==========================================
 install_singbox() {
     local LATEST_TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
@@ -92,7 +92,8 @@ install_singbox() {
 }
 
 create_config() {
-    local PORT_HY2="${1:-$((RANDOM % 50000 + 10000))}"
+    local USER_PORT="${1:-}"
+    local PORT_HY2="${USER_PORT:-$((RANDOM % 50000 + 10000))}"
     local PSK_HY2=$(openssl rand -hex 12)
     local UUID_VLESS=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
     
@@ -111,8 +112,12 @@ create_config() {
     cat > /etc/sing-box/config.json <<EOF
 {"log":{"level":"warn"},"inbounds":[$inbounds],"outbounds":[{"type":"direct"}]}
 EOF
-    openssl ecparam -genkey -name prime256v1 -out /etc/sing-box/certs/privkey.pem
-    openssl req -new -x509 -days 3650 -key /etc/sing-box/certs/privkey.pem -out /etc/sing-box/certs/fullchain.pem -subj "/CN=$TLS_DOMAIN"
+
+    # 只有涉及 Hy2 时才生成证书，避免模式 2 报错
+    if [[ "$INSTALL_MODE" =~ [13] ]]; then
+        openssl ecparam -genkey -name prime256v1 -out /etc/sing-box/certs/privkey.pem
+        openssl req -new -x509 -days 3650 -key /etc/sing-box/certs/privkey.pem -out /etc/sing-box/certs/fullchain.pem -subj "/CN=$TLS_DOMAIN"
+    fi
 }
 
 setup_service() {
@@ -149,10 +154,9 @@ EOF
 }
 
 # ==========================================
-# 4. 管理工具 sb (彻底修复变量引用)
+# 4. 管理工具 sb
 # ==========================================
 create_sb_tool() {
-    # 将需要的外部变量先固化
     local tag="$OS_TYPE"
     local domain="$ARGO_DOMAIN"
     local optimize="$SBOX_OPTIMIZE_LEVEL"
@@ -166,13 +170,11 @@ show_info() {
     echo -e "\n\033[1;34m================ 看板信息 ================\033[0m"
     echo -e "优化等级: $optimize"
     if [ -f "\$CONF" ]; then
-        # 探测 Hy2
         if jq -e '.inbounds[] | select(.type=="hysteria2")' "\$CONF" >/dev/null 2>&1; then
             local HP=\$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' "\$CONF")
             local HK=\$(jq -r '.inbounds[] | select(.type=="hysteria2") | .users[0].password' "\$CONF")
             echo -e "Hy2 链接: \033[1;32mhy2://\$HK@\$IP:\$HP/?sni=$TLS_DOMAIN&alpn=h3&insecure=1#$tag\033[0m"
         fi
-        # 探测 VLESS (Argo)
         if jq -e '.inbounds[] | select(.type=="vless")' "\$CONF" >/dev/null 2>&1; then
             local VU=\$(jq -r '.inbounds[] | select(.type=="vless") | .users[0].uuid' "\$CONF")
             echo -e "Argo 域名: \033[1;33m$domain\033[0m"
@@ -197,7 +199,7 @@ EOF
 }
 
 # ==========================================
-# 5. 主流程
+# 5. 主流程 (修复逻辑分支)
 # ==========================================
 [ "$(id -u)" != "0" ] && err "需 root 权限" && exit 1
 install_deps
@@ -211,16 +213,21 @@ while true; do
     [[ "$INSTALL_MODE" =~ ^[1-3]$ ]] && break || warn "输入无效。"
 done
 
+# 如果包含 Argo 模式，输入相关信息
 if [[ "$INSTALL_MODE" =~ [23] ]]; then
     while [ -z "$ARGO_TOKEN" ]; do read -p "请输入 Argo Token: " ARGO_TOKEN < /dev/tty; done
     while [ -z "$ARGO_DOMAIN" ]; do read -p "请输入 Argo 域名: " ARGO_DOMAIN < /dev/tty; done
 fi
 
-read -p "Hy2 端口 (回车随机): " USER_PORT < /dev/tty
+# 只有模式 1 和 3 才需要 Hy2 端口
+LOCAL_USER_PORT=""
+if [[ "$INSTALL_MODE" =~ [13] ]]; then
+    read -p "Hy2 端口 (回车随机): " LOCAL_USER_PORT < /dev/tty
+fi
 
 optimize_system
 install_singbox
-create_config "${USER_PORT:-}"
+create_config "$LOCAL_USER_PORT"
 setup_service
 create_sb_tool
 succ "安装完成！"
