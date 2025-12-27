@@ -8,7 +8,7 @@ SBOX_ARCH=""
 OS_TYPE=""
 OS_DISPLAY=""
 SBOX_OPTIMIZE_LEVEL="未检测"
-INSTALL_MODE=1
+INSTALL_MODE=""
 ARGO_TOKEN=""
 ARGO_DOMAIN=""
 ARGO_PORT=8001
@@ -41,8 +41,8 @@ install_deps() {
     if [ "$OS_TYPE" = "alpine" ]; then
         apk update && apk add --no-cache bash curl jq openssl openrc iproute2 iputils
     else
-        [ -f /usr/bin/apt-get ] && (apt-get update && apt-get install -y curl jq openssl iproute2)
-        [ -f /usr/bin/yum ] && yum install -y curl jq openssl iproute2
+        [ -f /usr/bin/apt-get ] && apt-get update && apt-get install -y curl jq openssl iproute2 || true
+        [ -f /usr/bin/yum ] && yum install -y curl jq openssl iproute2 || true
     fi
 
     case "$(uname -m)" in
@@ -69,20 +69,18 @@ optimize_system() {
 
     export SBOX_GOLIMIT="$go_limit"; export SBOX_GOGC="$gogc"
 
-    # Swap 尝试
     if ! free | grep -i "swap" | grep -qv "0" 2>/dev/null; then
         (dd if=/dev/zero of=/swapfile bs=1M count=256 2>/dev/null && \
          chmod 600 /swapfile && mkswap /swapfile && \
          swapon /swapfile 2>/dev/null) && info "Swap 激活" || warn "虚化环境禁止 Swap"
     fi
 
-    # 内核参数 (静默)
     { echo "net.core.default_qdisc = fq"; echo "net.ipv4.tcp_congestion_control = bbr"; } > /tmp/sysctl_sbox.conf
     sysctl -p /tmp/sysctl_sbox.conf >/dev/null 2>&1 || true
 }
 
 # ==========================================
-# 3. 安装与配置生成 (双协议支持)
+# 3. 安装与配置生成
 # ==========================================
 install_singbox() {
     local LATEST_TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
@@ -151,7 +149,7 @@ EOF
 }
 
 # ==========================================
-# 4. 管理工具 sb (支持双协议显示)
+# 4. 管理工具 sb
 # ==========================================
 create_sb_tool() {
     cat > /usr/local/bin/sb <<EOF
@@ -161,15 +159,12 @@ show_info() {
     local IP=\$(curl -s --max-time 5 https://api.ipify.org || echo "YOUR_IP")
     local CONF="/etc/sing-box/config.json"
     echo -e "\n\033[1;34m================ 看板信息 ================\033[0m"
-    echo -e "优化等级: $SBOX_OPTIMIZE_LEVEL"
     if [ -f "\$CONF" ]; then
-        # Hy2 提取
         if jq -e '.inbounds[] | select(.type=="hysteria2")' "\$CONF" >/dev/null 2>&1; then
             local HP=\$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' "\$CONF")
             local HK=\$(jq -r '.inbounds[] | select(.type=="hysteria2") | .users[0].password' "\$CONF")
             echo -e "Hy2 链接: \033[1;32mhy2://\$HK@\$IP:\$HP/?sni=$TLS_DOMAIN&alpn=h3&insecure=1#$OS_TYPE_Hy2\033[0m"
         fi
-        # VLESS 提取
         if jq -e '.inbounds[] | select(.type=="vless")' "\$CONF" >/dev/null 2>&1; then
             local VU=\$(jq -r '.inbounds[] | select(.type=="vless") | .users[0].uuid' "\$CONF")
             echo -e "Argo 域名: \033[1;33m$ARGO_DOMAIN\033[0m"
@@ -178,11 +173,10 @@ show_info() {
     fi
     echo -e "\033[1;34m==========================================\033[0m"
 }
-
 if [[ "\${1:-}" == "--info" ]]; then show_info; exit 0; fi
 while true; do
     echo -e "\n1) 查看链接  2) 重启服务  3) 卸载节点  0) 退出"
-    read -p "选择: " opt
+    read -p "选择: " opt < /dev/tty
     case "\$opt" in
         1) show_info ;;
         2) service_op restart && echo "已重启" ;;
@@ -195,23 +189,32 @@ EOF
 }
 
 # ==========================================
-# 5. 主流程
+# 5. 主流程 (交互增强)
 # ==========================================
 [ "$(id -u)" != "0" ] && err "需 root 权限" && exit 1
 install_deps
 
-echo -e "1) 仅 Hysteria2\n2) 仅 VLESS + Argo\n3) 双协议共存"
-read -p "选择模式: " INSTALL_MODE
+# 强制交互循环：直到获取正确的模式选择
+while true; do
+    echo -e "\n请选择安装模式:"
+    echo -e "1) 仅 Hysteria2"
+    echo -e "2) 仅 VLESS + Argo"
+    echo -e "3) 双协议共存"
+    read -p "请输入数字 [1-3]: " INSTALL_MODE < /dev/tty
+    [[ "$INSTALL_MODE" =~ ^[1-3]$ ]] && break || warn "输入无效，请重新输入。"
+done
+
 if [[ "$INSTALL_MODE" =~ [23] ]]; then
-    read -p "Argo Token: " ARGO_TOKEN
-    read -p "Argo 域名: " ARGO_DOMAIN
+    while [ -z "$ARGO_TOKEN" ]; do read -p "请输入 Argo Token: " ARGO_TOKEN < /dev/tty; done
+    while [ -z "$ARGO_DOMAIN" ]; do read -p "请输入 Argo 域名: " ARGO_DOMAIN < /dev/tty; done
 fi
-read -p "Hy2 端口 (回车随机): " USER_PORT
+
+read -p "Hy2 端口 (回车随机): " USER_PORT < /dev/tty
 
 optimize_system
 install_singbox
 create_config "${USER_PORT:-}"
 setup_service
 create_sb_tool
-succ "全量安装完成！"
+succ "安装完成！"
 /usr/local/bin/sb --info
