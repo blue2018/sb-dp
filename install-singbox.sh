@@ -459,7 +459,7 @@ while true; do
            fi
            ;;
         0) exit 0 ;;
-        *) echo "输入有误，请重新输入" ;;
+        *) echo -e "\033[1;31m输入有误，请重新输入\033[0m" ;;
     esac
 done
 EOF
