@@ -153,37 +153,36 @@ optimize_system() {
         fi
     fi
     
-    # --- 4. 激进版内核网络栈参数 (推背感核心) ---
+    # --- 4. 黄金平衡版 (保留超大缓存 + 平滑起步) ---
     modprobe tcp_bbr >/dev/null 2>&1 || true
     cat > /etc/sysctl.conf <<SYSCTL
-# 响应优化：禁止连接空闲后进入慢启动，保持随时爆发状态
+# 响应优化：禁止空闲慢启动，配合 FQ 调度实现平滑爆发
 net.ipv4.tcp_slow_start_after_idle = 0
-# 响应优化：开启 TCP 快速打开
 net.ipv4.tcp_fastopen = 3
-# 响应优化：增加网卡接收队列，防止瞬时丢包
+# 保持高并发队列，防止瞬时溢出
 net.core.netdev_max_backlog = 16384
 net.core.somaxconn = 8192
 
-# 缓冲区优化：应用阶梯式 UDP 缓冲区
+# 缓冲区优化：保持激进的大容量天花板
 net.core.rmem_max = $udp_buffer
 net.core.wmem_max = $udp_buffer
 net.ipv4.udp_mem = 131072 262144 524288
 net.ipv4.udp_rmem_min = 32768
 net.ipv4.udp_wmem_min = 32768
 
-# BBR 激进调度与拥塞控制
+# BBR + FQ：最核心的平滑器
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 vm.swappiness = 10
 SYSCTL
     sysctl -p >/dev/null 2>&1 || true
 
-    # 爆发优化：暴力提升初始拥塞窗口 (InitCWND) 至 20 (网页首包响应翻倍)
+    # 爆发优化：取黄金分割点 15 (比默认 10 强 50%，比 20 更隐蔽)
     if command -v ip >/dev/null; then
         local default_route=$(ip route show default | head -n1)
         if [[ $default_route == *"via"* ]]; then
-            ip route change $default_route initcwnd 20 initrwnd 20 || true
-            succ "初始拥塞窗口 (InitCWND) 已提升至 20"
+            ip route change $default_route initcwnd 15 initrwnd 15 || true
+            succ "黄金平衡版：InitCWND 设为 15，兼顾速度与隐蔽性"
         fi
     fi
 }
