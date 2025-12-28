@@ -6,6 +6,7 @@ set -euo pipefail
 # ==========================================
 SBOX_ARCH=""
 OS_DISPLAY=""
+HOSTNAME=$(hostname)
 ARGO_LOG="/etc/sing-box/argo.log"
 CONFIG_FILE="/etc/sing-box/config.json"
 SBOX_GOLIMIT="52MiB"
@@ -221,23 +222,22 @@ EOF
 show_single_node() {
     local tag=$1
     local SNI=$(openssl x509 -in /etc/sing-box/certs/fullchain.pem -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/' 2>/dev/null || echo "unknown")
+    local HOST_NAME=$(hostname)
 
     if [ "$tag" == "hy2-in" ]; then
         local H_PORT=$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .listen_port' $CONFIG_FILE)
         local H_PASS=$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .users[0].password' $CONFIG_FILE)
-        echo -e "\n\033[1;36m[Hysteria2 节点配置]\033[0m"
-        echo -e "端口: \033[1;33m$H_PORT\033[0m"
-        [ -n "$IPV4" ] && echo -e "IPv4 链接: \033[1;32mhy2://$H_PASS@$IPV4:$H_PORT/?sni=$SNI&alpn=h3&insecure=1#Hy2_v4\033[0m"
-        [ -n "$IPV6" ] && echo -e "IPv6 链接: \033[1;32mhy2://$H_PASS@[$IPV6]:$H_PORT/?sni=$SNI&alpn=h3&insecure=1#Hy2_v6\033[0m"
+        echo -e "\n\033[1;36m[Hysteria2 节点配置]\033[0m   端口: \033[1;33m$H_PORT\033[0m"
+        [ -n "$IPV4" ] && echo -e "IPv4 链接:\n\033[1;32mhy2://$H_PASS@$IPV4:$H_PORT/?sni=$SNI&alpn=h3&insecure=1#Hy2_v4_${HOST_NAME}\033[0m"
+        [ -n "$IPV6" ] && echo -e "IPv6 链接:\n\033[1;32mhy2://$H_PASS@[$IPV6]:$H_PORT/?sni=$SNI&alpn=h3&insecure=1#Hy2_v6_${HOST_NAME}\033[0m"
     fi
 
     if [ "$tag" == "vless-in" ]; then
         local A_PORT=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .listen_port' $CONFIG_FILE)
         local A_UUID=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .users[0].uuid' $CONFIG_FILE)
         local A_DOM=$(cat /etc/sing-box/argo_domain.txt 2>/dev/null || echo "等待捕获...")
-        echo -e "\n\033[1;36m[VLESS+Argo 节点配置]\033[0m"
-        echo -e "转发端口: \033[1;33m$A_PORT\033[0m"
-        echo -e "Argo链接: \033[1;32mvless://$A_UUID@$A_DOM:443?encryption=none&security=tls&sni=$A_DOM&type=ws&host=$A_DOM&path=%2Fargo#VLESS_Argo\033[0m"
+        echo -e "\n\033[1;36m[VLESS+Argo 节点配置]\033[0m   转发端口: \033[1;33m$A_PORT\033[0m"
+        echo -e "Argo链接:\n\033[1;32mvless://$A_UUID@$A_DOM:443?encryption=none&security=tls&sni=$A_DOM&type=ws&host=$A_DOM&path=%2Fargo#VLESS_Argo_${HOST_NAME}\033[0m"
     fi
 }
 
@@ -246,15 +246,12 @@ show_single_node() {
 # ==========================================
 show_nodes() {
     local SB_VER=$(/usr/bin/sing-box version | head -n1 | awk '{print $3}' || echo "未安装")
-    local SNI=$(openssl x509 -in /etc/sing-box/certs/fullchain.pem -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/' 2>/dev/null || echo "unknown")
-
     echo -e "\n\033[1;34m==========================================\033[0m"
     echo -e "        \033[1;37mSing-box 节点配置信息\033[0m"
     echo -e "\033[1;34m==========================================\033[0m"
     echo -e "系统版本: \033[1;33m$OS_DISPLAY\033[0m"
     echo -e "SingBox内核: \033[1;33mv$SB_VER\033[0m | 内存优化: \033[1;33m$SBOX_OPTIMIZE_LEVEL\033[0m"
-    echo -e "公网IPv4: \033[1;33m${IPV4:-检测失败}\033[0m"
-    echo -e "公网IPv6: \033[1;33m${IPV6:-检测失败}\033[0m"
+    echo -e "公网IPv4: \033[1;33m${IPV4:-检测失败}\033[0m | 公网IPv6: \033[1;33m${IPV6:-检测失败}\033[0m"
     echo -e "\033[1;34m------------------------------------------\033[0m"
 
     local HAS_HY2=$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' $CONFIG_FILE 2>/dev/null || echo "")
@@ -328,6 +325,7 @@ ARGO_LOG="/etc/sing-box/argo.log"
 
 info() { echo -e "\033[1;34m[INFO]\033[0m \$*"; }
 err()  { echo -e "\033[1;31m[ERR]\033[0m \$*" >&2; }
+succ() { echo -e "\033[1;32m[OK]\033[0m \$*"; }
 
 $SHOW_NODES_CODE
 $SHOW_SINGLE_CODE
@@ -408,16 +406,24 @@ while true; do
                     err "无效选择，请重新输入。"
                 fi
             done ;;
-        4) install_sbox_kernel && restart_svc && read -p "按回车继续..." ;;
-        5) restart_svc && echo "SingBox 服务已重启" && read -p "按回车继续..." ;;
+        4) 
+            install_sbox_kernel && restart_svc
+            read -p "操作完成，按回车继续..." ;;
+        5) restart_svc && succ "SingBox 服务已重启" && read -p "按回车继续..." ;;
         6) 
             read -p "确认卸载？[y/N]: " un_confirm
-            [[ ! "\$un_confirm" =~ ^[Yy]$ ]] && continue
-            systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true
-            pkill cloudflared || true
-            rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/bin/cloudflared /etc/sysctl.d/99-singbox-*.conf
-            sysctl --system >/dev/null 2>&1
-            echo "SingBox 已彻底卸载。" && exit 0 ;;
+            if [[ "\$un_confirm" =~ ^[Yy]$ ]]; then
+                info "正在卸载 SingBox 相关组件..."
+                systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true
+                pkill cloudflared || true
+                rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/bin/cloudflared /etc/sysctl.d/99-singbox-*.conf
+                sysctl --system >/dev/null 2>&1
+                succ "SingBox 已彻底卸载。"
+                exit 0
+            else
+                info "卸载已取消。"
+                read -p "按回车继续..."
+            fi ;;
         0) exit 0 ;;
         *) err "无效选项。" ;;
     esac
@@ -469,7 +475,7 @@ main() {
     fi
 
     create_manager
-    succ "SingBox 部署完成！"
+    succ "脚本部署完成！"
     show_nodes
     succ "现在输入 'sb' 即可进入管理菜单。"
 }
