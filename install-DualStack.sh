@@ -63,31 +63,48 @@ detect_env() {
 }
 
 # ==========================================
-# 3. SingBox 内核安装模块
+# 3. SingBox 内核安装模块 (版本对比增强版)
 # ==========================================
 install_sbox_kernel() {
+    local is_update=${1:-"false"}  # 默认静默模式，由菜单调用时传入 true
     local CURRENT_VER=""
     [ -f "/usr/bin/sing-box" ] && CURRENT_VER=$(/usr/bin/sing-box version | head -n1 | awk '{print $3}' || echo "")
     
     info "正在查询 SagerNet 仓库最新发布版本..."
-    local TAG=$(curl -s --connect-timeout 2 https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+    local TAG=$(curl -s --connect-timeout 5 https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
     
     if [ -z "$TAG" ] || [ "$TAG" == "null" ]; then
         err "无法连接到 Github API，请检查网络。"
-        exit 1
+        [ "$is_update" == "true" ] && return 2 || exit 1
     fi
     local LATEST_VER="${TAG#v}"
 
-    if [[ "$CURRENT_VER" == "$LATEST_VER" ]]; then
-        info "当前 SingBox 版本 v$CURRENT_VER 已是最新。"
-        return 1
+    # 只有在管理菜单选择“更新”时(is_update=true)才显示版本对比
+    if [ "$is_update" == "true" ]; then
+        echo -e "------------------------------------------"
+        echo -e "当前已安装版本: \033[1;33m${CURRENT_VER:-未安装}\033[0m"
+        echo -e "官方最新版本:   \033[1;32mv${LATEST_VER}\033[0m"
+        echo -e "------------------------------------------"
+        
+        if [[ "$CURRENT_VER" == "$LATEST_VER" ]]; then
+            info "当前已是最新版本，无需更新。"
+            return 1
+        fi
+        info "检测到可用更新，正在升级..."
     else
+        # 首次安装模式提示
         info "正在部署内核: v${CURRENT_VER:-0.0.0} -> v$LATEST_VER ($SBOX_ARCH)..."
-        curl -L "https://github.com/SagerNet/sing-box/releases/download/${TAG}/sing-box-${LATEST_VER}-linux-${SBOX_ARCH}.tar.gz" | tar -xz -C /tmp
-        install -m 755 /tmp/sing-box-*/sing-box /usr/bin/sing-box
-        rm -rf /tmp/sing-box-*
-        return 0
     fi
+
+    curl -L "https://github.com/SagerNet/sing-box/releases/download/${TAG}/sing-box-${LATEST_VER}-linux-${SBOX_ARCH}.tar.gz" | tar -xz -C /tmp
+    install -m 755 /tmp/sing-box-*/sing-box /usr/bin/sing-box
+    rm -rf /tmp/sing-box-*
+
+    # 仅在更新模式下显示最终成功提示
+    if [ "$is_update" == "true" ]; then
+        succ "内核更新完成！"
+    fi
+    return 0
 }
 
 # ==========================================
@@ -217,7 +234,7 @@ EOF
 }
 
 # ==========================================
-# 6. 单一节点显示函数 (增量显示专用)
+# 6. 单一节点显示函数
 # ==========================================
 show_single_node() {
     local tag=$1
@@ -242,7 +259,7 @@ show_single_node() {
 }
 
 # ==========================================
-# 7. 信息展示面板 (全量显示)
+# 7. 信息展示面板
 # ==========================================
 show_nodes() {
     local SB_VER=$(/usr/bin/sing-box version | head -n1 | awk '{print $3}' || echo "未安装")
@@ -407,8 +424,12 @@ while true; do
                 fi
             done ;;
         4) 
-            install_sbox_kernel && restart_svc
-            read -p "操作完成，按回车继续..." ;;
+            # 传参 true 启用版本对比和更新完成提示
+            install_sbox_kernel "true"
+            local ret=\$?
+            # 只有在真正下载了新版本(返回0)时才重启服务
+            [ \$ret -eq 0 ] && restart_svc
+            read -p "按回车继续..." ;;
         5) restart_svc && succ "SingBox 服务已重启" && read -p "按回车继续..." ;;
         6) 
             read -p "确认卸载？[y/N]: " un_confirm
@@ -449,6 +470,7 @@ main() {
     done
 
     optimize_system
+    # 首次安装不传参，默认为 false，不显示误导性的“更新完成”
     install_sbox_kernel
     
     # 获取初始端口
