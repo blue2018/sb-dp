@@ -13,7 +13,6 @@ SBOX_GOGC="70"
 SBOX_MEM_MAX="55M"
 SBOX_OPTIMIZE_LEVEL="未检测"
 INSTALL_MODE=""
-# 预声明 IP 变量，用于主程序展示
 IPV4=""
 IPV6=""
 
@@ -27,12 +26,10 @@ succ() { echo -e "\033[1;32m[OK]\033[0m $*"; }
 err()  { echo -e "\033[1;31m[ERR]\033[0m $*" >&2; }
 
 # ==========================================
-# 2. 系统环境检测 (全实时回显 + 性能优化)
+# 2. 系统环境检测 (极速反馈优化版)
 # ==========================================
 detect_env() {
-    # 立即显示提示，避免回车后等待
-    info "正在检测系统环境并安装依赖..."
-    
+    # 【优化点】确保此函数被调用时，外部已经打印了 INFO
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         OS_DISPLAY="${PRETTY_NAME:-$ID}"
@@ -56,12 +53,12 @@ detect_env() {
     done
     [ $n -eq 5 ] && n=0
     
-    # 移除静默，过程完全可见
-    ${LINUX_UPDATE[$n]} >/dev/null 2>&1 || true
-    ${LINUX_INSTALL[$n]} curl jq openssl tar bash procps iproute2 >/dev/null 2>&1 || true
+    # 过程完全可见，用户能看到进度就不会觉得卡
+    ${LINUX_UPDATE[$n]} > /dev/null 2>&1 || true
+    ${LINUX_INSTALL[$n]} curl jq openssl tar bash procps iproute2
 
-    # --- 快速 IP 检测 (优化：放在依赖安装后，缩短超时) ---
-    info "正在抓取公网 IP..."
+    # --- 快速 IP 检测 (放到依赖安装后，并限制极短超时) ---
+    info "正在抓取公网网络指纹..."
     IPV4=$(curl -s4m 2 https://1.1.1.1/cdn-cgi/trace | awk -F= '/ip/ {print $2}' || curl -s4m 2 api.ipify.org || echo "")
     IPV6=$(curl -s6m 2 https://[2606:4700:4700::1111]/cdn-cgi/trace | awk -F= '/ip/ {print $2}' || curl -s6m 2 api6.ipify.org || echo "")
 }
@@ -73,20 +70,26 @@ install_sbox_kernel() {
     local CURRENT_VER=""
     [ -f "/usr/bin/sing-box" ] && CURRENT_VER=$(/usr/bin/sing-box version | head -n1 | awk '{print $3}' || echo "")
     
-    info "正在获取 Sing-box 最新版本..."
+    info "正在查询 SagerNet 仓库最新发布版本..."
+    # 增加 2 秒连接超时限制，防止连接 Github 缓慢导致卡顿
     local TAG=$(curl -s --connect-timeout 2 https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
+    
+    if [ -z "$TAG" ] || [ "$TAG" == "null" ]; then
+        err "无法连接到 Github API，请检查网络。"
+        exit 1
+    fi
     local LATEST_VER="${TAG#v}"
 
     if [[ "$CURRENT_VER" == "$LATEST_VER" ]]; then
         info "当前版本 v$CURRENT_VER 已是最新，跳过下载。"
-        return 1 # 返回 1 表示未更新
+        return 1
     else
-        info "正在更新内核: v${CURRENT_VER:-0.0.0} -> v$LATEST_VER ($SBOX_ARCH)..."
+        info "正在部署内核: v${CURRENT_VER:-0.0.0} -> v$LATEST_VER ($SBOX_ARCH)..."
         curl -L "https://github.com/SagerNet/sing-box/releases/download/${TAG}/sing-box-${LATEST_VER}-linux-${SBOX_ARCH}.tar.gz" | tar -xz -C /tmp
         install -m 755 /tmp/sing-box-*/sing-box /usr/bin/sing-box
         rm -rf /tmp/sing-box-*
-        info "内核已部署"
-        return 0 # 返回 0 表示已更新
+        succ "内核组件部署完成"
+        return 0
     fi
 }
 
@@ -174,7 +177,7 @@ EOF
 # 5. 系统服务配置
 # ==========================================
 setup_service() {
-    info "配置系统服务 (限制: $SBOX_MEM_MAX)..."
+    info "写入系统服务单元 (资源配额: $SBOX_MEM_MAX)..."
     local env_vars="GOGC=${SBOX_GOGC:-80} GOMEMLIMIT=$SBOX_GOLIMIT GODEBUG=madvdontneed=1"
     if [[ "$OS_DISPLAY" == *"Alpine"* ]]; then
         cat > /etc/init.d/sing-box <<EOF
@@ -212,13 +215,10 @@ EOF
 }
 
 # ==========================================
-# 6. 信息展示面板 (全量还原版)
+# 6. 信息展示面板 (静态调用优化版)
 # ==========================================
 show_nodes() {
-    # 优先使用传入的变量，如果没有则极速抓取
-    [ -z "${IPV4:-}" ] && IPV4=$(curl -s4m 1 https://1.1.1.1/cdn-cgi/trace | awk -F= '/ip/ {print $2}' || echo "")
-    [ -z "${IPV6:-}" ] && IPV6=$(curl -s6m 1 https://[2606:4700:4700::1111]/cdn-cgi/trace | awk -F= '/ip/ {print $2}' || echo "")
-
+    # 优先使用脚本内持有的 IP 变量，彻底杜绝菜单切换卡顿
     local SB_VER=$(/usr/bin/sing-box version | head -n1 | awk '{print $3}' || echo "未安装")
     local SNI=$(openssl x509 -in /etc/sing-box/certs/fullchain.pem -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/' 2>/dev/null || echo "unknown")
 
@@ -229,11 +229,10 @@ show_nodes() {
     echo -e "系统环境: \033[1;33m$OS_DISPLAY\033[0m"
     echo -e "内核版本: \033[1;33mv$SB_VER\033[0m"
     echo -e "内存优化: \033[1;32m$SBOX_OPTIMIZE_LEVEL\033[0m"
-    echo -e "公网IPv4: \033[1;33m${IPV4:-未检测}\033[0m"
-    echo -e "公网IPv6: \033[1;33m${IPV6:-未检测}\033[0m"
+    echo -e "公网IPv4: \033[1;33m${IPV4:-检测失败}\033[0m"
+    echo -e "公网IPv6: \033[1;33m${IPV6:-检测失败}\033[0m"
     echo -e "\033[1;34m------------------------------------------\033[0m"
 
-    # Hy2 节点
     local H_PORT=$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .listen_port' $CONFIG_FILE 2>/dev/null || echo "")
     if [ -n "$H_PORT" ]; then
         local H_PASS=$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .users[0].password' $CONFIG_FILE)
@@ -243,7 +242,6 @@ show_nodes() {
         echo ""
     fi
 
-    # Argo 节点
     local A_PORT=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .listen_port' $CONFIG_FILE 2>/dev/null || echo "")
     if [ -n "$A_PORT" ]; then
         local A_UUID=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .users[0].uuid' $CONFIG_FILE)
@@ -268,11 +266,10 @@ SBOX_ARCH="$SBOX_ARCH"
 OS_DISPLAY="$OS_DISPLAY"
 SBOX_OPTIMIZE_LEVEL="$SBOX_OPTIMIZE_LEVEL"
 
-# 静态注入 IP 信息，避免面板循环中重复抓取导致卡顿
+# 静态注入当前 IP 环境，彻底杜绝操作时的卡顿
 IPV4="$IPV4"
 IPV6="$IPV6"
 
-# 日志输出函数
 info() { echo -e "\033[1;34m[INFO]\033[0m \$*"; }
 
 $SHOW_NODES_CODE
@@ -284,7 +281,6 @@ restart_svc() {
 }
 
 while true; do
-    # 移除循环顶部的 IP 抓取代码，彻底解决流畅度问题
     echo -e "\n\033[1;36m==============================\033[0m"
     echo "    Sing-box 管理面板 (sb)"
     echo "=============================="
@@ -311,18 +307,18 @@ while true; do
             UUID=\$(jq -r '.inbounds[0].users[0].password // .inbounds[0].users[0].uuid' \$CONFIG_FILE 2>/dev/null || cat /proc/sys/kernel/random/uuid)
             
             if [ "\$add_opt" == "1" ]; then
-                read -p "端口: " NP && NP=\${NP:-\$((RANDOM % 50000 + 10000))}
+                read -p "设置端口 (默认随机): " NP && NP=\${NP:-\$((RANDOM % 50000 + 10000))}
                 jq ".inbounds += [{\"type\":\"hysteria2\",\"tag\":\"hy2-in\",\"listen\":\"::\",\"listen_port\":\$NP,\"users\":[{\"password\":\"\$UUID\"}],\"tls\":{\"enabled\":true,\"alpn\":[\"h3\"],\"certificate_path\":\"/etc/sing-box/certs/fullchain.pem\",\"key_path\":\"/etc/sing-box/certs/privkey.pem\"}}]" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
-                restart_svc && echo "Hy2 协议已添加"
+                restart_svc && echo "Hy2 协议添加成功"
             elif [ "\$add_opt" == "2" ]; then
                 AP=\$((RANDOM % 50000 + 10000))
                 curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-\$SBOX_ARCH" -o /usr/bin/cloudflared && chmod +x /usr/bin/cloudflared
                 jq ".inbounds += [{\"type\":\"vless\",\"tag\":\"vless-in\",\"listen\":\"127.0.0.1\",\"listen_port\":\$AP,\"users\":[{\"uuid\":\"\$UUID\"}],\"transport\":{\"type\":\"ws\",\"path\":\"/argo\"}}]" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
                 nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:\$AP --no-autoupdate > /etc/sing-box/argo.log 2>&1 &
-                restart_svc && echo "Argo 协议已添加"
+                restart_svc && echo "Argo 隧道已建立"
             fi
-            read -p "回车返回菜单..." ;;
-        2) show_nodes && read -p "回车返回菜单..." ;;
+            read -p "按回车返回..." ;;
+        2) show_nodes && read -p "按回车返回..." ;;
         3)
             echo -e "\n--- 更改端口 ---"
             echo "1. Hy2 端口"
@@ -330,18 +326,18 @@ while true; do
             echo "0. 返回上级"
             read -p "选择: " p_opt
             [ "\$p_opt" == "0" ] && continue
-            read -p "新端口: " NP
+            read -p "请输入新端口: " NP
             [ "\$p_opt" == "1" ] && tag="hy2-in" || tag="vless-in"
             jq "(.inbounds[] | select(.tag==\"\$tag\") | .listen_port) = \$NP" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
             restart_svc && echo "端口已更新为 \$NP"
-            read -p "回车返回菜单..." ;;
+            read -p "按回车返回..." ;;
         4) 
             if install_sbox_kernel; then
-                restart_svc && echo "内核已更新并重启服务"
+                restart_svc && echo "内核更新完成"
             fi
-            read -p "回车返回菜单..." ;;
-        5) restart_svc && echo "服务已重启" && read -p "回车返回菜单..." ;;
-        6) rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb && echo "已卸载" && exit 0 ;;
+            read -p "按回车返回..." ;;
+        5) restart_svc && echo "服务重启成功" && read -p "按回车返回..." ;;
+        6) rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb && echo "清理完成，已卸载。" && exit 0 ;;
         0) exit 0 ;;
     esac
 done
@@ -350,29 +346,30 @@ EOF
 }
 
 # ==========================================
-# 8. 主程序逻辑
+# 8. 主程序入口
 # ==========================================
 main() {
     clear
-    # 1. 检测环境（内部已包含 IP 抓取）
+    # 【核心修改点】先打印，后检测。让用户第一时间得到回馈。
+    info "正在检测系统环境并安装依赖..."
+    
     detect_env
     
-    # 2. 选择安装模式
-    echo "1. Hysteria2"
-    echo "2. VLESS+Argo"
-    read -p "模式: " INSTALL_MODE
+    echo -e "\n--- 请选择安装模式 ---"
+    echo "1. 极速模式 (Hysteria2)"
+    echo "2. 穿透模式 (VLESS+Argo)"
+    read -p "模式选择: " INSTALL_MODE
 
-    # 3. 执行系统优化与内核安装
     optimize_system
     install_sbox_kernel
 
-    # 4. 下载 Cloudflared (如果需要)
-    [ "$INSTALL_MODE" == "2" ] && (curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${SBOX_ARCH}" -o /usr/bin/cloudflared && chmod +x /usr/bin/cloudflared)
+    [ "$INSTALL_MODE" == "2" ] && (info "正在下载 Argo 隧道组件..." && curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${SBOX_ARCH}" -o /usr/bin/cloudflared && chmod +x /usr/bin/cloudflared)
 
-    # 5. 生成基础配置
     local UUID=$(cat /proc/sys/kernel/random/uuid)
     local B_PORT=$((RANDOM % 50000 + 10000))
     mkdir -p /etc/sing-box/certs
+    
+    info "生成自签名证书..."
     openssl req -x509 -nodes -newkey rsa:2048 -keyout /etc/sing-box/certs/privkey.pem -out /etc/sing-box/certs/fullchain.pem -days 3650 -subj "/CN=$(pick_tls_domain)"
 
     local JSON='{"log":{"level":"warn"},"inbounds":[],"outbounds":[{"type":"direct"}]}'
@@ -380,20 +377,18 @@ main() {
     [ "$INSTALL_MODE" == "2" ] && JSON=$(echo "$JSON" | jq ".inbounds += [{\"type\":\"vless\",\"tag\":\"vless-in\",\"listen\":\"127.0.0.1\",\"listen_port\":$B_PORT,\"users\":[{\"uuid\":\"$UUID\"}],\"transport\":{\"type\":\"ws\",\"path\":\"/argo\"}}]")
     echo "$JSON" | jq . > "$CONFIG_FILE"
 
-    # 6. 配置并开启服务
     setup_service
 
-    # 7. Argo 隧道启动逻辑
     if [ "$INSTALL_MODE" == "2" ]; then
+        info "正在建立 Argo 隧道，请稍候..."
         nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:$B_PORT --no-autoupdate > "$ARGO_LOG" 2>&1 &
         sleep 5
         grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' "$ARGO_LOG" | head -1 | sed 's#https://##' > /etc/sing-box/argo_domain.txt || true
     fi
 
-    # 8. 生成管理脚本并展示节点
     create_manager
     show_nodes
-    succ "部署成功！输入 'sb' 管理。"
+    succ "恭喜，安装部署已完成！输入 'sb' 随时进入此管理面板。"
 }
 
 main
