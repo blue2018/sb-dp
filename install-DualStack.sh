@@ -489,19 +489,9 @@ while true; do
             [ "\$ret_code" -eq 0 ] && restart_svc
             read -p "按回车继续..." ;;
         5)
-            info "正在重启 sing-box 系统服务..."
-            if [[ "$OS_DISPLAY" == *"Alpine"* ]]; then
-                rc-service sing-box restart
-            else
-                systemctl restart sing-box
-            fi
-            
-            # --- 关键：重启完立即执行 Argo 检查与恢复 ---
+            restart_svc && succ "SingBox 服务已重启"
             refresh_argo_context
-            
-            echo -e "\n${YELLOW}按 Enter 返回菜单...${NC}"
-            read
-            ;;
+            read -p "按回车继续..." ;;
         6) 
             read -r -p "确认卸载？[y/N]: " un_confirm
             if [[ "\$un_confirm" =~ ^[Yy]$ ]]; then
