@@ -320,52 +320,15 @@ EOF
     fi
 }
 
-# 智能恢复并显示 Argo 状态
-refresh_argo_context() {
-    # 1. 从 JSON 提取端口 (tag 需对应你配置里的 tag)
-    local A_PORT=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .listen_port' $CONFIG_FILE 2>/dev/null || echo "")
-
-    # 2. 判断是否安装了 cloudflared 且配置了端口
-    if [[ -f "/usr/bin/cloudflared" && -n "$A_PORT" && "$A_PORT" != "null" ]]; then
-        echo -e "\n${CYAN}[Argo 隧道管理]${NC}"
-        info "检测到 Argo 端口 $A_PORT，正在重新建立临时隧道..."
-        
-        # 彻底清理旧进程
-        pkill -9 cloudflared >/dev/null 2>&1 || true
-        rm -f /etc/sing-box/argo.log
-        
-        # 启动新隧道
-        nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:$A_PORT --no-autoupdate > /etc/sing-box/argo.log 2>&1 &
-        
-        # 3. 提示并捕获新域名
-        info "临时 Argo 隧道已重新启动，正在获取新链接..."
-        
-        # 调用你脚本中原有的等待域名函数 (比如之前定义的 wait_argo_domain)
-        if [[ $(type -t wait_argo_domain) == "function" ]]; then
-            wait_argo_domain
-        else
-            # 如果没有该函数，则简单等待并抓取
-            sleep 3
-            local NEW_DOMAIN=$(grep -o 'https://[a-zA-Z0-9-]*\.trycloudflare\.com' /etc/sing-box/argo.log | head -1 | sed 's#https://##')
-            if [[ -n "$NEW_DOMAIN" ]]; then
-                success "临时隧道已重新生成: $NEW_DOMAIN"
-                # 这里可以补上显示节点链接的逻辑
-            fi
-        fi
-    fi
-}
-
 # ==========================================
 # 9. sb 管理工具生成 (修复版)
 # ==========================================
 create_manager() {
-    # 提取安装脚本中的函数，准备注入到 sb 文件中
     local SHOW_NODES_CODE=$(declare -f show_nodes)
     local SHOW_SINGLE_CODE=$(declare -f show_single_node)
     local INSTALL_KERNEL_CODE=$(declare -f install_sbox_kernel)
     local READ_PORT_CODE=$(declare -f read_port)
     local ARGO_WAIT_CODE=$(declare -f wait_argo_domain)
-    local REFRESH_CODE=$(declare -f refresh_argo_context)
 
     cat > /usr/local/bin/sb <<EOF
 #!/usr/bin/env bash
@@ -377,29 +340,18 @@ IPV4="$IPV4"
 IPV6="$IPV6"
 ARGO_LOG="/etc/sing-box/argo.log"
 
-# 颜色定义
-CYAN='\033[1;36m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
 info() { echo -e "\033[1;34m[INFO]\033[0m \$*"; }
 err()  { echo -e "\033[1;31m[ERR]\033[0m \$*" >&2; }
 succ() { echo -e "\033[1;32m[OK]\033[0m \$*"; }
 
-# 注入函数体
 $SHOW_NODES_CODE
 $SHOW_SINGLE_CODE
 $INSTALL_KERNEL_CODE
 $READ_PORT_CODE
 $ARGO_WAIT_CODE
-$REFRESH_CODE
 
 restart_svc() {
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl restart sing-box
-    else
-        rc-service sing-box restart
-    fi
+    command -v systemctl >/dev/null && systemctl restart sing-box || rc-service sing-box restart
 }
 
 while true; do
@@ -415,71 +367,106 @@ while true; do
     echo "0) 退出"
     
     read -r -p "请选择 [0-6]: " opt
+    # 清理输入的前后空格
     opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
-    [[ -z "\$opt" ]] && continue
+    
+    if [[ -z "\$opt" ]]; then
+        echo -e "\033[1;31m输入有误，请重新输入\033[0m"
+        sleep 1
+        continue
+    fi
 
     case "\$opt" in
         1)
-            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' \$CONFIG_FILE 2>/dev/null)
-            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' \$CONFIG_FILE 2>/dev/null)
+            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' \$CONFIG_FILE 2>/dev/null || echo "")
+            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' \$CONFIG_FILE 2>/dev/null || echo "")
             
+            # 协议满载检测
+            if [[ -n "\$HAS_HY2" && -n "\$HAS_ARGO" ]]; then
+                echo -e "\n\033[1;33m[提示] Hysteria2 和 VLESS+Argo 协议均已安装，无需重复添加。\033[0m"
+                read -p "按回车继续..."
+                continue
+            fi
+
             echo -e "\n--- 可添加协议 ---"
-            [[ -z "\$HAS_HY2" || "\$HAS_HY2" == "null" ]] && echo "1. Hysteria2"
-            [[ -z "\$HAS_ARGO" || "\$HAS_ARGO" == "null" ]] && echo "2. VLESS+Argo"
+            [ -z "\$HAS_HY2" ] && echo "1. Hysteria2"
+            [ -z "\$HAS_ARGO" ] && echo "2. VLESS+Argo"
             echo "0. 返回上级"
             
-            read -r -p "选择: " add_opt
-            if [[ "\$add_opt" == "1" ]]; then
-                NP=\$(read_port "设置端口" "\$((RANDOM % 50000 + 10000))")
-                UUID=\$(jq -r '.inbounds[0].users[0].password // .inbounds[0].users[0].uuid' \$CONFIG_FILE 2>/dev/null)
-                [[ -z "\$UUID" || "\$UUID" == "null" ]] && UUID=\$(cat /proc/sys/kernel/random/uuid)
-                jq ".inbounds += [{\"type\":\"hysteria2\",\"tag\":\"hy2-in\",\"listen\":\"::\",\"listen_port\":\$NP,\"users\":[{\"password\":\"\$UUID\"}],\"tls\":{\"enabled\":true,\"alpn\":[\"h3\"],\"certificate_path\":\"/etc/sing-box/certs/fullchain.pem\",\"key_path\":\"/etc/sing-box/certs/privkey.pem\"}}]" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
-                restart_svc && show_single_node "hy2-in"
-                read -p "按回车继续..."
-            elif [[ "\$add_opt" == "2" ]]; then
-                AP=\$(read_port "设置端口" "\$((RANDOM % 50000 + 10000))")
-                UUID=\$(jq -r '.inbounds[0].users[0].password // .inbounds[0].users[0].uuid' \$CONFIG_FILE 2>/dev/null)
-                [[ -z "\$UUID" || "\$UUID" == "null" ]] && UUID=\$(cat /proc/sys/kernel/random/uuid)
-                curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-\$SBOX_ARCH" -o /usr/bin/cloudflared && chmod +x /usr/bin/cloudflared
-                jq ".inbounds += [{\"type\":\"vless\",\"tag\":\"vless-in\",\"listen\":\"127.0.0.1\",\"listen_port\":\$AP,\"users\":[{\"uuid\":\"\$UUID\"}],\"transport\":{\"type\":\"ws\",\"path\":\"/argo\"}}]" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
-                pkill -9 cloudflared >/dev/null 2>&1 || true
-                nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:\$AP --no-autoupdate > /etc/sing-box/argo.log 2>&1 &
-                wait_argo_domain && restart_svc && show_single_node "vless-in"
-                read -p "按回车继续..."
-            fi ;;
+            while true; do
+                read -r -p "选择: " add_opt
+                add_opt=\$(echo "\$add_opt" | xargs echo -n 2>/dev/null || echo "\$add_opt")
+                
+                [ "\$add_opt" == "0" ] && break
+                if [[ -z "\$add_opt" ]]; then
+                    echo -e "\033[1;31m输入不能为空\033[0m"
+                    continue
+                fi
+
+                if [[ "\$add_opt" == "1" && -z "\$HAS_HY2" ]]; then
+                    NP=\$(read_port "设置端口" "\$((RANDOM % 50000 + 10000))")
+                    UUID=\$(jq -r '.inbounds[0].users[0].password // .inbounds[0].users[0].uuid' \$CONFIG_FILE 2>/dev/null || cat /proc/sys/kernel/random/uuid)
+                    jq ".inbounds += [{\"type\":\"hysteria2\",\"tag\":\"hy2-in\",\"listen\":\"::\",\"listen_port\":\$NP,\"users\":[{\"password\":\"\$UUID\"}],\"tls\":{\"enabled\":true,\"alpn\":[\"h3\"],\"certificate_path\":\"/etc/sing-box/certs/fullchain.pem\",\"key_path\":\"/etc/sing-box/certs/privkey.pem\"}}]" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
+                    restart_svc && show_single_node "hy2-in"
+                    read -p "按回车继续..." && break
+                elif [[ "\$add_opt" == "2" && -z "\$HAS_ARGO" ]]; then
+                    AP=\$(read_port "设置端口" "\$((RANDOM % 50000 + 10000))")
+                    UUID=\$(jq -r '.inbounds[0].users[0].password // .inbounds[0].users[0].uuid' \$CONFIG_FILE 2>/dev/null || cat /proc/sys/kernel/random/uuid)
+                    curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-\$SBOX_ARCH" -o /usr/bin/cloudflared && chmod +x /usr/bin/cloudflared
+                    jq ".inbounds += [{\"type\":\"vless\",\"tag\":\"vless-in\",\"listen\":\"127.0.0.1\",\"listen_port\":\$AP,\"users\":[{\"uuid\":\"\$UUID\"}],\"transport\":{\"type\":\"ws\",\"path\":\"/argo\"}}]" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
+                    pkill cloudflared || true
+                    nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:\$AP --no-autoupdate > /etc/sing-box/argo.log 2>&1 &
+                    wait_argo_domain && restart_svc && show_single_node "vless-in"
+                    read -p "按回车继续..." && break
+                else
+                    err "无效输入，请重新选择。"
+                fi
+            done ;;
         2) show_nodes && read -p "按回车继续..." ;;
         3)
-            echo -e "\n--- 更改端口 ---"
-            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' \$CONFIG_FILE 2>/dev/null)
-            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' \$CONFIG_FILE 2>/dev/null)
-            [[ -n "\$HAS_HY2" && "\$HAS_HY2" != "null" ]] && echo "1. Hysteria2"
-            [[ -n "\$HAS_ARGO" && "\$HAS_ARGO" != "null" ]] && echo "2. Argo"
-            read -r -p "选择: " p_opt
-            if [[ "\$p_opt" == "1" ]]; then
-                NP=\$(read_port "新端口" "\$((RANDOM % 50000 + 10000))")
-                jq "(.inbounds[] | select(.tag==\"hy2-in\") | .listen_port) = \$NP" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
-                restart_svc && show_single_node "hy2-in"
-            elif [[ "\$p_opt" == "2" ]]; then
-                NP=\$(read_port "新端口" "\$((RANDOM % 50000 + 10000))")
-                jq "(.inbounds[] | select(.tag==\"vless-in\") | .listen_port) = \$NP" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
-                pkill -9 cloudflared >/dev/null 2>&1 || true
-                nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:\$NP --no-autoupdate > /etc/sing-box/argo.log 2>&1 &
-                wait_argo_domain && restart_svc && show_single_node "vless-in"
-            fi
+            echo -e "\n--- 更改已安装协议端口 ---"
+            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' \$CONFIG_FILE 2>/dev/null || echo "")
+            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' \$CONFIG_FILE 2>/dev/null || echo "")
+            opts=(); [ -n "\$HAS_HY2" ] && echo "1. Hysteria2 端口" && opts+=(1); [ -n "\$HAS_ARGO" ] && echo "2. Argo 端口" && opts+=(2); echo "0. 返回上级"
+            
+            while true; do
+                read -r -p "选择: " p_opt
+                p_opt=\$(echo "\$p_opt" | xargs echo -n 2>/dev/null || echo "\$p_opt")
+                [ "\$p_opt" == "0" ] && break
+                if [[ " \${opts[@]} " =~ " \$p_opt " ]]; then
+                    NP=\$(read_port "请输入新端口号" "\$((RANDOM % 50000 + 10000))")
+                    [ "\$p_opt" == "1" ] && tag="hy2-in" || tag="vless-in"
+                    jq "(.inbounds[] | select(.tag==\"\$tag\") | .listen_port) = \$NP" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
+                    if [ "\$tag" == "vless-in" ]; then
+                        pkill cloudflared || true
+                        nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:\$NP --no-autoupdate > /etc/sing-box/argo.log 2>&1 &
+                        wait_argo_domain
+                    fi
+                    restart_svc && show_single_node "\$tag"
+                    read -p "按回车继续..." && break
+                else
+                    err "无效选择，请重新输入。"
+                fi
+            done ;;
+        4) 
+            install_sbox_kernel "true"
+            ret_code=\$?
+            [ "\$ret_code" -eq 0 ] && restart_svc
             read -p "按回车继续..." ;;
-        4) install_sbox_kernel "true" && restart_svc && read -p "按回车继续..." ;;
-        5)
-            restart_svc && succ "SingBox 服务已重启"
-            refresh_argo_context
-            read -p "按回车继续..." ;;
-        6)
+        5) restart_svc && succ "SingBox 服务已重启" && read -p "按回车继续..." ;;
+        6) 
             read -r -p "确认卸载？[y/N]: " un_confirm
             if [[ "\$un_confirm" =~ ^[Yy]$ ]]; then
+                info "正在卸载 SingBox 相关组件..."
                 systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true
-                pkill -9 cloudflared >/dev/null 2>&1 || true
+                pkill cloudflared || true
                 rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/bin/cloudflared /etc/sysctl.d/99-singbox-*.conf
-                succ "已彻底卸载。"
+                sysctl --system >/dev/null 2>&1
+                succ "SingBox 已彻底卸载。"
                 exit 0
+            else
+                info "卸载已取消。"
+                read -p "按回车继续..."
             fi ;;
         0) exit 0 ;;
         *) err "无效选项。" ;;
