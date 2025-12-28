@@ -388,7 +388,11 @@ $ARGO_WAIT_CODE
 $REFRESH_ARGO_CODE
 
 restart_svc() {
-    command -v systemctl >/dev/null && systemctl restart sing-box || rc-service sing-box restart
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart sing-box
+    else
+        rc-service sing-box restart
+    fi
 }
 
 while true; do
