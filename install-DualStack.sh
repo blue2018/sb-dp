@@ -355,17 +355,14 @@ refresh_argo_context() {
     fi
 }
 
-# ==========================================
-# 9. sb 管理工具生成 (修复版)
-# ==========================================
 create_manager() {
+    # 导出所有依赖函数到字符串
     local SHOW_NODES_CODE=$(declare -f show_nodes)
     local SHOW_SINGLE_CODE=$(declare -f show_single_node)
     local INSTALL_KERNEL_CODE=$(declare -f install_sbox_kernel)
     local READ_PORT_CODE=$(declare -f read_port)
     local ARGO_WAIT_CODE=$(declare -f wait_argo_domain)
-    # 关键点 1：导出恢复函数
-    local REFRESH_ARGO_CODE=$(declare -f refresh_argo_context)
+    local REFRESH_CODE=$(declare -f refresh_argo_context)
 
     cat > /usr/local/bin/sb <<EOF
 #!/usr/bin/env bash
@@ -377,7 +374,7 @@ IPV4="$IPV4"
 IPV6="$IPV6"
 ARGO_LOG="/etc/sing-box/argo.log"
 
-# 定义颜色
+# 颜色定义
 CYAN='\033[1;36m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
@@ -386,12 +383,13 @@ info() { echo -e "\033[1;34m[INFO]\033[0m \$*"; }
 err()  { echo -e "\033[1;31m[ERR]\033[0m \$*" >&2; }
 succ() { echo -e "\033[1;32m[OK]\033[0m \$*"; }
 
+# 注入函数体
 $SHOW_NODES_CODE
 $SHOW_SINGLE_CODE
 $INSTALL_KERNEL_CODE
 $READ_PORT_CODE
 $ARGO_WAIT_CODE
-$REFRESH_ARGO_CODE
+$REFRESH_CODE
 
 restart_svc() {
     if command -v systemctl >/dev/null 2>&1; then
@@ -415,37 +413,30 @@ while true; do
     
     read -r -p "请选择 [0-6]: " opt
     opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
-    
-    if [[ -z "\$opt" ]]; then
-        continue
-    fi
+    [[ -z "\$opt" ]] && continue
 
     case "\$opt" in
         1)
-            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' \$CONFIG_FILE 2>/dev/null || echo "")
-            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' \$CONFIG_FILE 2>/dev/null || echo "")
+            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' \$CONFIG_FILE 2>/dev/null)
+            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' \$CONFIG_FILE 2>/dev/null)
             
-            if [[ -n "\$HAS_HY2" && -n "\$HAS_ARGO" ]]; then
-                echo -e "\n\033[1;33m[提示] 协议已满载。\033[0m"
-                read -p "按回车继续..."
-                continue
-            fi
-
             echo -e "\n--- 可添加协议 ---"
-            [ -z "\$HAS_HY2" ] && echo "1. Hysteria2"
-            [ -z "\$HAS_ARGO" ] && echo "2. VLESS+Argo"
+            [[ -z "\$HAS_HY2" || "\$HAS_HY2" == "null" ]] && echo "1. Hysteria2"
+            [[ -z "\$HAS_ARGO" || "\$HAS_ARGO" == "null" ]] && echo "2. VLESS+Argo"
             echo "0. 返回上级"
             
             read -r -p "选择: " add_opt
-            if [[ "\$add_opt" == "1" && -z "\$HAS_HY2" ]]; then
+            if [[ "\$add_opt" == "1" ]]; then
                 NP=\$(read_port "设置端口" "\$((RANDOM % 50000 + 10000))")
-                UUID=\$(jq -r '.inbounds[0].users[0].password // .inbounds[0].users[0].uuid' \$CONFIG_FILE 2>/dev/null || cat /proc/sys/kernel/random/uuid)
+                UUID=\$(jq -r '.inbounds[0].users[0].password // .inbounds[0].users[0].uuid' \$CONFIG_FILE 2>/dev/null)
+                [[ -z "\$UUID" || "\$UUID" == "null" ]] && UUID=\$(cat /proc/sys/kernel/random/uuid)
                 jq ".inbounds += [{\"type\":\"hysteria2\",\"tag\":\"hy2-in\",\"listen\":\"::\",\"listen_port\":\$NP,\"users\":[{\"password\":\"\$UUID\"}],\"tls\":{\"enabled\":true,\"alpn\":[\"h3\"],\"certificate_path\":\"/etc/sing-box/certs/fullchain.pem\",\"key_path\":\"/etc/sing-box/certs/privkey.pem\"}}]" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
                 restart_svc && show_single_node "hy2-in"
                 read -p "按回车继续..."
-            elif [[ "\$add_opt" == "2" && -z "\$HAS_ARGO" ]]; then
+            elif [[ "\$add_opt" == "2" ]]; then
                 AP=\$(read_port "设置端口" "\$((RANDOM % 50000 + 10000))")
-                UUID=\$(jq -r '.inbounds[0].users[0].password // .inbounds[0].users[0].uuid' \$CONFIG_FILE 2>/dev/null || cat /proc/sys/kernel/random/uuid)
+                UUID=\$(jq -r '.inbounds[0].users[0].password // .inbounds[0].users[0].uuid' \$CONFIG_FILE 2>/dev/null)
+                [[ -z "\$UUID" || "\$UUID" == "null" ]] && UUID=\$(cat /proc/sys/kernel/random/uuid)
                 curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-\$SBOX_ARCH" -o /usr/bin/cloudflared && chmod +x /usr/bin/cloudflared
                 jq ".inbounds += [{\"type\":\"vless\",\"tag\":\"vless-in\",\"listen\":\"127.0.0.1\",\"listen_port\":\$AP,\"users\":[{\"uuid\":\"\$UUID\"}],\"transport\":{\"type\":\"ws\",\"path\":\"/argo\"}}]" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
                 pkill -9 cloudflared || true
@@ -456,16 +447,14 @@ while true; do
         2) show_nodes && read -p "按回车继续..." ;;
         3)
             echo -e "\n--- 更改端口 ---"
-            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' \$CONFIG_FILE 2>/dev/null || echo "")
-            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' \$CONFIG_FILE 2>/dev/null || echo "")
-            [ -n "\$HAS_HY2" ] && echo "1. Hysteria2"
-            [ -n "\$HAS_ARGO" ] && echo "2. Argo"
+            echo "1. Hysteria2"
+            echo "2. Argo"
             read -r -p "选择: " p_opt
-            if [[ "\$p_opt" == "1" && -n "\$HAS_HY2" ]]; then
+            if [[ "\$p_opt" == "1" ]]; then
                 NP=\$(read_port "新端口" "\$((RANDOM % 50000 + 10000))")
                 jq "(.inbounds[] | select(.tag==\"hy2-in\") | .listen_port) = \$NP" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
                 restart_svc && show_single_node "hy2-in"
-            elif [[ "\$p_opt" == "2" && -n "\$HAS_ARGO" ]]; then
+            elif [[ "\$p_opt" == "2" ]]; then
                 NP=\$(read_port "新端口" "\$((RANDOM % 50000 + 10000))")
                 jq "(.inbounds[] | select(.tag==\"vless-in\") | .listen_port) = \$NP" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
                 pkill -9 cloudflared || true
@@ -475,7 +464,6 @@ while true; do
             read -p "按回车继续..." ;;
         4) install_sbox_kernel "true" && restart_svc && read -p "按回车继续..." ;;
         5)
-            # 关键点 2：添加你要求的提示文案
             restart_svc && succ "SingBox 服务已重启"
             refresh_argo_context
             read -p "按回车继续..." ;;
