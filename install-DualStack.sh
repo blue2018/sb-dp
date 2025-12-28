@@ -364,6 +364,7 @@ create_manager() {
     local INSTALL_KERNEL_CODE=$(declare -f install_sbox_kernel)
     local READ_PORT_CODE=$(declare -f read_port)
     local ARGO_WAIT_CODE=$(declare -f wait_argo_domain)
+    local REFRESH_CODE=$(declare -f refresh_argo_context)
 
     cat > /usr/local/bin/sb <<EOF
 #!/usr/bin/env bash
@@ -384,6 +385,7 @@ $SHOW_SINGLE_CODE
 $INSTALL_KERNEL_CODE
 $READ_PORT_CODE
 $ARGO_WAIT_CODE
+$REFRESH_CODE
 
 restart_svc() {
     command -v systemctl >/dev/null && systemctl restart sing-box || rc-service sing-box restart
@@ -488,16 +490,14 @@ while true; do
             ret_code=\$?
             [ "\$ret_code" -eq 0 ] && restart_svc
             read -p "按回车继续..." ;;
-        5)
+        5)
             info "正在重启 sing-box 系统服务..."
-            if [[ "$OS_DISPLAY" == *"Alpine"* ]]; then
-                rc-service sing-box restart
-            else
-                systemctl restart sing-box
-            fi
+            restart_svc && succ "SingBox 服务已重启"
             
-            # --- 关键：重启完立即执行 Argo 检查与恢复 ---
-            refresh_argo_context
+            # 只有安装了 Argo 才执行恢复逻辑
+            if [[ -f "/usr/bin/cloudflared" ]]; then
+                refresh_argo_context
+            fi
             
             echo -e "\n${YELLOW}按 Enter 返回菜单...${NC}"
             read
