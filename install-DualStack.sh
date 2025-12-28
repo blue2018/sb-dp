@@ -280,47 +280,6 @@ show_nodes() {
 }
 
 # ==========================================
-# 8. 系统服务配置
-# ==========================================
-setup_service() {
-    info "写入系统服务单元 (配额: $SBOX_MEM_MAX)..."
-    local env_vars="GOGC=${SBOX_GOGC:-80} GOMEMLIMIT=$SBOX_GOLIMIT GODEBUG=madvdontneed=1"
-    if [[ "$OS_DISPLAY" == *"Alpine"* ]]; then
-        cat > /etc/init.d/sing-box <<EOF
-#!/sbin/openrc-run
-name="sing-box"
-export $env_vars
-command="/usr/bin/sing-box"
-command_args="run -c $CONFIG_FILE"
-command_background="yes"
-pidfile="/run/\${RC_SVCNAME}.pid"
-EOF
-        chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default && rc-service sing-box restart
-    else
-        cat > /etc/systemd/system/sing-box.service <<EOF
-[Unit]
-Description=Sing-box Service
-After=network.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/etc/sing-box
-Environment=$env_vars
-ExecStart=/usr/bin/sing-box run -c $CONFIG_FILE
-Restart=on-failure
-MemoryMax=$SBOX_MEM_MAX
-LimitNOFILE=1000000
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload && systemctl enable sing-box --now
-    fi
-}
-
-# ==========================================
 # 9. sb 管理工具生成 (修复版)
 # ==========================================
 create_manager() {
@@ -332,6 +291,9 @@ create_manager() {
 
     cat > /usr/local/bin/sb <<EOF
 #!/usr/bin/env bash
+# 设置安全参数，但在脚本内部处理未定义变量
+set -u
+
 CONFIG_FILE="/etc/sing-box/config.json"
 SBOX_ARCH="$SBOX_ARCH"
 OS_DISPLAY="$OS_DISPLAY"
@@ -351,7 +313,11 @@ $READ_PORT_CODE
 $ARGO_WAIT_CODE
 
 restart_svc() {
-    command -v systemctl >/dev/null && systemctl restart sing-box || rc-service sing-box restart
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart sing-box
+    else
+        rc-service sing-box restart
+    fi
 }
 
 while true; do
@@ -366,100 +332,118 @@ while true; do
     echo "6) 卸载脚本"
     echo "0) 退出"
     read -r -p "请选择 [0-6]: " opt
-        # 优化建议：使用 Bash 原生方式剔除前后空格，比 xargs 更快且无需担心子 shell 环境问题
-        opt="${opt#"${opt%%[![:space:]]*}"}"
-        opt="${opt%"${opt##*[![:space:]]}"}"
-        # 逻辑判断：如果输入为空
-        if [[ -z "$opt" ]]; then
-            echo -e "\033[1;31m输入有误，请重新输入\033[0m"
-            sleep 1
-            continue
-        fi
+
+    # 清理输入空格 (使用兼容性更好的写法)
+    opt=\$(echo "\$opt" | tr -d ' ')
+
+    if [[ -z "\$opt" ]]; then
+        continue
+    fi
 
     case "\$opt" in
         1)
-            HAS_HY2=$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' "$CONFIG_FILE" 2>/dev/null || echo "")
-            HAS_ARGO=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' "$CONFIG_FILE" 2>/dev/null || echo "")
+            # 动态检测当前已存在的协议
+            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' "\$CONFIG_FILE" 2>/dev/null || echo "")
+            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' "\$CONFIG_FILE" 2>/dev/null || echo "")
             
-            # 逻辑判断：如果两个变量都不为空，说明协议已满
-            if [[ -n "$HAS_HY2" && -n "$HAS_ARGO" ]]; then
+            if [[ -n "\$HAS_HY2" && -n "\$HAS_ARGO" ]]; then
                 echo -e "\n\033[1;33m[提示] 协议已全部安装（Hy2 与 Argo），无需重复添加。\033[0m"
                 read -p "按回车返回主菜单..." 
-                continue # 跳过下面的菜单显示，直接回到主菜单
+                continue
             fi
 
             echo -e "\n--- 可添加协议 ---"
-            [ -z "$HAS_HY2" ] && echo "1. Hysteria2"
-            [ -z "$HAS_ARGO" ] && echo "2. VLESS+Argo"
+            [ -z "\$HAS_HY2" ] && echo "1. Hysteria2"
+            [ -z "\$HAS_ARGO" ] && echo "2. VLESS+Argo"
             echo "0. 返回上级"
             
-            while true; do
-                read -r -p "选择: " add_opt
-                # 清理空格
-                add_opt=$(echo "$add_opt" | xargs echo -n 2>/dev/null || echo "$add_opt")
-                
-                [ "$add_opt" == "0" ] && break
-                if [[ -z "$add_opt" ]]; then
-                    echo -e "\033[1;31m输入有误，请重新输入\033[0m"
-                    continue
-                fi
+            read -r -p "选择: " add_opt
+            add_opt=\$(echo "\$add_opt" | tr -d ' ')
+            
+            if [[ "\$add_opt" == "0" || -z "\$add_opt" ]]; then
+                continue
+            fi
 
-                if [[ "$add_opt" == "1" && -z "$HAS_HY2" ]]; then
-                    # ... 安装 Hy2 的代码 ...
-                    break
-                elif [[ "$add_opt" == "2" && -z "$HAS_ARGO" ]]; then
-                    # ... 安装 Argo 的代码 ...
-                    break
-                else
-                    err "无效输入或协议已存在，请重新选择。"
+            # 执行添加逻辑
+            if [[ "\$add_opt" == "1" && -z "\$HAS_HY2" ]]; then
+                NP=\$(read_port "设置 Hy2 端口" "\$((RANDOM % 50000 + 10000))")
+                UUID=\$(cat /proc/sys/kernel/random/uuid)
+                jq ".inbounds += [{\"type\":\"hysteria2\",\"tag\":\"hy2-in\",\"listen\":\"::\",\"listen_port\":\$NP,\"users\":[{\"password\":\"\$UUID\"}],\"tls\":{\"enabled\":true,\"alpn\":[\"h3\"],\"certificate_path\":\"/etc/sing-box/certs/fullchain.pem\",\"key_path\":\"/etc/sing-box/certs/privkey.pem\"}}]" "\$CONFIG_FILE" > tmp.json && mv tmp.json "\$CONFIG_FILE"
+                restart_svc && succ "Hysteria2 协议添加完成！"
+                show_single_node "hy2-in"
+            elif [[ "\$add_opt" == "2" && -z "\$HAS_ARGO" ]]; then
+                NP=\$(read_port "设置 Argo 转发端口" "\$((RANDOM % 50000 + 10000))")
+                UUID=\$(cat /proc/sys/kernel/random/uuid)
+                # 检查并下载 cloudflared
+                if [ ! -f "/usr/bin/cloudflared" ]; then
+                    info "正在下载 Cloudflared..."
+                    curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-\$SBOX_ARCH" -o /usr/bin/cloudflared && chmod +x /usr/bin/cloudflared
                 fi
-            done ;;
-        2) show_nodes && read -p "按回车继续..." ;;
+                jq ".inbounds += [{\"type\":\"vless\",\"tag\":\"vless-in\",\"listen\":\"127.0.0.1\",\"listen_port\":\$NP,\"users\":[{\"uuid\":\"\$UUID\"}],\"transport\":{\"type\":\"ws\",\"path\":\"/argo\"}}]" "\$CONFIG_FILE" > tmp.json && mv tmp.json "\$CONFIG_FILE"
+                nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:\$NP --no-autoupdate > "\$ARGO_LOG" 2>&1 &
+                wait_argo_domain
+                restart_svc && succ "VLESS+Argo 协议添加完成！"
+                show_single_node "vless-in"
+            else
+                err "无效选择或协议已存在。"
+            fi
+            read -p "按回车继续..."
+            ;;
+        2) 
+            show_nodes && read -p "按回车继续..." 
+            ;;
         3)
             echo -e "\n--- 更改已安装协议端口 ---"
-            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' \$CONFIG_FILE 2>/dev/null || echo "")
-            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' \$CONFIG_FILE 2>/dev/null || echo "")
-            opts=(); [ -n "\$HAS_HY2" ] && echo "1. Hysteria2 端口" && opts+=(1); [ -n "\$HAS_ARGO" ] && echo "2. Argo 端口" && opts+=(2); echo "0. 返回上级"
+            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' "\$CONFIG_FILE" 2>/dev/null || echo "")
+            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' "\$CONFIG_FILE" 2>/dev/null || echo "")
             
-            while true; do
-                read -p "选择: " p_opt
-                [ "\$p_opt" == "0" ] && break
-                if [[ " \${opts[@]} " =~ " \$p_opt " ]]; then
-                    NP=\$(read_port "请输入新端口号" "\$((RANDOM % 50000 + 10000))")
-                    [ "\$p_opt" == "1" ] && tag="hy2-in" || tag="vless-in"
-                    jq "(.inbounds[] | select(.tag==\"\$tag\") | .listen_port) = \$NP" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
-                    if [ "\$tag" == "vless-in" ]; then
-                        pkill cloudflared || true
-                        nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:\$NP --no-autoupdate > /etc/sing-box/argo.log 2>&1 &
-                        wait_argo_domain
-                    fi
-                    restart_svc && show_single_node "\$tag"
-                    read -p "按回车继续..." && break
-                else
-                    err "无效选择，请重新输入。"
+            declare -a opts
+            [ -n "\$HAS_HY2" ] && echo "1. Hysteria2 端口" && opts+=(1)
+            [ -n "\$HAS_ARGO" ] && echo "2. Argo 端口" && opts+=(2)
+            echo "0. 返回上级"
+            
+            read -p "选择: " p_opt
+            if [[ "\$p_opt" == "0" ]]; then continue; fi
+            
+            if [[ " \${opts[@]} " =~ " \$p_opt " ]]; then
+                NP=\$(read_port "请输入新端口号" "\$((RANDOM % 50000 + 10000))")
+                [ "\$p_opt" == "1" ] && tag="hy2-in" || tag="vless-in"
+                jq "(.inbounds[] | select(.tag==\"\$tag\") | .listen_port) = \$NP" "\$CONFIG_FILE" > tmp.json && mv tmp.json "\$CONFIG_FILE"
+                if [ "\$tag" == "vless-in" ]; then
+                    pkill cloudflared || true
+                    nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:\$NP --no-autoupdate > "\$ARGO_LOG" 2>&1 &
+                    wait_argo_domain
                 fi
-            done ;;
+                restart_svc && show_single_node "\$tag"
+                read -p "按回车继续..."
+            else
+                err "无效选择。"
+            fi
+            ;;
         4) 
-            # 移除这里的 local，并对变量增加默认值处理
             install_sbox_kernel "true"
-            ret_code=\$?
-            [ "\$ret_code" -eq 0 ] && restart_svc
-            read -p "按回车继续..." ;;
-        5) restart_svc && succ "SingBox 服务已重启" && read -p "按回车继续..." ;;
+            [ \$? -eq 0 ] && restart_svc
+            read -p "按回车继续..."
+            ;;
+        5) 
+            restart_svc && succ "SingBox 服务已重启" && read -p "按回车继续..." 
+            ;;
         6) 
             read -p "确认卸载？[y/N]: " un_confirm
             if [[ "\$un_confirm" =~ ^[Yy]$ ]]; then
                 info "正在卸载 SingBox 相关组件..."
-                systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true
+                if command -v systemctl >/dev/null 2>&1; then
+                    systemctl stop sing-box 2>/dev/null || true
+                else
+                    rc-service sing-box stop 2>/dev/null || true
+                fi
                 pkill cloudflared || true
                 rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/bin/cloudflared /etc/sysctl.d/99-singbox-*.conf
                 sysctl --system >/dev/null 2>&1
                 succ "SingBox 已彻底卸载。"
                 exit 0
-            else
-                info "卸载已取消。"
-                read -p "按回车继续..."
-            fi ;;
+            fi 
+            ;;
         0) exit 0 ;;
         *) err "无效选项。" ;;
     esac
