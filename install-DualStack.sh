@@ -450,6 +450,7 @@ while true; do
 done
 EOF
     chmod +x /usr/local/bin/sb
+    ln -sf /usr/local/bin/sb /usr/local/bin/SB
 }
 
 # ==========================================
