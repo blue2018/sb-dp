@@ -242,16 +242,16 @@ show_single_node() {
     local HOST_NAME=$(hostname)
 
     if [ "$tag" == "hy2-in" ]; then
-        local H_PORT=$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .listen_port' $CONFIG_FILE)
-        local H_PASS=$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .users[0].password' $CONFIG_FILE)
+        local H_PORT=$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .listen_port' "$CONFIG_FILE")
+        local H_PASS=$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .users[0].password' "$CONFIG_FILE")
         echo -e "\n\033[1;36m[Hysteria2 节点配置]\033[0m   端口: \033[1;33m$H_PORT\033[0m"
         [ -n "$IPV4" ] && echo -e "IPv4 链接:\n\033[1;32mhy2://$H_PASS@$IPV4:$H_PORT/?sni=$SNI&alpn=h3&insecure=1#Hy2_v4_${HOST_NAME}\033[0m"
         [ -n "$IPV6" ] && echo -e "IPv6 链接:\n\033[1;32mhy2://$H_PASS@[$IPV6]:$H_PORT/?sni=$SNI&alpn=h3&insecure=1#Hy2_v6_${HOST_NAME}\033[0m"
     fi
 
     if [ "$tag" == "vless-in" ]; then
-        local A_PORT=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .listen_port' $CONFIG_FILE)
-        local A_UUID=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .users[0].uuid' $CONFIG_FILE)
+        local A_PORT=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .listen_port' "$CONFIG_FILE")
+        local A_UUID=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .users[0].uuid' "$CONFIG_FILE")
         local A_DOM=$(cat /etc/sing-box/argo_domain.txt 2>/dev/null || echo "等待捕获...")
         echo -e "\n\033[1;36m[VLESS+Argo 节点配置]\033[0m   转发端口: \033[1;33m$A_PORT\033[0m"
         echo -e "Argo链接:\n\033[1;32mvless://$A_UUID@$A_DOM:443?encryption=none&security=tls&sni=$A_DOM&fp=chrome&type=ws&host=$A_DOM&path=%2Fargo#VLESS_Argo_${HOST_NAME}\033[0m"
@@ -271,11 +271,11 @@ show_nodes() {
     echo -e "公网IPv4: \033[1;33m${IPV4:-检测失败}\033[0m | 公网IPv6: \033[1;33m${IPV6:-检测失败}\033[0m"
     echo -e "\033[1;34m------------------------------------------\033[0m"
 
-    local HAS_HY2=$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' $CONFIG_FILE 2>/dev/null || echo "")
-    [ -n "$HAS_HY2" ] && show_single_node "hy2-in"
+    local HAS_HY2=$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' "$CONFIG_FILE" 2>/dev/null || echo "")
+    [ -n "$HAS_HY2" ] && [ "$HAS_HY2" != "null" ] && show_single_node "hy2-in"
 
-    local HAS_ARGO=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' $CONFIG_FILE 2>/dev/null || echo "")
-    [ -n "$HAS_ARGO" ] && show_single_node "vless-in"
+    local HAS_ARGO=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' "$CONFIG_FILE" 2>/dev/null || echo "")
+    [ -n "$HAS_ARGO" ] && [ "$HAS_ARGO" != "null" ] && show_single_node "vless-in"
     echo -e "\n\033[1;34m==========================================\033[0m"
 }
 
@@ -366,11 +366,11 @@ while true; do
     echo "6) 卸载脚本"
     echo "0) 退出"
     read -r -p "请选择 [0-6]: " opt
-        # 优化建议：使用 Bash 原生方式剔除前后空格，比 xargs 更快且无需担心子 shell 环境问题
-        opt="${opt#"${opt%%[![:space:]]*}"}"
-        opt="${opt%"${opt##*[![:space:]]}"}"
-        # 逻辑判断：如果输入为空
-        if [[ -z "$opt" ]]; then
+        # 优化建议：使用 Bash 原生方式剔除前后空格
+        opt="\${opt#\${opt%%[![:space:]]*}}"
+        opt="\${opt%\${opt##*[![:space:]]}}"
+        
+        if [[ -z "\$opt" ]]; then
             echo -e "\033[1;31m输入有误，请重新输入\033[0m"
             sleep 1
             continue
@@ -378,37 +378,50 @@ while true; do
 
     case "\$opt" in
         1)
-            HAS_HY2=$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' "$CONFIG_FILE" 2>/dev/null || echo "")
-            HAS_ARGO=$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' "$CONFIG_FILE" 2>/dev/null || echo "")
+            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' "\$CONFIG_FILE" 2>/dev/null || echo "")
+            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' "\$CONFIG_FILE" 2>/dev/null || echo "")
             
-            # 逻辑判断：如果两个变量都不为空，说明协议已满
-            if [[ -n "$HAS_HY2" && -n "$HAS_ARGO" ]]; then
+            if [[ -n "\$HAS_HY2" && "\$HAS_HY2" != "null" && -n "\$HAS_ARGO" && "\$HAS_ARGO" != "null" ]]; then
                 echo -e "\n\033[1;33m[提示] 协议已全部安装（Hy2 与 Argo），无需重复添加。\033[0m"
                 read -p "按回车返回主菜单..." 
-                continue # 跳过下面的菜单显示，直接回到主菜单
+                continue 
             fi
 
             echo -e "\n--- 可添加协议 ---"
-            [ -z "$HAS_HY2" ] && echo "1. Hysteria2"
-            [ -z "$HAS_ARGO" ] && echo "2. VLESS+Argo"
+            [[ -z "\$HAS_HY2" || "\$HAS_HY2" == "null" ]] && echo "1. Hysteria2"
+            [[ -z "\$HAS_ARGO" || "\$HAS_ARGO" == "null" ]] && echo "2. VLESS+Argo"
             echo "0. 返回上级"
             
             while true; do
                 read -r -p "选择: " add_opt
-                # 清理空格
-                add_opt=$(echo "$add_opt" | xargs echo -n 2>/dev/null || echo "$add_opt")
+                add_opt=\$(echo "\$add_opt" | xargs echo -n 2>/dev/null || echo "\$add_opt")
                 
-                [ "$add_opt" == "0" ] && break
-                if [[ -z "$add_opt" ]]; then
+                [ "\$add_opt" == "0" ] && break
+                if [[ -z "\$add_opt" ]]; then
                     echo -e "\033[1;31m输入有误，请重新输入\033[0m"
                     continue
                 fi
 
-                if [[ "$add_opt" == "1" && -z "$HAS_HY2" ]]; then
-                    # ... 安装 Hy2 的代码 ...
+                if [[ "\$add_opt" == "1" ]] && [[ -z "\$HAS_HY2" || "\$HAS_HY2" == "null" ]]; then
+                    # 安装 Hy2 的逻辑实现
+                    NP=\$(read_port "设置 Hysteria2 端口" "\$((RANDOM % 50000 + 10000))")
+                    UUID_EX=\$(jq -r '.inbounds[0].users[0].password // .inbounds[0].users[0].uuid' "\$CONFIG_FILE" 2>/dev/null)
+                    [[ -z "\$UUID_EX" || "\$UUID_EX" == "null" ]] && UUID_EX=\$(cat /proc/sys/kernel/random/uuid)
+                    jq ".inbounds += [{\"type\":\"hysteria2\",\"tag\":\"hy2-in\",\"listen\":\"::\",\"listen_port\":\$NP,\"users\":[{\"password\":\"\$UUID_EX\"}],\"tls\":{\"enabled\":true,\"alpn\":[\"h3\"],\"certificate_path\":\"/etc/sing-box/certs/fullchain.pem\",\"key_path\":\"/etc/sing-box/certs/privkey.pem\"}}]" "\$CONFIG_FILE" > tmp.json && mv tmp.json "\$CONFIG_FILE"
+                    restart_svc && show_single_node "hy2-in"
+                    read -p "按回车继续..."
                     break
-                elif [[ "$add_opt" == "2" && -z "$HAS_ARGO" ]]; then
-                    # ... 安装 Argo 的代码 ...
+                elif [[ "\$add_opt" == "2" ]] && [[ -z "\$HAS_ARGO" || "\$HAS_ARGO" == "null" ]]; then
+                    # 安装 Argo 的逻辑实现
+                    AP=\$(read_port "设置 Argo 转发端口" "\$((RANDOM % 50000 + 10000))")
+                    UUID_EX=\$(jq -r '.inbounds[0].users[0].password // .inbounds[0].users[0].uuid' "\$CONFIG_FILE" 2>/dev/null)
+                    [[ -z "\$UUID_EX" || "\$UUID_EX" == "null" ]] && UUID_EX=\$(cat /proc/sys/kernel/random/uuid)
+                    curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-\$SBOX_ARCH" -o /usr/bin/cloudflared && chmod +x /usr/bin/cloudflared
+                    jq ".inbounds += [{\"type\":\"vless\",\"tag\":\"vless-in\",\"listen\":\"127.0.0.1\",\"listen_port\":\$AP,\"users\":[{\"uuid\":\"\$UUID_EX\"}],\"transport\":{\"type\":\"ws\",\"path\":\"/argo\"}}]" "\$CONFIG_FILE" > tmp.json && mv tmp.json "\$CONFIG_FILE"
+                    pkill -9 cloudflared >/dev/null 2>&1 || true
+                    nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:\$AP --no-autoupdate > /etc/sing-box/argo.log 2>&1 &
+                    wait_argo_domain && restart_svc && show_single_node "vless-in"
+                    read -p "按回车继续..."
                     break
                 else
                     err "无效输入或协议已存在，请重新选择。"
@@ -417,30 +430,36 @@ while true; do
         2) show_nodes && read -p "按回车继续..." ;;
         3)
             echo -e "\n--- 更改已安装协议端口 ---"
-            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' \$CONFIG_FILE 2>/dev/null || echo "")
-            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' \$CONFIG_FILE 2>/dev/null || echo "")
-            opts=(); [ -n "\$HAS_HY2" ] && echo "1. Hysteria2 端口" && opts+=(1); [ -n "\$HAS_ARGO" ] && echo "2. Argo 端口" && opts+=(2); echo "0. 返回上级"
+            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' "\$CONFIG_FILE" 2>/dev/null || echo "")
+            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' "\$CONFIG_FILE" 2>/dev/null || echo "")
+            
+            valid_list=""
+            [ -n "\$HAS_HY2" ] && [ "\$HAS_HY2" != "null" ] && echo "1. Hysteria2 端口" && valid_list+=" 1 "
+            [ -n "\$HAS_ARGO" ] && [ "\$HAS_ARGO" != "null" ] && echo "2. Argo 端口" && valid_list+=" 2 "
+            echo "0. 返回上级"
             
             while true; do
                 read -p "选择: " p_opt
                 [ "\$p_opt" == "0" ] && break
-                if [[ " \${opts[@]} " =~ " \$p_opt " ]]; then
+                if [[ "\$valid_list" =~ " \$p_opt " ]]; then
                     NP=\$(read_port "请输入新端口号" "\$((RANDOM % 50000 + 10000))")
-                    [ "\$p_opt" == "1" ] && tag="hy2-in" || tag="vless-in"
-                    jq "(.inbounds[] | select(.tag==\"\$tag\") | .listen_port) = \$NP" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
-                    if [ "\$tag" == "vless-in" ]; then
-                        pkill cloudflared || true
+                    if [ "\$p_opt" == "1" ]; then
+                        tag_name="hy2-in"
+                        jq "(.inbounds[] | select(.tag==\"hy2-in\") | .listen_port) = \$NP" "\$CONFIG_FILE" > tmp.json && mv tmp.json "\$CONFIG_FILE"
+                    else
+                        tag_name="vless-in"
+                        jq "(.inbounds[] | select(.tag==\"vless-in\") | .listen_port) = \$NP" "\$CONFIG_FILE" > tmp.json && mv tmp.json "\$CONFIG_FILE"
+                        pkill -9 cloudflared >/dev/null 2>&1 || true
                         nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:\$NP --no-autoupdate > /etc/sing-box/argo.log 2>&1 &
                         wait_argo_domain
                     fi
-                    restart_svc && show_single_node "\$tag"
+                    restart_svc && show_single_node "\$tag_name"
                     read -p "按回车继续..." && break
                 else
                     err "无效选择，请重新输入。"
                 fi
             done ;;
         4) 
-            # 移除这里的 local，并对变量增加默认值处理
             install_sbox_kernel "true"
             ret_code=\$?
             [ "\$ret_code" -eq 0 ] && restart_svc
@@ -451,7 +470,7 @@ while true; do
             if [[ "\$un_confirm" =~ ^[Yy]$ ]]; then
                 info "正在卸载 SingBox 相关组件..."
                 systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true
-                pkill cloudflared || true
+                pkill -9 cloudflared >/dev/null 2>&1 || true
                 rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/bin/cloudflared /etc/sysctl.d/99-singbox-*.conf
                 sysctl --system >/dev/null 2>&1
                 succ "SingBox 已彻底卸载。"
@@ -500,8 +519,11 @@ main() {
     generate_ecc_cert
 
     local JSON='{"log":{"level":"warn"},"inbounds":[],"outbounds":[{"type":"direct"}]}'
-    [ "$INSTALL_MODE" == "1" ] && JSON=$(echo "$JSON" | jq ".inbounds += [{\"type\":\"hysteria2\",\"tag\":\"hy2-in\",\"listen\":\"::\",\"listen_port\":$B_PORT,\"users\":[{\"password\":\"$UUID\"}],\"tls\":{\"enabled\":true,\"alpn\":[\"h3\"],\"certificate_path\":\"/etc/sing-box/certs/fullchain.pem\",\"key_path\":\"/etc/sing-box/certs/privkey.pem\"}}]")
-    [ "$INSTALL_MODE" == "2" ] && JSON=$(echo "$JSON" | jq ".inbounds += [{\"type\":\"vless\",\"tag\":\"vless-in\",\"listen\":\"127.0.0.1\",\"listen_port\":$B_PORT,\"users\":[{\"uuid\":\"$UUID\"}],\"transport\":{\"type\":\"ws\",\"path\":\"/argo\"}}]")
+    if [ "$INSTALL_MODE" == "1" ]; then
+        JSON=$(echo "$JSON" | jq ".inbounds += [{\"type\":\"hysteria2\",\"tag\":\"hy2-in\",\"listen\":\"::\",\"listen_port\":$B_PORT,\"users\":[{\"password\":\"$UUID\"}],\"tls\":{\"enabled\":true,\"alpn\":[\"h3\"],\"certificate_path\":\"/etc/sing-box/certs/fullchain.pem\",\"key_path\":\"/etc/sing-box/certs/privkey.pem\"}}]")
+    else
+        JSON=$(echo "$JSON" | jq ".inbounds += [{\"type\":\"vless\",\"tag\":\"vless-in\",\"listen\":\"127.0.0.1\",\"listen_port\":$B_PORT,\"users\":[{\"uuid\":\"$UUID\"}],\"transport\":{\"type\":\"ws\",\"path\":\"/argo\"}}]")
+    fi
     echo "$JSON" | jq . > "$CONFIG_FILE"
 
     setup_service
