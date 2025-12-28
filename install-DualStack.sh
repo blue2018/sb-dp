@@ -83,7 +83,7 @@ install_sbox_kernel() {
     if [ "$is_update" == "true" ]; then
         echo -e "------------------------------------------"
         echo -e "当前已安装版本: \033[1;33m${CURRENT_VER:-未安装}\033[0m"
-        echo -e "官方最新版本:   \033[1;32mv${LATEST_VER}\033[0m"
+        echo -e "官方最新版本:   \033[1;32m${LATEST_VER}\033[0m"
         echo -e "------------------------------------------"
         
         if [[ "$CURRENT_VER" == "$LATEST_VER" ]]; then
