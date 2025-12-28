@@ -488,7 +488,8 @@ main() {
     echo "1. 部署 Hysteria2 (UDP 高速协议)"
     echo "2. 部署 VLESS+Argo (WS 隧道协议)"
     while true; do
-        read -p "选择 [1-2]: " INSTALL_MODE
+        read -r -p "选择 [1-2]: " INSTALL_MODE
+        INSTALL_MODE=$(echo "$INSTALL_MODE" | xargs echo -n 2>/dev/null || echo "$INSTALL_MODE")
         [[ "$INSTALL_MODE" =~ ^[12]$ ]] && break
         err "请输入 1 或 2。"
     done
