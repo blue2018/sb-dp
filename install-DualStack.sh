@@ -358,14 +358,8 @@ refresh_argo_context() {
 # ==========================================
 # 9. sb 管理工具生成 (修复版)
 # ==========================================
-# ==========================================
-# 9. sb 管理工具生成 (修复版)
-# ==========================================
-# ==========================================
-# 9. sb 管理工具生成 (修复版)
-# ==========================================
 create_manager() {
-    # 导出所有依赖函数到字符串
+    # 提取安装脚本中的函数，准备注入到 sb 文件中
     local SHOW_NODES_CODE=$(declare -f show_nodes)
     local SHOW_SINGLE_CODE=$(declare -f show_single_node)
     local INSTALL_KERNEL_CODE=$(declare -f install_sbox_kernel)
@@ -448,7 +442,7 @@ while true; do
                 [[ -z "\$UUID" || "\$UUID" == "null" ]] && UUID=\$(cat /proc/sys/kernel/random/uuid)
                 curl -L "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-\$SBOX_ARCH" -o /usr/bin/cloudflared && chmod +x /usr/bin/cloudflared
                 jq ".inbounds += [{\"type\":\"vless\",\"tag\":\"vless-in\",\"listen\":\"127.0.0.1\",\"listen_port\":\$AP,\"users\":[{\"uuid\":\"\$UUID\"}],\"transport\":{\"type\":\"ws\",\"path\":\"/argo\"}}]" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
-                pkill -9 cloudflared || true
+                pkill -9 cloudflared >/dev/null 2>&1 || true
                 nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:\$AP --no-autoupdate > /etc/sing-box/argo.log 2>&1 &
                 wait_argo_domain && restart_svc && show_single_node "vless-in"
                 read -p "按回车继续..."
@@ -456,8 +450,10 @@ while true; do
         2) show_nodes && read -p "按回车继续..." ;;
         3)
             echo -e "\n--- 更改端口 ---"
-            echo "1. Hysteria2"
-            echo "2. Argo"
+            HAS_HY2=\$(jq -r '.inbounds[] | select(.tag=="hy2-in") | .tag' \$CONFIG_FILE 2>/dev/null)
+            HAS_ARGO=\$(jq -r '.inbounds[] | select(.tag=="vless-in") | .tag' \$CONFIG_FILE 2>/dev/null)
+            [[ -n "\$HAS_HY2" && "\$HAS_HY2" != "null" ]] && echo "1. Hysteria2"
+            [[ -n "\$HAS_ARGO" && "\$HAS_ARGO" != "null" ]] && echo "2. Argo"
             read -r -p "选择: " p_opt
             if [[ "\$p_opt" == "1" ]]; then
                 NP=\$(read_port "新端口" "\$((RANDOM % 50000 + 10000))")
@@ -466,7 +462,7 @@ while true; do
             elif [[ "\$p_opt" == "2" ]]; then
                 NP=\$(read_port "新端口" "\$((RANDOM % 50000 + 10000))")
                 jq "(.inbounds[] | select(.tag==\"vless-in\") | .listen_port) = \$NP" \$CONFIG_FILE > tmp.json && mv tmp.json \$CONFIG_FILE
-                pkill -9 cloudflared || true
+                pkill -9 cloudflared >/dev/null 2>&1 || true
                 nohup /usr/bin/cloudflared tunnel --url http://127.0.0.1:\$NP --no-autoupdate > /etc/sing-box/argo.log 2>&1 &
                 wait_argo_domain && restart_svc && show_single_node "vless-in"
             fi
@@ -480,7 +476,7 @@ while true; do
             read -r -p "确认卸载？[y/N]: " un_confirm
             if [[ "\$un_confirm" =~ ^[Yy]$ ]]; then
                 systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true
-                pkill -9 cloudflared || true
+                pkill -9 cloudflared >/dev/null 2>&1 || true
                 rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/bin/cloudflared /etc/sysctl.d/99-singbox-*.conf
                 succ "已彻底卸载。"
                 exit 0
