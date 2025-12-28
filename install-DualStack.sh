@@ -1,5 +1,3 @@
-第二个版本
-
 #!/usr/bin/env bash
 set -euo pipefail
 
