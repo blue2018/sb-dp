@@ -416,19 +416,19 @@ display_links() {
         return
     fi
 
-    echo -e "\n\033[1;32m[ 节点信息 ]\033[0m \033[1;34m|\033[0m 运行端口: \033[1;33m${RAW_PORT}\033[0m"
+    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m|\033[0m 运行端口: \033[1;33m${RAW_PORT}\033[0m"
 
     if [ -n "${RAW_IP4:-}" ]; then
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?sni=$RAW_SNI&alpn=h3&insecure=1#$(hostname)_v4"
         FULL_CLIP="$LINK_V4"
-        echo -e "\033[1;35m[ IPv4 节点链接 ]\033[0m"
+        echo -e "\033[1;35m[IPv4节点链接]\033[0m"
         echo -e "$LINK_V4\n"
     fi
 
     if [ -n "${RAW_IP6:-}" ]; then
         LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?sni=$RAW_SNI&alpn=h3&insecure=1#$(hostname)_v6"
         [ -n "$FULL_CLIP" ] && FULL_CLIP="${FULL_CLIP}\n${LINK_V6}" || FULL_CLIP="$LINK_V6"
-        echo -e "\033[1;36m[ IPv6 节点链接 ]\033[0m"
+        echo -e "\033[1;36m[IPv6节点链接]\033[0m"
         echo -e "$LINK_V6"
     fi
     
@@ -438,11 +438,13 @@ display_links() {
 
 # [模块3] 显示系统状态
 display_system_status() {
-    local VER_INFO=$(/usr/bin/sing-box version | head -n1)
+    local VER_INFO=$(/usr/bin/sing-box version | head -n1 | sed 's/version /v/')
     echo -e "系统版本: \033[1;33m$OS_DISPLAY\033[0m"
     echo -e "内核信息: \033[1;33m$VER_INFO\033[0m"
     echo -e "优化级别: \033[1;32m${SBOX_OPTIMIZE_LEVEL:-未检测}\033[0m"
-    echo -e "伪装 SNI: \033[1;33m${RAW_SNI:-未检测}\033[0m"
+    echo -e "伪装SNI: \033[1;33m${RAW_SNI:-未检测}\033[0m"
+    echo -e "IPv4地址: \033[1;35m${RAW_IP4:-无}\033[0m"
+    echo -e "IPv6地址: \033[1;36m${RAW_IP6:-无}\033[0m"
 }
 
 
