@@ -306,6 +306,8 @@ create_config() {
   "outbounds": [{ "type": "direct", "tag": "direct-out" }]
 }
 EOF
+    # 加固配置文件权限，防止 PSK 泄露
+    chmod 600 "/etc/sing-box/config.json"
 }
 
 
@@ -366,12 +368,12 @@ is_valid_port() {
 prompt_for_port() {
     local input_port
     while true; do
-        # 这里的提示信息输出到 stderr
+        # 关键：所有交互文字必须通过 >&2 定向到错误流，这样就不会被变量捕获
         read -p "请输入端口 [1025-65535] (回车随机生成): " input_port >&2
         if [[ -z "$input_port" ]]; then
             input_port=$(shuf -i 10000-60000 -n 1)
             echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $input_port" >&2
-            echo "$input_port"  # 只有这一行是真正传给变量的
+            echo "$input_port"  # 只有这行会通过标准输出被 USER_PORT 捕获
             return 0
         elif is_valid_port "$input_port"; then
             echo "$input_port"
@@ -386,12 +388,15 @@ prompt_for_port() {
 # 显示信息 (支持 IPv4/IPv6 双链接)
 # [模块1] 获取环境数据 (从配置文件抓取，不重复请求网络)
 get_env_data() {
-    local CONFIG="/etc/sing-box/config.json"
-    [ ! -f "$CONFIG" ] && return 1
-    # RAW_IP4 和 RAW_IP6 已在安装时固化在核心脚本中
-    RAW_PSK=$(jq -r '.inbounds[0].users[0].password' "$CONFIG")
-    RAW_PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG")
-    local CERT_PATH=$(jq -r '.inbounds[0].tls.certificate_path' "$CONFIG")
+    local CONFIG_FILE="/etc/sing-box/config.json"
+    [ ! -f "$CONFIG_FILE" ] && return 1
+    
+    # 统一使用 CONFIG_FILE 路径，避免全局变量干扰
+    RAW_PSK=$(jq -r '.inbounds[0].users[0].password' "$CONFIG_FILE")
+    RAW_PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG_FILE")
+    
+    local CERT_PATH=$(jq -r '.inbounds[0].tls.certificate_path' "$CONFIG_FILE")
+    # 提取 SNI
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/' || echo "unknown")
 }
 
