@@ -366,18 +366,18 @@ is_valid_port() {
 prompt_for_port() {
     local input_port
     while true; do
-        read -p "请输入端口 [1025-65535] (回车随机生成): " input_port
+        # 这里的提示信息输出到 stderr
+        read -p "请输入端口 [1025-65535] (回车随机生成): " input_port >&2
         if [[ -z "$input_port" ]]; then
-            # 生成 10000-60000 之间的随机端口
             input_port=$(shuf -i 10000-60000 -n 1)
-            echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $input_port"
-            echo "$input_port"
+            echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $input_port" >&2
+            echo "$input_port"  # 只有这一行是真正传给变量的
             return 0
         elif is_valid_port "$input_port"; then
             echo "$input_port"
             return 0
         else
-            echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入 1025-65535 之间的数字或直接回车。" >&2
+            echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入 1025-65535 之间的数字或直接回车" >&2
         fi
     done
 }
