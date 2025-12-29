@@ -373,11 +373,11 @@ is_valid_port() {
 prompt_for_port() {
     local input_port
     while true; do
-        # read 的提示词本身就是定向到 stderr 的，保持原样
+        # read 默认就是输出到 stderr，无需改动
         read -p "请输入端口 [1025-65535] (回车随机生成): " input_port
         if [[ -z "$input_port" ]]; then
             input_port=$(shuf -i 10000-60000 -n 1)
-            # 关键修复：加上 >&2，这样这行字只会显示在屏幕上，不会进入变量
+            # 必须加 >&2
             echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $input_port" >&2
             echo "$input_port"
             return 0
@@ -385,7 +385,7 @@ prompt_for_port() {
             echo "$input_port"
             return 0
         else
-            echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入 1025-65535 之间的数字或直接回车" >&2
+            echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字或直接回车" >&2
         fi
     done
 }
@@ -417,12 +417,11 @@ display_links() {
     fi
 
     echo -e "\033[1;32m[节点信息]\033[0m \033[1;34m||\033[0m 运行端口: \033[1;33m${RAW_PORT}\033[0m"
-    echo ""
 
     if [ -n "${RAW_IP4:-}" ]; then
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?sni=$RAW_SNI&alpn=h3&insecure=1#$(hostname)_v4"
         FULL_CLIP="$LINK_V4"
-        echo -e "\033[1;35m[IPv4节点链接]\033[0m"
+        echo -e "\n\033[1;35m[IPv4节点链接]\033[0m
         echo -e "$LINK_V4\n"
     fi
 
