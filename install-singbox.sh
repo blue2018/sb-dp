@@ -406,22 +406,22 @@ get_env_data() {
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/' || echo "unknown")
 }
 
-# [模块2] 仅显示核心链接 (含 IPv6 判断及警告)
+# [模块2] 仅显示核心链接
 display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP=""
     
-    # 极端情况判断
     if [ -z "${RAW_IP4:-}" ] && [ -z "${RAW_IP6:-}" ]; then
         echo -e "\n\033[1;31m警告: 未检测到任何公网 IP 地址，请检查网络！\033[0m"
         return
     fi
 
-    echo -e "\033[1;32m[节点信息]\033[0m \033[1;34m||\033[0m 运行端口: \033[1;33m${RAW_PORT}\033[0m"
+    echo -e "\n\033[1;32m[节点访问信息]\033[0m"
+    echo -e "当前端口: \033[1;33m${RAW_PORT}\033[0m"
 
     if [ -n "${RAW_IP4:-}" ]; then
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?sni=$RAW_SNI&alpn=h3&insecure=1#$(hostname)_v4"
         FULL_CLIP="$LINK_V4"
-        echo -e "\n\033[1;35m[IPv4节点链接]\033[0m
+        echo -e "\n\033[1;35m[IPv4节点链接]\033[0m"
         echo -e "$LINK_V4\n"
     fi
 
@@ -438,21 +438,14 @@ display_links() {
 
 # [模块3] 显示系统状态
 display_system_status() {
-    # 格式化版本号，去掉 version 字样，保留 v
-    local VER_INFO=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | sed 's/version /v/')
-    
-    # 兼容 Alpine 的提取方式 (使用 awk 代替 grep -P)
-    local CURRENT_CWND=$(ip route show default | awk -F 'initcwnd ' '{if($2) {split($2,a," "); print a[1]}}')
-    local CWND_TEXT="${CURRENT_CWND:-10 (内核默认)}"
-    [ "$CURRENT_CWND" = "15" ] && CWND_TEXT="15 (已优化)"
-
+    local VER_INFO=$(/usr/bin/sing-box version | head -n1)
     echo -e "系统版本: \033[1;33m$OS_DISPLAY\033[0m"
     echo -e "内核信息: \033[1;33m$VER_INFO\033[0m"
     echo -e "优化级别: \033[1;32m${SBOX_OPTIMIZE_LEVEL:-未检测}\033[0m"
-    echo -e "Initcwnd: \033[1;33m${CWND_TEXT}\033[0m"
-    echo -e "伪装SNI: \033[1;33m${RAW_SNI:-未检测}\033[0m"
-    echo -e "IPv4地址: \033[1;33m${RAW_IP4:-无}\033[0m"
-    echo -e "IPv6地址: \033[1;33m${RAW_IP6:-无}\033[0m"
+    echo -e "伪装 SNI: \033[1;33m${RAW_SNI:-未检测}\033[0m"
+    # 新增：单行显示 IP，若为空则显示“无”
+    echo -e "IPv4 地址: \033[1;35m${RAW_IP4:-无}\033[0m"
+    echo -e "IPv6 地址: \033[1;36m${RAW_IP6:-无}\033[0m"
 }
 
 
