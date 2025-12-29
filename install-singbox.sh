@@ -247,7 +247,7 @@ install_singbox() {
         if [ "$LOCAL_VER" != "未安装" ]; then
             warn "下载失败，检测到本地已有内核，跳过更新继续流程"; return 0
         fi
-        err "下载失败且本地无可用内核。"; exit 1
+        err "下载失败且本地无可用内核，无法继续"; exit 1
     fi
 }
 
