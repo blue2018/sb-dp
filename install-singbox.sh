@@ -201,15 +201,25 @@ install_singbox() {
     local LOCAL_VER="未安装"
     [ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version | head -n1 | awk '{print $3}')
 
-    info "正在连接 GitHub API 获取版本信息..."
-    # 获取版本，限时 23 秒，2次重试
-    local RELEASE_JSON=$(curl -sL --retry 1 --retry-delay 2 --max-time 23 https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null)
+    info "正在连接 GitHub API 获取版本信息 (限时 23s)..."
+    
+    # 策略 1: GitHub API (首选) - 取消重试，节省时间
+    local RELEASE_JSON=$(curl -sL --max-time 23 https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null)
     local LATEST_TAG=$(echo "$RELEASE_JSON" | jq -r .tag_name 2>/dev/null || echo "null")
+    local DOWNLOAD_SOURCE="GitHub"
 
-    # API 查询失败时的兜底
+    # 策略 2: GitHub 失败后的备用官方源探测 (通过官方静态站)
     if [ "$LATEST_TAG" = "null" ] || [ -z "$LATEST_TAG" ]; then
+        warn "GitHub API 响应超时，尝试备用官方镜像源..."
+        # 尝试从官方网页抓取最新版本号
+        LATEST_TAG=$(curl -sL --max-time 15 https://sing-box.org/ | grep -oE 'v1\.[0-9]+\.[0-9]+' | head -n1 || echo "")
+        DOWNLOAD_SOURCE="官方镜像"
+    fi
+
+    # 策略 3: 如果所有源都失败，尝试本地兜底
+    if [ -z "$LATEST_TAG" ]; then
         if [ "$LOCAL_VER" != "未安装" ]; then
-            warn "获取最新版本超时，自动降级采用本地版本 (v$LOCAL_VER) 继续。"
+            warn "所有远程查询均失败，自动采用本地版本 (v$LOCAL_VER) 继续。"
             return 0
         else
             err "获取版本失败且本地无备份，请检查网络"; exit 1
@@ -221,20 +231,31 @@ install_singbox() {
     if [[ "$MODE" == "update" ]]; then
         echo -e "---------------------------------"
         echo -e "当前已安装版本: \033[1;33m${LOCAL_VER}\033[0m"
-        echo -e "Github最新版本: \033[1;32m${REMOTE_VER}\033[0m"
+        echo -e "官方最新版本: \033[1;32m${REMOTE_VER}\033[0m (源: $DOWNLOAD_SOURCE)"
         echo -e "---------------------------------"
         if [[ "$LOCAL_VER" == "$REMOTE_VER" ]]; then
             succ "内核已是最新版本，无需更新"; return 1
         fi
         info "发现新版本，开始下载更新..."
     fi
-    
+
+    # 根据源选择下载链接 (增加冗余)
     local URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"
+    # 如果源是备用，可以使用官方直链镜像（如果有）或尝试加速地址
+    # 此处仍保留 GitHub 链接，但增加了一个备用下载地址尝试逻辑
+
     local TMP_D=$(mktemp -d)
+    info "开始下载内核 (源: $DOWNLOAD_SOURCE)..."
     
-    # 23秒限时下载，2次重试
-    info "开始下载内核..."
-    if curl -fL --retry 1 --retry-delay 2 --max-time 23 "$URL" -o "$TMP_D/sb.tar.gz"; then
+    # 下载逻辑：23秒限时，失败后尝试备用下载链接
+    if ! curl -fL --max-time 23 "$URL" -o "$TMP_D/sb.tar.gz"; then
+        warn "首选链接下载失败，尝试官方直链镜像..."
+        # 备用下载方案：例如直接从官方源或 ghproxy 等加速地址下载
+        URL="https://mirror.ghproxy.com/${URL}" # 自动使用 ghproxy 兜底
+        curl -fL --max-time 23 "$URL" -o "$TMP_D/sb.tar.gz"
+    fi
+
+    if [ -f "$TMP_D/sb.tar.gz" ]; then
         tar -xf "$TMP_D/sb.tar.gz" -C "$TMP_D"
         pgrep sing-box >/dev/null && (systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true)
         install -m 755 "$TMP_D"/sing-box-*/sing-box /usr/bin/sing-box
@@ -243,9 +264,8 @@ install_singbox() {
         return 0
     else
         rm -rf "$TMP_D"
-        # 下载失败后的最后兜底：只要本地有，就不报错退出
         if [ "$LOCAL_VER" != "未安装" ]; then
-            warn "下载失败，检测到本地已有内核，跳过更新继续流程"; return 0
+            warn "下载彻底失败，保留现有本地版本继续安装"; return 0
         fi
         err "下载失败且本地无可用内核，无法继续"; exit 1
     fi
