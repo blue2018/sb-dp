@@ -338,19 +338,30 @@ EOF
 }
 
 
-# 配置服务启动脚本 (针对 Alpine/Systemd 双加固)
+# 配置系统服务 (针对 Alpine/Systemd 双重加固与自检)
 setup_service() {
+    # 变量防空保护 (确保从 optimize_system 继承)
     : "${SBOX_GOGC:=80}"
     : "${SBOX_GOLIMIT:=52MiB}"
     : "${SBOX_MEM_MAX:=55M}"
     : "${SBOX_CPU_PRIO:=0}"
 
-    info "启动服务 (优先级: $SBOX_CPU_PRIO, 限制: $SBOX_MEM_MAX)..."
+    info "正在配置系统服务 (优先级: $SBOX_CPU_PRIO, 内存限制: $SBOX_MEM_MAX)..."
 
     if [ "$OS" = "alpine" ]; then
+        # 1. 补齐运行环境依赖
+        # libcap 用于赋予 sing-box 监听低位端口权限
+        apk add iproute2-minimal libcap >/dev/null 2>&1 || true
+        
+        # 2. 赋予程序网络管理权限 (解决 Alpine 下 UDP 监听受限问题)
+        [ -f /usr/bin/sing-box ] && setcap cap_net_admin,cap_net_bind_service=+ep /usr/bin/sing-box 2>/dev/null || true
+
+        # 3. 写入 OpenRC 服务脚本
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 description="Sing-box Optimized Service"
+
+# 导出性能环境变量
 export GOGC=$SBOX_GOGC
 export GOMEMLIMIT=$SBOX_GOLIMIT
 export GODEBUG=madvdontneed=1
@@ -360,7 +371,7 @@ command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
 
-# Alpine 守护：崩溃后自动重启
+# 进程守护：崩溃后 5 秒自动重启，最大尝试 10 次
 respawn_delay=5
 respawn_max=10
 
@@ -368,15 +379,48 @@ depend() {
     need net
     after firewall
 }
+
+# 启动前置校验
+start_pre() {
+    if [ ! -f /etc/sing-box/config.json ]; then
+        eerror "未发现配置文件: /etc/sing-box/config.json"
+        return 1
+    fi
+    # 验证 JSON 语法
+    \$command check -c /etc/sing-box/config.json >/dev/null 2>&1
+    if [ \$? -ne 0 ]; then
+        eerror "配置文件语法检测失败，请检查配置内容"
+        return 1
+    fi
+}
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1
+        
+        # 4. 启动并执行深度自检
         rc-service sing-box restart
+        
+        # 等待 2.5 秒以确认进程是否存活
+        sleep 2.5
+        if ! pgrep -x sing-box > /dev/null; then
+            warn "检测到进程启动后闪退，正在抓取错误日志..."
+            echo "------------------------------------"
+            # 运行 check 命令获取语法报错
+            /usr/bin/sing-box check -c /etc/sing-box/config.json || true
+            # 模拟前台运行抓取内核报错 (前 10 行)
+            /usr/bin/sing-box run -c /etc/sing-box/config.json 2>&1 | head -n 10
+            echo "------------------------------------"
+            error "Sing-box 启动失败！请根据上方报错信息排查。"
+        else
+            succ "Sing-box 进程已确认在后台平稳运行。"
+        fi
+
     else
+        # --- Systemd 平台 (Debian/Ubuntu/CentOS) ---
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Optimized Service
-After=network.target
+After=network.target nss-lookup.target
 
 [Service]
 Type=simple
@@ -385,19 +429,35 @@ WorkingDirectory=/etc/sing-box
 Environment=GOGC=$SBOX_GOGC
 Environment=GOMEMLIMIT=$SBOX_GOLIMIT
 Environment=GODEBUG=madvdontneed=1
+ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
 Restart=on-failure
+RestartSec=5s
 
+# 进程调度优化
 Nice=$SBOX_CPU_PRIO
 CPUSchedulingPolicy=rr
 CPUSchedulingPriority=50
+IOSchedulingClass=realtime
+IOSchedulingPriority=2
+
+# 资源硬限制
 MemoryMax=$SBOX_MEM_MAX
 LimitNOFILE=1000000
 
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload && systemctl enable sing-box --now
+        systemctl daemon-reload
+        systemctl enable sing-box --now
+        
+        # 检查 Systemd 状态
+        sleep 2
+        if ! systemctl is-active --quiet sing-box; then
+            error "服务启动失败，请执行 'journalctl -u sing-box --no-pager | tail -n 20' 查看详情。"
+        else
+            succ "Sing-box 服务已通过 Systemd 启动。"
+        fi
     fi
 }
 
