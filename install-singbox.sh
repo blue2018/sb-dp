@@ -481,7 +481,7 @@ elif [[ "${1:-}" == "--update-kernel" ]]; then
 fi
 EOF
 
-    chmod +x "$SBOX_CORE"
+    chmod 700 "$SBOX_CORE"
     local SB_PATH="/usr/local/bin/sb"
     cat > "$SB_PATH" <<'EOF'
 #!/usr/bin/env bash
