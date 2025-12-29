@@ -180,11 +180,17 @@ SYSCTL
     sysctl -p >/dev/null 2>&1 || true
 
     # 爆发优化：取黄金分割点 15 (比默认 10 强 50%，比 20 更隐蔽)
+    # 爆发优化：尝试修改，并将系统报错丢弃
     if command -v ip >/dev/null; then
         local default_route=$(ip route show default | head -n1)
         if [[ $default_route == *"via"* ]]; then
-            ip route change $default_route initcwnd 15 initrwnd 15 || true
-            succ "黄金平衡版：InitCWND 设为 15，兼顾速度与隐蔽性"
+            # 尝试执行，静默系统原始报错
+            if ip route change $default_route initcwnd 15 initrwnd 15 2>/dev/null; then
+                succ "黄金平衡版：InitCWND 设为 15，兼顾速度与隐蔽性"
+            else
+                # 提示环境不支持，但不作为错误处理
+                warn "系统环境限制，跳过 InitCWND 优化 (不影响使用)"
+            fi
         fi
     fi
 }
