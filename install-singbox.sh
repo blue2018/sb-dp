@@ -276,11 +276,16 @@ generate_cert() {
 create_config() {
     local PORT_HY2="${1:-}"
     mkdir -p /etc/sing-box
+    
     if [ -z "$PORT_HY2" ]; then
         [ -f /etc/sing-box/config.json ] && PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json) || PORT_HY2=$(shuf -i 10000-60000 -n 1)
     fi
     local PSK
     [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json) || PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
+
+    # 容错处理：若变量未定义则给默认值
+    local rx_c="${SBOX_RX_CONN:-1048576}"
+    local rx_t="${SBOX_RX_TOTAL:-4194304}"
 
     cat > "/etc/sing-box/config.json" <<EOF
 {
@@ -292,8 +297,8 @@ create_config() {
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
     "ignore_client_bandwidth": true,
-    "recv_window_conn": $SBOX_RX_CONN,
-    "recv_window": $SBOX_RX_TOTAL,
+    "recv_window_conn": $rx_c,
+    "recv_window": $rx_t,
     "tls": {
       "enabled": true,
       "alpn": ["h3"],
@@ -315,21 +320,32 @@ EOF
 
 # 配置系统服务 (应用阶梯优化变量)
 setup_service() {
-    info "配置系统服务 (内存上限: $SBOX_MEM_MAX, CPU优先级: $SBOX_CPU_PRI)..."
+    # 再次确保内存参数已计算（防止重置端口时变量丢失）
+    [ -z "${SBOX_GOLIMIT:-}" ] && optimize_system >/dev/null 2>&1
+
+    info "配置系统服务 (内存上限: $SBOX_MEM_MAX)..."
     if [ "$OS" = "alpine" ]; then
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
-name="sing-box"
+description="sing-box service"
+
+# 关键修复：移除默认依赖，防止容器环境报错
+depend() {
+    after net
+}
+
 export GOGC=$SBOX_GOGC
 export GOMEMLIMIT=$SBOX_GOLIMIT
 export GODEBUG=madvdontneed=1
+
 command="/usr/bin/sing-box"
 command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
 EOF
         chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default && rc-service sing-box restart
+        rc-update add sing-box default >/dev/null 2>&1
+        rc-service sing-box restart
     else
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
