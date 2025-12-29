@@ -198,29 +198,33 @@ SYSCTL
 # 安装/更新 Sing-box 内核
 install_singbox() {
     local MODE="${1:-install}"
+    local LOCAL_VER="未安装"
+    [ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version | head -n1 | awk '{print $3}')
+
     info "正在连接 GitHub API 获取版本信息..."
-    
-    local LATEST_TAG=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | jq -r .tag_name)
-    if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" == "null" ]; then
-        err "获取版本失败"
-        exit 1
+    # 获取版本，限时 8 秒
+    local RELEASE_JSON=$(curl -sL --max-time 8 https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null)
+    local LATEST_TAG=$(echo "$RELEASE_JSON" | jq -r .tag_name 2>/dev/null || echo "null")
+
+    # API 查询失败时的兜底
+    if [ "$LATEST_TAG" = "null" ] || [ -z "$LATEST_TAG" ]; then
+        if [ "$LOCAL_VER" != "未安装" ]; then
+            warn "获取最新版本超时，自动降级采用本地版本 (v$LOCAL_VER) 继续。"
+            return 0
+        else
+            err "获取版本失败且本地无备份，请检查网络"; exit 1
+        fi
     fi
+
     local REMOTE_VER="${LATEST_TAG#v}"
     
     if [[ "$MODE" == "update" ]]; then
-        local LOCAL_VER="未安装"
-        if [ -f /usr/bin/sing-box ]; then
-            LOCAL_VER=$(/usr/bin/sing-box version | head -n1 | awk '{print $3}')
-        fi
-
         echo -e "---------------------------------"
         echo -e "当前已安装版本: \033[1;33m${LOCAL_VER}\033[0m"
         echo -e "Github最新版本: \033[1;32m${REMOTE_VER}\033[0m"
         echo -e "---------------------------------"
-
         if [[ "$LOCAL_VER" == "$REMOTE_VER" ]]; then
-            succ "内核已是最新版本，无需更新。"
-            return 1
+            succ "内核已是最新版本，无需更新"; return 1
         fi
         info "发现新版本，开始下载更新..."
     fi
@@ -228,19 +232,22 @@ install_singbox() {
     local URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"
     local TMP_D=$(mktemp -d)
     
-    if curl -fL --retry 3 "$URL" -o "$TMP_D/sb.tar.gz"; then
+    # 核心修改点：8秒限时下载，3次重试
+    info "开始下载内核..."
+    if curl -fL --retry 3 --retry-delay 2 --max-time 8 "$URL" -o "$TMP_D/sb.tar.gz"; then
         tar -xf "$TMP_D/sb.tar.gz" -C "$TMP_D"
-        if pgrep sing-box >/dev/null; then 
-            systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true
-        fi
+        pgrep sing-box >/dev/null && (systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true)
         install -m 755 "$TMP_D"/sing-box-*/sing-box /usr/bin/sing-box
         rm -rf "$TMP_D"
-        succ "内核部署成功: $(/usr/bin/sing-box version | head -n1)"
+        succ "内核安装成功: v$(/usr/bin/sing-box version | head -n1 | awk '{print $3}')"
         return 0
     else
         rm -rf "$TMP_D"
-        err "下载失败"
-        exit 1
+        # 下载失败后的最后兜底：只要本地有，就不报错退出
+        if [ "$LOCAL_VER" != "未安装" ]; then
+            warn "下载失败，检测到本地已有内核，跳过更新继续流程"; return 0
+        fi
+        err "下载失败且本地无可用内核。"; exit 1
     fi
 }
 
