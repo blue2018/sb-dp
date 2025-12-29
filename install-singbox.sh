@@ -513,26 +513,18 @@ while true; do
         2) 
            vi /etc/sing-box/config.json && service_ctrl restart
            echo -e "\n\033[1;32m[OK]\033[0m 配置已应用并重启服务。"
-           echo -e "按回车键返回菜单..."
-           read -r
-           ;;
+           read -r -p $'\n按回车键返回菜单...' ;;
         3) 
            # 调用封装好的端口提示函数
            NEW_PORT=$(prompt_for_port)
            source "$CORE" --reset-port "$NEW_PORT"
-           echo -e "\n按回车键返回菜单..."
-           read -r
-           ;;
+           read -r -p $'\n按回车键返回菜单...' ;;
         4) 
            source "$CORE" --update-kernel
-           echo -e "\n按回车键返回菜单..."
-           read -r
-           ;;
+           read -r -p $'\n按回车键返回菜单...' ;;
         5) 
            service_ctrl restart && info "服务已重启"
-           echo -e "\n按回车键返回菜单..."
-           read -r
-           ;;
+           read -r -p $'\n按回车键返回菜单...' ;;
         6) 
            read -p "是否确定卸载？输入 y 确认，直接回车取消: " confirm
            if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
