@@ -255,7 +255,7 @@ install_singbox() {
         curl -fL --max-time 23 "$URL" -o "$TMP_D/sb.tar.gz"
     fi
 
-    if [ -f "$TMP_D/sb.tar.gz" ]; then
+    if [ -f "$TMP_D/sb.tar.gz" ] && [ $(stat -c%s "$TMP_D/sb.tar.gz") -gt 1000000 ]; then
         tar -xf "$TMP_D/sb.tar.gz" -C "$TMP_D"
         pgrep sing-box >/dev/null && (systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true)
         install -m 755 "$TMP_D"/sing-box-*/sing-box /usr/bin/sing-box
