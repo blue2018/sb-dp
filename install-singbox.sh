@@ -87,143 +87,182 @@ detect_os() {
 # 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
 # ==========================================
 optimize_system() {
-    # --- 1. 内存检测逻辑 (多路侦测) ---
+    # ==========================================================
+    # 0. RTT 感知模块（增加多路探测与容错）
+    # ==========================================================
+    local RTT_AVG
+    # 优先探测 114，失败则探测 Google DNS，最后兜底
+    RTT_AVG=$(ping -c 2 -W 1 114.114.114.114 2>/dev/null | awk -F'/' 'END{print int($5)}')
+    if [ -z "$RTT_AVG" ] || [ "$RTT_AVG" -eq 0 ]; then
+        RTT_AVG=$(ping -c 2 -W 1 8.8.8.8 2>/dev/null | awk -F'/' 'END{print int($5)}')
+    fi
+    [ -z "$RTT_AVG" ] || [ "$RTT_AVG" -eq 0 ] && RTT_AVG=50
+
+    # ==========================================================
+    # 1. 内存检测逻辑（Cgroup / Host / Proc 多路径容错）
+    # ==========================================================
     local mem_total=64
     local mem_cgroup=0
-    local mem_host_total=$(free -m | awk '/Mem:/ {print $2}')
-    
-    # 路径 A: Cgroup v1 (常用)
+    local mem_host_total
+    mem_host_total=$(free -m | awk '/Mem:/ {print $2}')
+
+    # 路径 A: Cgroup v1
     if [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
         mem_cgroup=$(($(cat /sys/fs/cgroup/memory/memory.limit_in_bytes) / 1024 / 1024))
-    # 路径 B: Cgroup v2 (部分新版容器)
+    # 路径 B: Cgroup v2
     elif [ -f /sys/fs/cgroup/memory.max ]; then
-        local m_max=$(cat /sys/fs/cgroup/memory.max)
+        local m_max
+        m_max=$(cat /sys/fs/cgroup/memory.max)
         [[ "$m_max" =~ ^[0-9]+$ ]] && mem_cgroup=$((m_max / 1024 / 1024))
     # 路径 C: /proc/meminfo
     elif grep -q "MemTotal" /proc/meminfo; then
-        local m_proc=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        local m_proc
+        m_proc=$(grep MemTotal /proc/meminfo | awk '{print $2}')
         mem_cgroup=$((m_proc / 1024))
     fi
 
-    # 逻辑判断：如果 Cgroup 探测到了且数值在合理范围，则以它为准
+    # 最终内存判定
     if [ "$mem_cgroup" -gt 0 ] && [ "$mem_cgroup" -le "$mem_host_total" ]; then
         mem_total=$mem_cgroup
     else
         mem_total=$mem_host_total
     fi
-
-    # 兜底：防止极端情况获取到 0 或异常大值
+    # 兜底异常值
     if [ "$mem_total" -le 0 ] || [ "$mem_total" -gt 64000 ]; then mem_total=64; fi
 
-    info "检测到系统可用内存: ${mem_total} MB"
+    info "系统状态: 内存=${mem_total}MB | RTT=${RTT_AVG}ms"
 
-    # --- 2. 差异化参数计算 (针对 64M/128M/256M/512M 阶梯优化) ---
-    # 定义变量：udp_mem_scale (Sysctl udp_mem vector)
+    # ==========================================================
+    # 2. 差异化档位计算（RTT 加权 + 内存安全钳位）
+    # ==========================================================
     local udp_mem_scale
+    # 定义基础页大小单位 (Page Size usually 4KB)
+    # 安全锁：确保 UDP 内存池最大值不超过物理内存的 40% (避免 OOM)
+    local max_udp_mb=$((mem_total * 40 / 100)) 
+    local max_udp_pages=$((max_udp_mb * 1024 / 4)) # 转换为页数
 
+    # 根据内存大小设定基准策略
     if [ "$mem_total" -ge 450 ]; then
-        # === 512M 档位: 爆发响应激进版 ===
         SBOX_GOLIMIT="420MiB"
-        SBOX_GOGC="120"             # 减少GC频率，牺牲内存换取CPU和延迟
-        VAR_UDP_RMEM="33554432"     # 32MB 接收缓冲 (应对大流量突发)
-        VAR_UDP_WMEM="33554432"     # 32MB 发送缓冲
-        udp_mem_scale="81920 163840 262144" # 允许内核分配大量内存给 UDP
-        SBOX_OPTIMIZE_LEVEL="512M (旗舰爆发版)"
-        VAR_SYSTEMD_NICE="-15"      # 极高优先级
-        VAR_SYSTEMD_IOSCHED="realtime" # 实时IO调度
-
+        SBOX_GOGC="120"
+        VAR_UDP_RMEM="33554432" # 32MB
+        VAR_UDP_WMEM="33554432"
+        VAR_SYSTEMD_NICE="-15"
+        VAR_SYSTEMD_IOSCHED="realtime"
+        SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
-        # === 256M 档位: 性能平衡版 ===
         SBOX_GOLIMIT="210MiB"
-        SBOX_GOGC="100"             # 标准 GC
-        VAR_UDP_RMEM="16777216"     # 16MB
+        SBOX_GOGC="100"
+        VAR_UDP_RMEM="16777216" # 16MB
         VAR_UDP_WMEM="16777216"
-        udp_mem_scale="40960 81920 163840"
-        SBOX_OPTIMIZE_LEVEL="256M (瞬时响应版)"
-        VAR_SYSTEMD_NICE="-10"      # 高优先级
+        VAR_SYSTEMD_NICE="-10"
         VAR_SYSTEMD_IOSCHED="best-effort"
-
+        SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
-        # === 128M 档位: 紧凑激进版 ===
         SBOX_GOLIMIT="100MiB"
-        SBOX_GOGC="70"              # 稍激进 GC
-        VAR_UDP_RMEM="8388608"      # 8MB
+        SBOX_GOGC="70"
+        VAR_UDP_RMEM="8388608" # 8MB
         VAR_UDP_WMEM="8388608"
-        udp_mem_scale="20480 40960 81920"
-        SBOX_OPTIMIZE_LEVEL="128M (紧凑激进版)"
-        VAR_SYSTEMD_NICE="-5"       # 略高优先级
+        VAR_SYSTEMD_NICE="-5"
         VAR_SYSTEMD_IOSCHED="best-effort"
-
+        SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
-        # === 64M 档位: 生存极限版 ===
         SBOX_GOLIMIT="52MiB"
-        SBOX_GOGC="50"              # 极其激进 GC，防止 OOM
-        VAR_UDP_RMEM="4194304"      # 4MB (300Mbps 勉强够用)
+        SBOX_GOGC="50"
+        VAR_UDP_RMEM="4194304" # 4MB
         VAR_UDP_WMEM="4194304"
-        udp_mem_scale="4096 8192 16384" # 严格限制防止系统卡死
-        SBOX_OPTIMIZE_LEVEL="64M (极限生存版)"
-        VAR_SYSTEMD_NICE="-2"       # 稍高优先级，防饿死
+        VAR_SYSTEMD_NICE="-2"
         VAR_SYSTEMD_IOSCHED="best-effort"
+        SBOX_OPTIMIZE_LEVEL="64M 生存版"
     fi
 
-    # 计算 Systemd MemoryMax (物理内存的 92%)
+    # === 核心算法：RTT 驱动的 UDP 动态池 (带安全锁) ===
+    # 逻辑：延迟越高，需要的缓冲越大（BDP原理），但不能超过物理内存限制
+    local rtt_scale_min=$((RTT_AVG * 128))
+    local rtt_scale_pressure=$((RTT_AVG * 256))
+    local rtt_scale_max=$((RTT_AVG * 512))
+
+    # 安全钳位逻辑：如果 RTT 计算出的 Max 超过了物理内存安全线，则强制降级
+    if [ "$rtt_scale_max" -gt "$max_udp_pages" ]; then
+        rtt_scale_max=$max_udp_pages
+        # 按比例缩减 Min 和 Pressure
+        rtt_scale_pressure=$((max_udp_pages / 2))
+        rtt_scale_min=$((max_udp_pages / 4))
+        SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (受限)"
+    else
+        SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (RTT自适应)"
+    fi
+
+    udp_mem_scale="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
     SBOX_MEM_MAX="$((mem_total * 92 / 100))M"
 
-    info "应用优化策略: ${SBOX_OPTIMIZE_LEVEL}"
-    info "参数微调: UDP缓冲=$((VAR_UDP_RMEM/1024/1024))MB | GoGC=${SBOX_GOGC} | Nice=${VAR_SYSTEMD_NICE}"
+    info "优化策略: $SBOX_OPTIMIZE_LEVEL"
+    info "UDP内存池: $udp_mem_scale (Page单位)"
 
-    # --- 3. Swap 状态侦测与提示 ---
-    if [ "$OS" = "alpine" ]; then
-        info "Alpine 系统跳过 Swap 处理。"
-    else
-        local swap_total=$(free -m | awk '/Swap:/ {print $2}')
-        if [ "$swap_total" -gt 10 ]; then
-            succ "检测到系统已存在 Swap (${swap_total}MB)。"
-        elif [ "$mem_total" -lt 150 ]; then
-            warn "内存极小正在创建 128MB 救急 Swap..."
-            if fallocate -l 128M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=128 2>/dev/null; then
-                chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
-                grep -q "/swapfile" /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
-                succ "Swap 创建成功。"
-            fi
+    # ==========================================================
+    # 3. Swap 兜底
+    # ==========================================================
+    if [ "$OS" != "alpine" ]; then
+        local swap_total
+        swap_total=$(free -m | awk '/Swap:/ {print $2}')
+        if [ "$swap_total" -lt 10 ] && [ "$mem_total" -lt 150 ]; then
+            warn "内存极小，正在创建 128MB Swap..."
+            fallocate -l 128M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=128 2>/dev/null
+            chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+            grep -q "/swapfile" /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
+            succ "Swap 兜底已就绪"
         fi
     fi
-    
-    # --- 4. 内核 Sysctl 深度调优 (UDP 极限 + PMTUD + BBR) ---
+
+    # ==========================================================
+    # 4. 内核网络栈写入 (智能 BBR 判断)
+    # ==========================================================
+    local tcp_cca="bbr"
     modprobe tcp_bbr >/dev/null 2>&1 || true
+
+    # 严谨的 BBRv3 检测逻辑
+    if sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q "bbr2"; then
+        tcp_cca="bbr2"
+        succ "内核支持 BBRv3 (bbr2)，已自动启用"
+    else
+        # 再次检查是否支持标准 bbr
+        if sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q "bbr"; then
+            tcp_cca="bbr"
+            info "内核使用标准 BBR"
+        else
+            tcp_cca="cubic"
+            warn "内核不支持 BBR，回退至 Cubic"
+        fi
+    fi
+
     cat > /etc/sysctl.conf <<SYSCTL
-# --- 拥塞控制与队列优化 ---
+# === 拥塞控制 ===
 net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
-# 禁止空闲慢启动，配合 FQ 调度实现平滑爆发
+net.ipv4.tcp_congestion_control = $tcp_cca
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_fastopen = 3
 
-# --- 核心网络队列 (防卡顿关键) ---
-# 增加网卡设备积压队列，防止 HY2 瞬间发包过快导致系统丢包
+# === 缓冲区与队列 ===
 net.core.netdev_max_backlog = 65536
 net.core.somaxconn = 32768
 net.ipv4.tcp_max_syn_backlog = 32768
 
-# --- UDP 极限优化 (变量注入) ---
-# 突破默认的 buffer 限制，为 QUIC 提供“无限”队列的基础
+# === UDP 极限优化 (RTT + 内存安全锁) ===
 net.core.rmem_max = $VAR_UDP_RMEM
 net.core.wmem_max = $VAR_UDP_WMEM
 net.core.rmem_default = 1048576
 net.core.wmem_default = 1048576
-# 动态内存池调整
 net.ipv4.udp_mem = $udp_mem_scale
-# 提升 UDP 最小缓冲水位
 net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
 
-# --- MTU 自动学习 (PMTUD) ---
-# 解决 CN 运营商分片丢包问题
+# === 路由与分片 ===
 net.ipv4.ip_no_pmtu_disc = 0
 net.ipv4.ip_forward = 1
 vm.swappiness = 10
 SYSCTL
+
     sysctl -p >/dev/null 2>&1 || true
 
     # --- 5. InitCWND 黄金平衡版 (保留) ---
