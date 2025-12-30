@@ -150,33 +150,40 @@ optimize_system() {
     set -e
 
     # 结果处理：如果 Ping 成功则显示实测值，失败则启动智能补偿
-    if [ -n "$RTT_AVG" ] && [ "$RTT_AVG" -gt 0 ]; then
+    if [ -n "${RTT_AVG:-}" ] && [ "$RTT_AVG" -gt 0 ]; then
         info "实时网络探测完成，当前平均 RTT: ${RTT_AVG}ms"
     else
         # 智能地理位置补偿 (当 Ping 不通时触发)
-        info "Ping 探测受阻，正在通过 IP-API 预估 RTT..."
-        # 尝试在线查询国家名称
-        local LOC=$(curl -s --max-time 3 "http://ip-api.com/line/${RAW_IP4}?fields=country" || echo "Unknown")
-        # 根据国家名精准匹配 RTT
-        case "$LOC" in
-            "China"|"Hong Kong"|"Japan"|"Korea"|"Singapore"|"Taiwan")
-                RTT_AVG=50
-                info "判定为亚洲节点，预估 RTT: 50ms"
-                ;;
-            "Germany"|"France"|"United Kingdom"|"Netherlands"|"Spain"|"Poland"|"Italy")
-                RTT_AVG=180
-                info "判定为欧洲节点，预估 RTT: 180ms"
-                ;;
-            "United States"|"Canada"|"Mexico")
-                RTT_AVG=220
-                info "判定为北美节点，预估 RTT: 220ms"
-                ;;
-            *)
-                # 最终兜底：API 失败或位置无法匹配，统一采用 150ms
-                RTT_AVG=150
-                warn "API 查询失败或位置未知，应用全球平均预估值: 150ms"
-                ;;
-        esac
+        if [ -z "${RAW_IP4:-}" ]; then
+            # 如果没有获取到 IPv4，直接进入全球兜底
+            RTT_AVG=150
+            warn "未检测到公网 IPv4，无法查询位置，应用全球平均预估值: 150ms"
+        else
+            info "Ping 探测受阻，正在通过 IP-API 预估 RTT..."
+            # 尝试在线查询国家名称
+            local LOC=$(curl -s --max-time 3 "http://ip-api.com/line/${RAW_IP4}?fields=country" || echo "Unknown")
+            
+            # 根据国家名精准匹配 RTT
+            case "$LOC" in
+                "China"|"Hong Kong"|"Japan"|"Korea"|"Singapore"|"Taiwan")
+                    RTT_AVG=50
+                    info "判定为亚洲节点 ($LOC)，预估 RTT: 50ms"
+                    ;;
+                "Germany"|"France"|"United Kingdom"|"Netherlands"|"Spain"|"Poland"|"Italy")
+                    RTT_AVG=180
+                    info "判定为欧洲节点 ($LOC)，预估 RTT: 180ms"
+                    ;;
+                "United States"|"Canada"|"Mexico")
+                    RTT_AVG=220
+                    info "判定为北美节点 ($LOC)，预估 RTT: 220ms"
+                    ;;
+                *)
+                    # 最终兜底：API 失败或位置无法匹配，统一采用 150ms
+                    RTT_AVG=150
+                    warn "API 查询失败或位置未知 ($LOC)，应用全球平均预估值: 150ms"
+                    ;;
+            esac
+        fi
     fi
 
     # 1. 内存检测逻辑（Cgroup / Host / Proc 多路径容错）
