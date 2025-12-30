@@ -707,7 +707,9 @@ while true; do
     fi
     
     case "$opt" in
-        1) source "$CORE" --show-only ;;
+        1) 
+           source "$CORE" --show-only
+           read -r -p $'\n按回车键返回菜单...' ;;
         2) 
            vi /etc/sing-box/config.json && service_ctrl restart
            echo -e "\n\033[1;32m[OK]\033[0m 配置已应用并重启服务。"
