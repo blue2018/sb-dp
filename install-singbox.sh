@@ -1,15 +1,4 @@
-#!/bin/sh
-# --- 第一阶段：Alpine 基础环境补课 ---
-if [ -f /etc/alpine-release ]; then
-    echo "检测到 Alpine，正在初始化基础环境..."
-    apk add --no-cache bash curl jq openssl coreutils iproute2 iputils util-linux >/dev/null 2>&1
-fi
-
-# --- 第二阶段：强制转入 Bash 运行 ---
-if [ -z "$BASH_VERSION" ]; then
-    exec bash "$0" "$@"
-fi
-
+#!/usr/bin/env bash
 set -euo pipefail
 
 # ==========================================
@@ -98,193 +87,156 @@ detect_os() {
 # 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
 # ==========================================
 optimize_system() {
-    # 0. RTT 感知模块（为 UDP 池深度自适应提供实时链路参考）
-    # 选用 114.114.114.114 作为稳定 RTT 参考锚点（电信/联通/移动均可达）
-    local RTT_AVG
-    # 适配 Alpine/Busybox 的 ping 路径，增加超时保护
-    RTT_AVG=$(ping -c 3 -W 2 114.114.114.114 2>/dev/null | awk -F'/' 'END{print int($5)}')
-    # 兜底 RTT = 50ms，防止获取失败或数值过小导致计算异常
-    if [ -z "$RTT_AVG" ] || [ "$RTT_AVG" -lt 1 ]; then RTT_AVG=50; fi
-
-    # 1. 内存检测逻辑（Cgroup / Host / Proc 多路径容错）
+    # --- 1. 内存检测逻辑 (多路侦测) ---
     local mem_total=64
     local mem_cgroup=0
-    local mem_host_total
-    # 使用 coreutils 的 free 命令或 awk 处理，增强跨平台兼容
-    mem_host_total=$(free -m | awk '/Mem:/ {print $2}')
-
-    # 路径 A: Cgroup v1
+    local mem_host_total=$(free -m | awk '/Mem:/ {print $2}')
+    
+    # 路径 A: Cgroup v1 (常用)
     if [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-        mem_cgroup=$(($(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0) / 1024 / 1024))
-    # 路径 B: Cgroup v2
+        mem_cgroup=$(($(cat /sys/fs/cgroup/memory/memory.limit_in_bytes) / 1024 / 1024))
+    # 路径 B: Cgroup v2 (部分新版容器)
     elif [ -f /sys/fs/cgroup/memory.max ]; then
-        local m_max
-        m_max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)
+        local m_max=$(cat /sys/fs/cgroup/memory.max)
         [[ "$m_max" =~ ^[0-9]+$ ]] && mem_cgroup=$((m_max / 1024 / 1024))
     # 路径 C: /proc/meminfo
     elif grep -q "MemTotal" /proc/meminfo; then
-        local m_proc
-        m_proc=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        local m_proc=$(grep MemTotal /proc/meminfo | awk '{print $2}')
         mem_cgroup=$((m_proc / 1024))
     fi
 
-    # 最终内存判定
+    # 逻辑判断：如果 Cgroup 探测到了且数值在合理范围，则以它为准
     if [ "$mem_cgroup" -gt 0 ] && [ "$mem_cgroup" -le "$mem_host_total" ]; then
         mem_total=$mem_cgroup
     else
         mem_total=$mem_host_total
     fi
-    # 兜底异常值
+
+    # 兜底：防止极端情况获取到 0 或异常大值
     if [ "$mem_total" -le 0 ] || [ "$mem_total" -gt 64000 ]; then mem_total=64; fi
 
-    info "检测到系统可用内存: ${mem_total} MB | RTT=${RTT_AVG}ms"
+    info "检测到系统可用内存: ${mem_total} MB"
 
-    # 2. 差异化档位计算（RTT 自适应 UDP 池 + TSO 极限栈）
+    # --- 2. 差异化参数计算 (针对 64M/128M/256M/512M 阶梯优化) ---
+    # 定义变量：udp_mem_scale (Sysctl udp_mem vector)
     local udp_mem_scale
-    # RTT 基础基准，用于动态扩展 UDP 缓存池
-    local udp_base=$((RTT_AVG * mem_total / 128))
-
-    # 检测 CPU 核心数，针对单核进行调度优化预警
-    local cpu_cores
-    cpu_cores=$(nproc 2>/dev/null || echo 1)
 
     if [ "$mem_total" -ge 450 ]; then
-        # === 512M 档位：旗舰宽带爆发层 ===
+        # === 512M 档位: 爆发响应激进版 ===
         SBOX_GOLIMIT="420MiB"
-        SBOX_GOGC="120"
-        VAR_UDP_RMEM="33554432"
-        VAR_UDP_WMEM="33554432"
-        VAR_SYSTEMD_NICE="-15"
-        VAR_SYSTEMD_IOSCHED="realtime"
-        SBOX_OPTIMIZE_LEVEL="512M RTT自适应宽带旗舰版"
+        SBOX_GOGC="120"             # 减少GC频率，牺牲内存换取CPU和延迟
+        VAR_UDP_RMEM="33554432"     # 32MB 接收缓冲 (应对大流量突发)
+        VAR_UDP_WMEM="33554432"     # 32MB 发送缓冲
+        udp_mem_scale="81920 163840 262144" # 允许内核分配大量内存给 UDP
+        SBOX_OPTIMIZE_LEVEL="512M (旗舰爆发版)"
+        VAR_SYSTEMD_NICE="-15"      # 极高优先级
+        VAR_SYSTEMD_IOSCHED="realtime" # 实时IO调度
 
     elif [ "$mem_total" -ge 200 ]; then
-        # === 256M 档位：宽带平衡爆发层 ===
+        # === 256M 档位: 性能平衡版 ===
         SBOX_GOLIMIT="210MiB"
-        SBOX_GOGC="100"
-        VAR_UDP_RMEM="16777216"
+        SBOX_GOGC="100"             # 标准 GC
+        VAR_UDP_RMEM="16777216"     # 16MB
         VAR_UDP_WMEM="16777216"
-        VAR_SYSTEMD_NICE="-10"
+        udp_mem_scale="40960 81920 163840"
+        SBOX_OPTIMIZE_LEVEL="256M (瞬时响应版)"
+        VAR_SYSTEMD_NICE="-10"      # 高优先级
         VAR_SYSTEMD_IOSCHED="best-effort"
-        SBOX_OPTIMIZE_LEVEL="256M RTT自适应宽带增强版"
 
     elif [ "$mem_total" -ge 100 ]; then
-        # === 128M 档位：紧凑宽带激进层 ===
+        # === 128M 档位: 紧凑激进版 ===
         SBOX_GOLIMIT="100MiB"
-        SBOX_GOGC="70"
-        VAR_UDP_RMEM="8388608"
+        SBOX_GOGC="70"              # 稍激进 GC
+        VAR_UDP_RMEM="8388608"      # 8MB
         VAR_UDP_WMEM="8388608"
-        VAR_SYSTEMD_NICE="-5"
+        udp_mem_scale="20480 40960 81920"
+        SBOX_OPTIMIZE_LEVEL="128M (紧凑激进版)"
+        VAR_SYSTEMD_NICE="-5"       # 略高优先级
         VAR_SYSTEMD_IOSCHED="best-effort"
-        SBOX_OPTIMIZE_LEVEL="128M RTT自适应宽带紧凑版"
 
     else
-        # === 64M 档位：极限生存宽带层 ===
+        # === 64M 档位: 生存极限版 ===
         SBOX_GOLIMIT="52MiB"
-        # 单核小内存增加 GC 频率，防止瞬间堆积导致 OOM
-        [ "$cpu_cores" -eq 1 ] && SBOX_GOGC="40" || SBOX_GOGC="50"
-        VAR_UDP_RMEM="4194304"
+        SBOX_GOGC="50"              # 极其激进 GC，防止 OOM
+        VAR_UDP_RMEM="4194304"      # 4MB (300Mbps 勉强够用)
         VAR_UDP_WMEM="4194304"
-        VAR_SYSTEMD_NICE="-2"
+        udp_mem_scale="4096 8192 16384" # 严格限制防止系统卡死
+        SBOX_OPTIMIZE_LEVEL="64M (极限生存版)"
+        VAR_SYSTEMD_NICE="-2"       # 稍高优先级，防饿死
         VAR_SYSTEMD_IOSCHED="best-effort"
-        SBOX_OPTIMIZE_LEVEL="64M RTT自适应宽带生存版"
     fi
 
-    # RTT → UDP 动态池深度映射（单位：Page, 1 Page = 4KB）
-    # 增加内存安全锁：UDP 最大占用不得超过总内存的 25% (差异化：小内存更严苛)
-    local safety_factor=4
-    [ "$mem_total" -lt 100 ] && safety_factor=5
-    local max_udp_pages=$((mem_total * 1024 / 4 / safety_factor))
-    
-    local u1=$((udp_base * 4)); if [ "$u1" -gt "$max_udp_pages" ]; then u1=$max_udp_pages; fi
-    local u2=$((u1 * 2)); if [ "$u2" -gt "$max_udp_pages" ]; then u2=$max_udp_pages; fi
-    local u3=$((u1 * 4)); if [ "$u3" -gt "$max_udp_pages" ]; then u3=$max_udp_pages; fi
-    udp_mem_scale="$u1 $u2 $u3"
-
-    # Systemd 物理内存限制（防止 OOM）
+    # 计算 Systemd MemoryMax (物理内存的 92%)
     SBOX_MEM_MAX="$((mem_total * 92 / 100))M"
 
-    info "应用优化策略: $SBOX_OPTIMIZE_LEVEL (CPU核数: $cpu_cores)"
-    info "RTT自适应 UDP 池: $udp_mem_scale (安全水位: $((100/safety_factor))%)"
+    info "应用优化策略: ${SBOX_OPTIMIZE_LEVEL}"
+    info "参数微调: UDP缓冲=$((VAR_UDP_RMEM/1024/1024))MB | GoGC=${SBOX_GOGC} | Nice=${VAR_SYSTEMD_NICE}"
 
-    # 3. Swap 兜底（小内存稳定性）
-    if [ "$OS" != "alpine" ]; then
-        local swap_total
-        swap_total=$(free -m | awk '/Swap:/ {print $2}')
-        if [ "$swap_total" -lt 10 ] && [ "$mem_total" -lt 150 ]; then
-            warn "内存极小，正在创建 128MB Swap 兜底..."
-            fallocate -l 128M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=128 2>/dev/null
-            chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
-            grep -q "/swapfile" /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
-            succ "Swap 兜底已就绪"
+    # --- 3. Swap 状态侦测与提示 ---
+    if [ "$OS" = "alpine" ]; then
+        info "Alpine 系统跳过 Swap 处理。"
+    else
+        local swap_total=$(free -m | awk '/Swap:/ {print $2}')
+        if [ "$swap_total" -gt 10 ]; then
+            succ "检测到系统已存在 Swap (${swap_total}MB)。"
+        elif [ "$mem_total" -lt 150 ]; then
+            warn "内存极小正在创建 128MB 救急 Swap..."
+            if fallocate -l 128M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=128 2>/dev/null; then
+                chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+                grep -q "/swapfile" /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
+                succ "Swap 创建成功。"
+            fi
         fi
     fi
-
-    # 4. 内核网络栈写入（BBRv3 + QUIC pacing + UDP 极限池）
-    # BBR 探测与自动降级逻辑
-    local bbr_version="bbr"
-    if modprobe tcp_bbr >/dev/null 2>&1; then
-        if sysctl net.ipv4.tcp_available_congestion_control | grep -q "bbr2"; then
-            bbr_version="bbr2"
-            succ "内核支持并已预备启用 BBRv3 (bbr2)"
-        else
-            warn "当前内核不支持 BBRv3，继续使用默认 BBR"
-        fi
-    fi
-
+    
+    # --- 4. 内核 Sysctl 深度调优 (UDP 极限 + PMTUD + BBR) ---
+    modprobe tcp_bbr >/dev/null 2>&1 || true
     cat > /etc/sysctl.conf <<SYSCTL
-# === FQ + BBR 基础调度层 ===
+# --- 拥塞控制与队列优化 ---
 net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = $bbr_version
+net.ipv4.tcp_congestion_control = bbr
+# 禁止空闲慢启动，配合 FQ 调度实现平滑爆发
 net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_notsent_lowat = 16384
 net.ipv4.tcp_fastopen = 3
 
-# === QUIC pacing 平滑缓冲层 ===
-# 优化 UDP 发包节奏，防止突发流量冲垮窄带宽 RTT
-net.ipv4.tcp_limit_output_bytes = 262144
-
-# === 网络队列防丢包层 (TSO/GSO 核心) ===
-# 极大化网卡积压队列，减少 CPU 中断处理频率
+# --- 核心网络队列 (防卡顿关键) ---
+# 增加网卡设备积压队列，防止 HY2 瞬间发包过快导致系统丢包
 net.core.netdev_max_backlog = 65536
 net.core.somaxconn = 32768
 net.ipv4.tcp_max_syn_backlog = 32768
 
-# === UDP 极限池 (RTT 自适应) ===
-# 突破默认限制，为 HY2 提供大吞吐基础
+# --- UDP 极限优化 (变量注入) ---
+# 突破默认的 buffer 限制，为 QUIC 提供“无限”队列的基础
 net.core.rmem_max = $VAR_UDP_RMEM
 net.core.wmem_max = $VAR_UDP_WMEM
 net.core.rmem_default = 1048576
 net.core.wmem_default = 1048576
+# 动态内存池调整
 net.ipv4.udp_mem = $udp_mem_scale
+# 提升 UDP 最小缓冲水位
 net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
 
-# === PMTUD / 路由层 ===
-# 解决 CN 运营商常见的 UDP 路径分片丢包问题
+# --- MTU 自动学习 (PMTUD) ---
+# 解决 CN 运营商分片丢包问题
 net.ipv4.ip_no_pmtu_disc = 0
 net.ipv4.ip_forward = 1
 vm.swappiness = 10
 SYSCTL
+    sysctl -p >/dev/null 2>&1 || true
 
-    # 兼容 Alpine 的 sysctl 调用
-    sysctl -p /etc/sysctl.conf >/dev/null 2>&1 || true
-
-    # 5. InitCWND 黄金平衡注入（无论成功与否都提示）
+    # --- 5. InitCWND 黄金平衡版 (保留) ---
+    # 取黄金分割点 15 (比默认 10 强 50%，比 20 更隐蔽)
     if command -v ip >/dev/null; then
-        local default_route
-        default_route=$(ip route show default | head -n1)
-        if [[ "$default_route" == *"via"* ]]; then
-            # 增加对已存在参数的判断，避免重复注入导致报错
+        local default_route=$(ip route show default | head -n1)
+        if [[ $default_route == *"via"* ]]; then
             if ip route change $default_route initcwnd 15 initrwnd 15 2>/dev/null; then
-                succ "InitCWND 已成功设为 15（兼顾爆发与隐蔽）"
+                succ "黄金平衡版：InitCWND 设为 15，兼顾速度与隐蔽性"
             else
-                warn "系统限制（如OpenVZ/LXC），InitCWND 无法修改"
+                warn "系统环境限制，跳过 InitCWND 优化 (不影响使用)"
             fi
-        else
-            warn "未检测到默认路由，跳过 InitCWND 注入"
         fi
-    else
-        warn "iproute2 不存在，无法设置 InitCWND"
     fi
 }
 
@@ -498,10 +450,6 @@ WorkingDirectory=/etc/sing-box
 Environment=GOGC=${SBOX_GOGC:-80}
 Environment=GOMEMLIMIT=$SBOX_GOLIMIT
 Environment=GODEBUG=madvdontneed=1
-# --- 开启 HY2 QUIC TSO/GSO 硬件加速 ---
-Environment=QUIC_GO_DISABLE_GSO=0
-# --- 针对多核 CPU 的调度优化 ---
-Environment=GOMAXPROCS=$(nproc)
 
 # --- 进程调度优化 (防卡顿核心) ---
 # 负数 Nice 值赋予高优先级 CPU 抢占权
