@@ -1,15 +1,15 @@
 #!/bin/sh
-prepare_base() {
-    if [ -f /etc/alpine-release ]; then
-        echo "检测到 Alpine，正在初始化基础环境..."
-        apk add --no-cache bash curl jq openssl coreutils iproute2 iputils util-linux
-    fi
-}
-prepare_base
+# --- 第一阶段：Alpine 基础环境补课 ---
+if [ -f /etc/alpine-release ]; then
+    echo "检测到 Alpine，正在初始化基础环境..."
+    apk add --no-cache bash curl jq openssl coreutils iproute2 iputils util-linux >/dev/null 2>&1
+fi
 
+# --- 第二阶段：强制转入 Bash 运行 ---
 if [ -z "$BASH_VERSION" ]; then
     exec bash "$0" "$@"
 fi
+
 set -euo pipefail
 
 # ==========================================
@@ -101,7 +101,8 @@ optimize_system() {
     # 0. RTT 感知模块（为 UDP 池深度自适应提供实时链路参考）
     # 选用 114.114.114.114 作为稳定 RTT 参考锚点（电信/联通/移动均可达）
     local RTT_AVG
-    RTT_AVG=$(ping -c 3 114.114.114.114 2>/dev/null | awk -F'/' 'END{print int($5)}')
+    # 适配 Alpine/Busybox 的 ping 路径，增加超时保护
+    RTT_AVG=$(ping -c 3 -W 2 114.114.114.114 2>/dev/null | awk -F'/' 'END{print int($5)}')
     # 兜底 RTT = 50ms，防止获取失败或数值过小导致计算异常
     if [ -z "$RTT_AVG" ] || [ "$RTT_AVG" -lt 1 ]; then RTT_AVG=50; fi
 
@@ -109,15 +110,16 @@ optimize_system() {
     local mem_total=64
     local mem_cgroup=0
     local mem_host_total
+    # 使用 coreutils 的 free 命令或 awk 处理，增强跨平台兼容
     mem_host_total=$(free -m | awk '/Mem:/ {print $2}')
 
     # 路径 A: Cgroup v1
     if [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-        mem_cgroup=$(($(cat /sys/fs/cgroup/memory/memory.limit_in_bytes) / 1024 / 1024))
+        mem_cgroup=$(($(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0) / 1024 / 1024))
     # 路径 B: Cgroup v2
     elif [ -f /sys/fs/cgroup/memory.max ]; then
         local m_max
-        m_max=$(cat /sys/fs/cgroup/memory.max)
+        m_max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null)
         [[ "$m_max" =~ ^[0-9]+$ ]] && mem_cgroup=$((m_max / 1024 / 1024))
     # 路径 C: /proc/meminfo
     elif grep -q "MemTotal" /proc/meminfo; then
@@ -141,6 +143,10 @@ optimize_system() {
     local udp_mem_scale
     # RTT 基础基准，用于动态扩展 UDP 缓存池
     local udp_base=$((RTT_AVG * mem_total / 128))
+
+    # 检测 CPU 核心数，针对单核进行调度优化预警
+    local cpu_cores
+    cpu_cores=$(nproc 2>/dev/null || echo 1)
 
     if [ "$mem_total" -ge 450 ]; then
         # === 512M 档位：旗舰宽带爆发层 ===
@@ -175,7 +181,8 @@ optimize_system() {
     else
         # === 64M 档位：极限生存宽带层 ===
         SBOX_GOLIMIT="52MiB"
-        SBOX_GOGC="50"
+        # 单核小内存增加 GC 频率，防止瞬间堆积导致 OOM
+        [ "$cpu_cores" -eq 1 ] && SBOX_GOGC="40" || SBOX_GOGC="50"
         VAR_UDP_RMEM="4194304"
         VAR_UDP_WMEM="4194304"
         VAR_SYSTEMD_NICE="-2"
@@ -184,8 +191,11 @@ optimize_system() {
     fi
 
     # RTT → UDP 动态池深度映射（单位：Page, 1 Page = 4KB）
-    # 增加内存安全锁：UDP 最大占用不得超过总内存的 25%
-    local max_udp_pages=$((mem_total * 1024 / 4 / 4))
+    # 增加内存安全锁：UDP 最大占用不得超过总内存的 25% (差异化：小内存更严苛)
+    local safety_factor=4
+    [ "$mem_total" -lt 100 ] && safety_factor=5
+    local max_udp_pages=$((mem_total * 1024 / 4 / safety_factor))
+    
     local u1=$((udp_base * 4)); if [ "$u1" -gt "$max_udp_pages" ]; then u1=$max_udp_pages; fi
     local u2=$((u1 * 2)); if [ "$u2" -gt "$max_udp_pages" ]; then u2=$max_udp_pages; fi
     local u3=$((u1 * 4)); if [ "$u3" -gt "$max_udp_pages" ]; then u3=$max_udp_pages; fi
@@ -194,8 +204,8 @@ optimize_system() {
     # Systemd 物理内存限制（防止 OOM）
     SBOX_MEM_MAX="$((mem_total * 92 / 100))M"
 
-    info "应用优化策略: $SBOX_OPTIMIZE_LEVEL"
-    info "RTT自适应 UDP 池: $udp_mem_scale (安全水位内)"
+    info "应用优化策略: $SBOX_OPTIMIZE_LEVEL (CPU核数: $cpu_cores)"
+    info "RTT自适应 UDP 池: $udp_mem_scale (安全水位: $((100/safety_factor))%)"
 
     # 3. Swap 兜底（小内存稳定性）
     if [ "$OS" != "alpine" ]; then
@@ -256,13 +266,15 @@ net.ipv4.ip_forward = 1
 vm.swappiness = 10
 SYSCTL
 
-    sysctl -p >/dev/null 2>&1 || true
+    # 兼容 Alpine 的 sysctl 调用
+    sysctl -p /etc/sysctl.conf >/dev/null 2>&1 || true
 
     # 5. InitCWND 黄金平衡注入（无论成功与否都提示）
     if command -v ip >/dev/null; then
         local default_route
         default_route=$(ip route show default | head -n1)
         if [[ "$default_route" == *"via"* ]]; then
+            # 增加对已存在参数的判断，避免重复注入导致报错
             if ip route change $default_route initcwnd 15 initrwnd 15 2>/dev/null; then
                 succ "InitCWND 已成功设为 15（兼顾爆发与隐蔽）"
             else
