@@ -136,7 +136,7 @@ get_network_info() {
 # 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
 # ==========================================
 optimize_system() {
-    # 0. RTT 感知模块 (全能适配版) ---
+    #0. RTT 感知模块 (全能适配版)
     local RTT_AVG
     # 临时关闭“错误即退出”，防止因禁 Ping 杀掉脚本
     set +e 
@@ -149,8 +149,11 @@ optimize_system() {
     # 恢复“错误即退出”
     set -e
 
-    # 智能地理位置补偿 (当 Ping 不通时触发)
-    if [ -z "$RTT_AVG" ] || [ "$RTT_AVG" -eq 0 ]; then
+    # 结果处理：如果 Ping 成功则显示实测值，失败则启动智能补偿
+    if [ -n "$RTT_AVG" ] && [ "$RTT_AVG" -gt 0 ]; then
+        info "实时网络探测完成，当前平均 RTT: ${RTT_AVG}ms"
+    else
+        # 智能地理位置补偿 (当 Ping 不通时触发)
         info "Ping 探测受阻，正在通过 IP-API 预估 RTT..."
         # 尝试在线查询国家名称
         local LOC=$(curl -s --max-time 3 "http://ip-api.com/line/${RAW_IP4}?fields=country" || echo "Unknown")
