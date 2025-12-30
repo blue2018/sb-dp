@@ -124,15 +124,12 @@ install_dependencies() {
 #获取公网IP
 get_network_info() {
     info "正在获取网络地址..."
-    
-    # 获取 IP 并直接存入变量
-    RAW_IP4=$(curl -s4 --max-time 5 https://api.ipify.org || curl -s4 --max-time 5 https://ifconfig.me)
-    RAW_IP6=$(curl -s6 --max-time 5 https://api6.ipify.org || curl -s6 --max-time 5 https://ifconfig.co)
-
+    # 关键：使用 || true 确保即便 curl 失败(如无IPv6) 脚本也不会崩溃
+    RAW_IP4=$(curl -s4 --max-time 5 https://api.ipify.org || curl -s4 --max-time 5 https://ifconfig.me || echo "")
+    RAW_IP6=$(curl -s6 --max-time 5 https://api6.ipify.org || curl -s6 --max-time 5 https://ifconfig.co || echo "")
     echo "-----------------------------------------------"
-    # 使用 ${变量:-缺省值} 语法，进一步压缩代码
-    echo -e "  IPv4 地址: \033[32m${RAW_IP4:-未检测到}\033[0m"
-    echo -e "  IPv6 地址: \033[32m${RAW_IP6:-未检测到}\033[0m"
+    [ -n "$RAW_IP4" ] && echo -e "  IPv4 地址: \033[32m$RAW_IP4\033[0m" || echo -e "  IPv4 地址: \033[33m未检测到\033[0m"
+    [ -n "$RAW_IP6" ] && echo -e "  IPv6 地址: \033[32m$RAW_IP6\033[0m" || echo -e "  IPv6 地址: \033[33m未检测到\033[0m"
     echo "-----------------------------------------------"
 }
 
