@@ -628,9 +628,9 @@ while true; do
                 service_ctrl stop
                 rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/local/bin/SB \
                        /etc/systemd/system/sing-box.service /etc/init.d/sing-box "$CORE"
-                info "\033[32m卸载完成！\033[0m" && exit 0
+                succ "卸载完成！" && exit 0
             else
-                info "\033[33m操作已取消\033[0m"
+                warn "操作已取消"
                 sleep 1
             fi ;;
         0) exit 0 ;;
