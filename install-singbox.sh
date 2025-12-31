@@ -552,7 +552,8 @@ create_config() {
       "enabled": true,
       "alpn": ["h3"],
       "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-      "key_path": "/etc/sing-box/certs/privkey.pem"
+      "key_path": "/etc/sing-box/certs/privkey.pem",
+      "session_ticket": true
     }
   }],
   "outbounds": [{ "type": "direct", "tag": "direct-out" }]
