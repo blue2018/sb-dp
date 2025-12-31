@@ -430,58 +430,58 @@ prompt_for_port() {
 }
 
 generate_cert() {
-    info "生成 ECC P-256 高性能证书 (伪装: $TLS_DOMAIN)..."
     mkdir -p /etc/sing-box/certs
-    if [ ! -f /etc/sing-box/certs/fullchain.pem ]; then
-        openssl ecparam -genkey -name prime256v1 -out /etc/sing-box/certs/privkey.pem
-        openssl req -new -x509 -days 3650 -key /etc/sing-box/certs/privkey.pem -out /etc/sing-box/certs/fullchain.pem -subj "/CN=$TLS_DOMAIN"
+    # 如果证书已存在，直接退出，不重新生成，这样 SNI 就固定了
+    if [ -f /etc/sing-box/certs/fullchain.pem ]; then
+        info "检测到已有证书，跳过生成以保持 SNI 一致。"
+        return 0
     fi
+    info "生成 ECC P-256 高性能证书 (伪装: $TLS_DOMAIN)..."
+    openssl ecparam -genkey -name prime256v1 -out /etc/sing-box/certs/privkey.pem
+    openssl req -new -x509 -days 3650 -key /etc/sing-box/certs/privkey.pem -out /etc/sing-box/certs/fullchain.pem -subj "/CN=$TLS_DOMAIN"
 }
 
 # ==========================================
 # 配置文件生成
 # ==========================================
 create_config() {
-    local PORT_HY2="${1:-}"
-    mkdir -p /etc/sing-box
-    
-    # 强制预检：如果传入端口为空或非数字，尝试从旧配置读，读不到就随机
-    if [[ -z "$PORT_HY2" ]] || [[ ! "$PORT_HY2" =~ ^[0-9]+$ ]]; then
-        PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
-        [[ ! "$PORT_HY2" =~ ^[0-9]+$ ]] && PORT_HY2=$(shuf -i 10000-60000 -n 1)
-    fi
+    local PORT_HY2="${1:-}"
+    mkdir -p /etc/sing-box
+    if [ -z "$PORT_HY2" ]; then
+        [ -f /etc/sing-box/config.json ] && PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json) || PORT_HY2=$(shuf -i 10000-60000 -n 1)
+    fi
 
-    local PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json 2>/dev/null || echo "")
-    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
+    local PSK
+    if [ -f /etc/sing-box/config.json ]; then
+        PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
+    else
+        PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
+    fi
 
-    # 【核心修复】直接同步给全局变量，防止 get_env_data 读文件失败
-    RAW_PORT="$PORT_HY2"
-    RAW_PSK="$PSK"
-
-    cat > "/etc/sing-box/config.json" <<EOF
+    cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "warn", "timestamp": true },
-  "inbounds": [{
-    "type": "hysteria2",
-    "tag": "hy2-in",
-    "listen": "::",
-    "listen_port": $PORT_HY2,
-    "users": [ { "password": "$PSK" } ],
-    "ignore_client_bandwidth": true,
-    "udp_timeout": "5m",
-    "udp_fragment": true,
-    "tls": {
-      "enabled": true,
-      "alpn": ["h3"],
-      "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-      "key_path": "/etc/sing-box/certs/privkey.pem",
-      "session_ticket": true
-    }
-  }],
-  "outbounds": [{ "type": "direct", "tag": "direct-out" }]
+  "log": { "level": "warn", "timestamp": true },
+  "inbounds": [{
+    "type": "hysteria2",
+    "tag": "hy2-in",
+    "listen": "::",
+    "listen_port": $PORT_HY2,
+    "users": [ { "password": "$PSK" } ],
+    "ignore_client_bandwidth": true,
+    "udp_timeout": "5m",
+    "udp_fragment": true,
+    "tls": {
+      "enabled": true,
+      "alpn": ["h3"],
+      "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+      "key_path": "/etc/sing-box/certs/privkey.pem",
+      "session_ticket": true
+    }
+  }],
+  "outbounds": [{ "type": "direct", "tag": "direct-out" }]
 }
 EOF
-    sync # 确保 Alpine 缓慢的 IO 完成写入
+    chmod 600 "/etc/sing-box/config.json"
 }
 
 # ==========================================
@@ -545,33 +545,17 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     get_network_info 
-
-    # 1. 提取 SNI (证书优先)
-    if [ -f "/etc/sing-box/certs/fullchain.pem" ]; then
-        RAW_SNI=$(openssl x509 -in /etc/sing-box/certs/fullchain.pem -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/' 2>/dev/null || echo "bing.com")
-    else
-        RAW_SNI="${TLS_DOMAIN:-bing.com}"
-    fi
-
-    # 2. 提取 端口 和 密码 (如果内存变量没值，则读取文件)
     if [ -f "$CONFIG_FILE" ]; then
-        # 优先用内存里的值，如果没有再读文件
-        [ -z "${RAW_PORT:-}" ] || [ "${RAW_PORT}" = "未知" ] && {
-            RAW_PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG_FILE" 2>/dev/null || echo "")
-            # JQ 报错兜底：用 grep 强行抓取数字
-            [[ ! "$RAW_PORT" =~ ^[0-9]+$ ]] && RAW_PORT=$(grep -oE '"listen_port": [0-9]+' "$CONFIG_FILE" | head -n1 | awk '{print $2}')
-        }
-
-        [ -z "${RAW_PSK:-}" ] || [ "${RAW_PSK}" = "未知" ] && {
-            RAW_PSK=$(jq -r '.inbounds[0].users[0].password' "$CONFIG_FILE" 2>/dev/null || echo "")
-            # JQ 报错兜底：用 grep 抓取双引号内的密码
-            [ -z "$RAW_PSK" ] && RAW_PSK=$(grep -oE '"password": "[^"]+"' "$CONFIG_FILE" | head -n1 | cut -d'"' -f4)
-        }
+        # 增加默认值兜底
+        RAW_PSK=$(jq -r '.inbounds[0].users[0].password // empty' "$CONFIG_FILE")
+        [ -z "$RAW_PSK" ] && RAW_PSK="读取失败"
+        
+        RAW_PORT=$(jq -r '.inbounds[0].listen_port // empty' "$CONFIG_FILE")
     fi
-
-    # 最终防御
-    RAW_PORT="${RAW_PORT:-未知}"
-    RAW_PSK="${RAW_PSK:-未知}"
+    # 提取证书实际的 CN 字段作为 SNI，而不是用随机变量
+    if [ -f /etc/sing-box/certs/fullchain.pem ]; then
+        RAW_SNI=$(openssl x509 -in /etc/sing-box/certs/fullchain.pem -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/')
+    fi
 }
 
 display_links() {
