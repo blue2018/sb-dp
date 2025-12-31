@@ -351,11 +351,16 @@ SYSCTL
 
     # 5. InitCWND 注入 (提升握手速度)
     # 取黄金分割点 15 (比默认 10 强 50%，比 20 更隐蔽)
-    local default_route=$(ip route show default | head -n1)
-    if [[ $default_route == *"via"* ]]; then
-        ip route change $default_route initcwnd 15 initrwnd 15 >/dev/null 2>&1 || true
+    if command -v ip >/dev/null; then
+        local default_route=$(ip route show default | head -n1)
+        if [[ $default_route == *"via"* ]]; then
+            if ip route change $default_route initcwnd 15 initrwnd 15 2>/dev/null; then
+                succ "黄金平衡版：InitCWND 设为 15，兼顾速度与隐蔽性"
+            else
+                warn "系统环境限制，跳过 InitCWND 优化(不影响使用)"
+            fi
+        fi
     fi
-    succ "黄金平衡版：InitCWND 设为 15，兼顾速度与隐蔽性"
 }
 
 
