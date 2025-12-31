@@ -120,7 +120,7 @@ install_dependencies() {
         err "依赖安装失败：未找到 jq，请手动运行安装命令查看报错"
         exit 1
     fi
-    succ "所需依赖已就绪！"
+    succ "所需依赖已就绪"
 }
 
 # 获取公网IP (实时更新)
@@ -671,13 +671,18 @@ while true; do
             source "$CORE" --show-only
             read -r -p "按回车键返回菜单..." ;;
         2) 
-            local CONF="/etc/sing-box/config.json"
-            local OLD_MD5=$(md5sum "$CONF" 2>/dev/null | awk '{print $1}')
-            vi "$CONF"
-            local NEW_MD5=$(md5sum "$CONF" 2>/dev/null | awk '{print $1}')
+            CONF_PATH="/etc/sing-box/config.json"
+            OLD_MD5_VAL=$(md5sum "$CONF_PATH" 2>/dev/null | awk '{print $1}')
             
-            if [[ "$OLD_MD5" != "$NEW_MD5" ]]; then
-                source "$CORE" --reset-port ""
+            vi "$CONF_PATH"
+            
+            NEW_MD5_VAL=$(md5sum "$CONF_PATH" 2>/dev/null | awk '{print $1}')
+            
+            if [[ "$OLD_MD5_VAL" != "$NEW_MD5_VAL" ]]; then
+                # 这里调用你的优化和重启逻辑
+                info "检测到配置已更改，正在同步优化并重启服务..."
+                check_kernel_env && check_memory_limit && optimize_system
+                setup_service >/dev/null 2>&1 || service_ctrl restart
                 succ "配置已更新并重启"
             else
                 info "配置未更改，跳过重启"
