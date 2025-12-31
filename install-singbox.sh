@@ -309,15 +309,26 @@ SYSCTL
         *)    warn "兼容模式：内核不支持 BBR，已应用 Cubic 优化" ;;
     esac
 
-    # InitCWND 注入 (提升握手速度)
+    # 优化 InitCWND，提升握手速度 (适配 LXC/OpenVZ 小鸡)
     # 取黄金分割点 15 (比默认 10 强 50%，比 20 更隐蔽)
-    if command -v ip >/dev/null; then
+    if command -v ip >/dev/null 2>&1; then
+        # 提取默认路由的完整行 (删除 proto 之后的部分以提高兼容性)
         local default_route=$(ip route show default | head -n1)
-        if [[ $default_route == *"via"* ]]; then
-            if ip route change $default_route initcwnd 15 initrwnd 15 2>/dev/null; then
-                succ "黄金平衡版：InitCWND 设为 15，兼顾速度与隐蔽性"
+        
+        if [ -n "$default_route" ]; then
+            # 尝试直接修改。如果已有 initcwnd，先删掉旧描述再加新的，避免冲突
+            local base_route=$(echo "$default_route" | sed 's/initcwnd [0-9]\+//g; s/initrwnd [0-9]\+//g')  
+            
+            if ip route change $base_route initcwnd 15 initrwnd 15 2>/dev/null; then
+                succ "黄金平衡版：InitCWND 设为 15 (已自适应)"
             else
-                warn "系统环境限制，跳过 InitCWND 优化(不影响使用)"
+                # 最后的倔强：如果 change 不行，尝试直接在当前网卡上叠加 (针对某些 LXC)
+                local dev_name=$(echo "$default_route" | grep -oP 'dev \K\S+')
+                if [ -z "$dev_name" ]; then
+                     warn "系统环境限制，跳过 InitCWND 优化"
+                else
+                     ip route replace default via $(ip route show | grep -m1 'default' | awk '{print $3}') dev $dev_name initcwnd 15 initrwnd 15 2>/dev/null && succ "InitCWND 已通过 Replace 强制开启" || warn "环境受限，跳过 InitCWND 优化"
+                fi
             fi
         fi
     fi
