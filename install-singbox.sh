@@ -431,11 +431,12 @@ prompt_for_port() {
 
 generate_cert() {
     mkdir -p /etc/sing-box/certs
-    # 如果证书已存在，直接退出，不重新生成，这样 SNI 就固定了
+    # 【新增判断】：如果证书已存在，不重新生成，确保 SNI 固定
     if [ -f /etc/sing-box/certs/fullchain.pem ]; then
-        info "检测到已有证书，跳过生成以保持 SNI 一致。"
+        info "证书已存在，保持当前伪装域名: $(openssl x509 -in /etc/sing-box/certs/fullchain.pem -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/')"
         return 0
     fi
+
     info "生成 ECC P-256 高性能证书 (伪装: $TLS_DOMAIN)..."
     openssl ecparam -genkey -name prime256v1 -out /etc/sing-box/certs/privkey.pem
     openssl req -new -x509 -days 3650 -key /etc/sing-box/certs/privkey.pem -out /etc/sing-box/certs/fullchain.pem -subj "/CN=$TLS_DOMAIN"
@@ -545,16 +546,16 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     get_network_info 
+    
     if [ -f "$CONFIG_FILE" ]; then
-        # 增加默认值兜底
-        RAW_PSK=$(jq -r '.inbounds[0].users[0].password // empty' "$CONFIG_FILE")
-        [ -z "$RAW_PSK" ] && RAW_PSK="读取失败"
+        # 【优化】：使用 jq 确保精准读取已保存的密码和端口
+        RAW_PSK=$(jq -r '.inbounds[0].users[0].password' "$CONFIG_FILE" 2>/dev/null)
+        RAW_PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG_FILE" 2>/dev/null)
         
-        RAW_PORT=$(jq -r '.inbounds[0].listen_port // empty' "$CONFIG_FILE")
-    fi
-    # 提取证书实际的 CN 字段作为 SNI，而不是用随机变量
-    if [ -f /etc/sing-box/certs/fullchain.pem ]; then
-        RAW_SNI=$(openssl x509 -in /etc/sing-box/certs/fullchain.pem -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/')
+        # 【优化】：从证书文件中反向提取 SNI，而不是用随机池里的变量
+        if [ -f /etc/sing-box/certs/fullchain.pem ]; then
+            RAW_SNI=$(openssl x509 -in /etc/sing-box/certs/fullchain.pem -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/' 2>/dev/null)
+        fi
     fi
 }
 
