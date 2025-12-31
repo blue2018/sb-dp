@@ -138,7 +138,7 @@ get_network_info() {
 # 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
 # ==========================================
 optimize_system() {
-    # 1. 核心数精准检测 (仅保留核心逻辑)
+    # 核心数精准检测 (新增逻辑：防止 LXC 欺骗)
     local cpu_cores=$(nproc)
     if [ -f /sys/fs/cgroup/cpu.max ]; then
         local m_max=$(cat /sys/fs/cgroup/cpu.max | awk '{print $1}')
@@ -149,12 +149,6 @@ optimize_system() {
         [ "$quota" -gt 0 ] && cpu_cores=$(( quota / period ))
     fi
     [ "$cpu_cores" -le 0 ] && cpu_cores=1
-    
-    # 2. 如果是单核（包含虚假多核），强制单核调度优化
-    if [ "$cpu_cores" -eq 1 ]; then
-        SBOX_GOMAXPROCS="1"
-        SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (单核优化)"
-    fi
     
     # 0. RTT 感知模块 (全能适配版)
     local RTT_AVG
@@ -242,7 +236,7 @@ optimize_system() {
 
     if [ "$mem_total" -le 0 ] || [ "$mem_total" -gt 64000 ]; then mem_total=64; fi
 
-    info "系统画像: 可用内存=${mem_total}MB | 平均延迟=${RTT_AVG}ms"
+    info "系统画像: 核心数=${cpu_cores} | 可用内存=${mem_total}MB | 平均延迟=${RTT_AVG}ms"
 
     # 2. 差异化档位计算（核心算法：RTT 放大 + 内存钳位）
     local udp_mem_scale
@@ -276,6 +270,22 @@ optimize_system() {
         VAR_SYSTEMD_NICE="-2"; VAR_SYSTEMD_IOSCHED="best-effort"
         SBOX_GOMAXPROCS="1" # 针对极小内存单核优化
         SBOX_OPTIMIZE_LEVEL="64M 生存版"
+    fi
+
+    # 性能分流注入 (CPU 核心数二次校验)
+    if [ "$cpu_cores" -gt 1 ]; then
+        # 如果是多核，开启 RPS 加速，并确保 GOMAXPROCS 为空（让 Go 自动调度多核）
+        local mask=$(printf '%x' $(( (1 << cpu_cores) - 1 )))
+        for rps_file in /sys/class/net/*/queues/rx-*/rps_cpus; do
+            echo "$mask" > "$rps_file" 2>/dev/null || true
+        done
+        sysctl -w net.core.rps_sock_flow_entries=32768 >/dev/null 2>&1 || true
+        SBOX_GOMAXPROCS="" 
+        SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} + 多核RPS"
+    else
+        # 如果是单核，强制限制调度并标记
+        SBOX_GOMAXPROCS="1"
+        [[ ! "$SBOX_OPTIMIZE_LEVEL" == *"(单核"* ]] && SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (单核优化)"
     fi
 
     # [动态算法] RTT 驱动的 UDP 动态缓冲池 (High BDP Tuning)
