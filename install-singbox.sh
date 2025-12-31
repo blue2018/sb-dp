@@ -683,7 +683,7 @@ while true; do
             # 重新应用配置与服务注入
             info "正在同步服务配置..."
             setup_service >/dev/null 2>&1 || service_ctrl restart
-            succ "重启成功：已同步最新的内核优化与内存限制"
+            succ "重启成功：已应用最新的优化配置"
             read -r -p "按回车键返回菜单..." ;;
         6) 
             read -r -p "确定彻底卸载？此操作将还原系统设置 (y/N): " confirm
