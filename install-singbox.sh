@@ -138,9 +138,27 @@ get_network_info() {
 # 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
 # ==========================================
 optimize_system() {
+    # 1. 核心数精准检测 (仅保留核心逻辑)
+    local cpu_cores=$(nproc)
+    if [ -f /sys/fs/cgroup/cpu.max ]; then
+        local m_max=$(cat /sys/fs/cgroup/cpu.max | awk '{print $1}')
+        [[ "$m_max" =~ ^[0-9]+$ ]] && cpu_cores=$(( m_max / 100000 ))
+    elif [ -f /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
+        local quota=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
+        local period=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
+        [ "$quota" -gt 0 ] && cpu_cores=$(( quota / period ))
+    fi
+    [ "$cpu_cores" -le 0 ] && cpu_cores=1
+    
+    # 2. 如果是单核（包含虚假多核），强制单核调度优化
+    if [ "$cpu_cores" -eq 1 ]; then
+        SBOX_GOMAXPROCS="1"
+        SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (单核优化)"
+    fi
+    
     # 0. RTT 感知模块 (全能适配版)
     local RTT_AVG
-    # 临时关闭“错误即退出”，防止因禁 Ping 杀掉脚本
+    # 临时关闭“错误即退出”，防止因禁 Ping 杀掉脚本，后续再打开
     set +e 
     # 优先探测阿里 (评估移动回国链路)
     RTT_AVG=$(ping -c 2 -W 1 223.5.5.5 2>/dev/null | awk -F'/' 'END{print int($5)}')
@@ -148,7 +166,6 @@ optimize_system() {
     if [ -z "$RTT_AVG" ] || [ "$RTT_AVG" -eq 0 ]; then
         RTT_AVG=$(ping -c 2 -W 1 1.1.1.1 2>/dev/null | awk -F'/' 'END{print int($5)}')
     fi
-    # 恢复“错误即退出”
     set -e
 
     # 结果处理：如果 Ping 成功则显示实测值，失败则启动智能补偿
