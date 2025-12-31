@@ -444,18 +444,20 @@ generate_cert() {
 create_config() {
     local PORT_HY2="${1:-}"
     mkdir -p /etc/sing-box
-    # 如果没传端口，先读旧的，读不到再随机
-    if [ -z "$PORT_HY2" ]; then
+    
+    # 强制预检：如果传入端口为空或非数字，尝试从旧配置读，读不到就随机
+    if [[ -z "$PORT_HY2" ]] || [[ ! "$PORT_HY2" =~ ^[0-9]+$ ]]; then
         PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
         [[ ! "$PORT_HY2" =~ ^[0-9]+$ ]] && PORT_HY2=$(shuf -i 10000-60000 -n 1)
     fi
-    # 获取/保留密码
+
     local PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json 2>/dev/null || echo "")
     [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
-    # 【关键改进】同步刷新到内存变量，确保 display_links 拿到的不是“未知”
+
+    # 【核心修复】直接同步给全局变量，防止 get_env_data 读文件失败
     RAW_PORT="$PORT_HY2"
     RAW_PSK="$PSK"
-    # 写入 JSON
+
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "warn", "timestamp": true },
@@ -479,6 +481,7 @@ create_config() {
   "outbounds": [{ "type": "direct", "tag": "direct-out" }]
 }
 EOF
+    sync # 确保 Alpine 缓慢的 IO 完成写入
 }
 
 # ==========================================
@@ -542,27 +545,33 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     get_network_info 
-    # 1. 获取 SNI
+
+    # 1. 提取 SNI (证书优先)
     if [ -f "/etc/sing-box/certs/fullchain.pem" ]; then
         RAW_SNI=$(openssl x509 -in /etc/sing-box/certs/fullchain.pem -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/' 2>/dev/null || echo "bing.com")
     else
         RAW_SNI="${TLS_DOMAIN:-bing.com}"
     fi
-    # 2. 获取端口和密码 (如果内存变量为空，则从文件提取)
-    if [ -z "${RAW_PORT:-}" ] || [ "${RAW_PORT}" = "未知" ]; then
-        if [ -f "$CONFIG_FILE" ]; then
-            # 方案 A: 尝试 jq (优雅)
+
+    # 2. 提取 端口 和 密码 (如果内存变量没值，则读取文件)
+    if [ -f "$CONFIG_FILE" ]; then
+        # 优先用内存里的值，如果没有再读文件
+        [ -z "${RAW_PORT:-}" ] || [ "${RAW_PORT}" = "未知" ] && {
             RAW_PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG_FILE" 2>/dev/null || echo "")
-            # 方案 B: 失败则正则提取 (稳健)
-            [ -z "$RAW_PORT" ] && RAW_PORT=$(grep -oE '"listen_port": [0-9]+' "$CONFIG_FILE" | awk '{print $2}')
-            
+            # JQ 报错兜底：用 grep 强行抓取数字
+            [[ ! "$RAW_PORT" =~ ^[0-9]+$ ]] && RAW_PORT=$(grep -oE '"listen_port": [0-9]+' "$CONFIG_FILE" | head -n1 | awk '{print $2}')
+        }
+
+        [ -z "${RAW_PSK:-}" ] || [ "${RAW_PSK}" = "未知" ] && {
             RAW_PSK=$(jq -r '.inbounds[0].users[0].password' "$CONFIG_FILE" 2>/dev/null || echo "")
-            [ -z "$RAW_PSK" ] && RAW_PSK=$(grep -oE '"password": "[^"]+"' "$CONFIG_FILE" | cut -d'"' -f4)
-        fi
+            # JQ 报错兜底：用 grep 抓取双引号内的密码
+            [ -z "$RAW_PSK" ] && RAW_PSK=$(grep -oE '"password": "[^"]+"' "$CONFIG_FILE" | head -n1 | cut -d'"' -f4)
+        }
     fi
-    # 最终确保不是空的
-    [ -z "${RAW_PORT:-}" ] && RAW_PORT="未知"
-    [ -z "${RAW_PSK:-}" ] && RAW_PSK="未知"
+
+    # 最终防御
+    RAW_PORT="${RAW_PORT:-未知}"
+    RAW_PSK="${RAW_PSK:-未知}"
 }
 
 display_links() {
