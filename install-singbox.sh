@@ -662,13 +662,15 @@ while true; do
             read -r -p "确定卸载？(y/N)(默认取消): " confirm
             confirm=$(echo "${confirm:-n}" | tr '[:upper:]' '[:lower:]')
             if [[ "$confirm" == "y" ]]; then
-                info "正在停止服务并清理..."
-                service_ctrl stop || true
-                # 清理自启项 (Alpine/OpenRC)
-                [ -f /etc/init.d/sing-box ] && rc-update del sing-box 2>/dev/null || true
-                # 清理文件
-                rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/local/bin/SB \  
-                       /etc/systemd/system/sing-box.service /etc/init.d/sing-box "$CORE"
+                info "正在清理系统环境..."
+                # 1. 静默停止服务 (屏蔽 OpenRC 的原生输出)
+                service_ctrl stop >/dev/null 2>&1 || true
+                # 2. 静默移除自启项
+                if [ -f /etc/init.d/sing-box ]; then
+                    rc-update del sing-box >/dev/null 2>&1 || true
+                fi
+                # 3. 彻底删除文件 (注意：这里改成单行，避免反斜杠断行报错)
+                rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/local/bin/SB /etc/systemd/system/sing-box.service /etc/init.d/sing-box "$CORE"
                 succ "卸载完成！" && exit 0
             else
                 info "已取消操作"
