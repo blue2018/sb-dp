@@ -602,37 +602,39 @@ EOF
         # Systemd 完整优化版
         local systemd_envs=$(printf "%s\n" "${env_list[@]}")
         cat > /etc/systemd/system/sing-box.service <<EOF
+cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service (Optimized)
-After=network.target
+# 确保执行 Pre 脚本时网卡已完全就绪
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/etc/sing-box
 
-# --- 运行时环境优化 ---
+# 运行时环境优化
 $systemd_envs
 
-# --- 进程调度优化 (防卡顿核心) ---
-# 负数 Nice 值赋予高优先级 CPU 抢占权
+# --- 修正点：对 $ 符号进行了转义，确保命令原封不动写入 service 文件 ---
+ExecStartPre=/bin/sh -c 'GW=\$(ip route show default | head -n1); if [ -n "\$GW" ]; then ip route change \$GW initcwnd 15 initrwnd 15 || true; fi'
+
+# 进程调度优化
 Nice=${VAR_SYSTEMD_NICE}
-# IO 调度优化 (realtime 或 best-effort)
 IOSchedulingClass=${VAR_SYSTEMD_IOSCHED}
 IOSchedulingPriority=0
 
 ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
-Restart=on-failure
 
-# --- 资源限制策略 ---
-# 软限制水位线，触发激进 GC (对小内存机器友好)
+# 增加重启延迟
+Restart=on-failure
+RestartSec=5s
+
+# 资源限制策略
 MemoryHigh=${SBOX_MEM_HIGH:-}
-# 物理内存硬顶限制
 MemoryMax=$SBOX_MEM_MAX
-# 提升文件描述符上限
 LimitNOFILE=1000000
-# 允许无限制创建进程/线程 (由 Go 运行时自行管理)
-LimitNPROC=infinity
 
 [Install]
 WantedBy=multi-user.target
