@@ -232,6 +232,44 @@ probe_memory_total() {
     echo "$mem_total"  
 }
 
+# InitCWND 专项优化模块 (全能兼容版：含替换、变更、强制注入)
+apply_initcwnd_optimization() {
+    local is_silent="${1:-false}" # 默认不静默
+    
+    if ! command -v ip >/dev/null; then
+        [[ "$is_silent" == "false" ]] && warn "未找到 ip 命令，跳过 CWND 优化"
+        return 1
+    fi
+
+    # 获取纯净路由核心：default via [网关] dev [网卡]
+    local route_core=$(ip route show default | head -n1 | awk '/via/ {print "default via " $3 " dev " $5}')
+    # 取黄金分割点 15 (比默认 10 强 50%，比 20 更隐蔽)
+    if [ -n "$route_core" ]; then
+        # 尝试方案 A: 路由替换 (KVM/物理机首选)
+        if ip route replace $route_core initcwnd 15 initrwnd 15 2>/dev/null; then
+            [[ "$is_silent" == "false" ]] && succ "InitCWND 已通过 replace 设为 15"
+            return 0
+        # 尝试方案 B: 原始路由变更 (标准内核兼容)
+        elif ip route change default initcwnd 15 initrwnd 15 2>/dev/null; then
+            [[ "$is_silent" == "false" ]] && succ "InitCWND 已通过 change 设为 15"
+            return 0
+        else
+            # 尝试方案 C: 接口级强制注入 (方案 C 归位，针对 OpenVZ/LXC 补丁)
+            local main_dev=$(echo "$route_core" | awk '{print $5}')
+            if [ -n "$main_dev" ] && ip route add 0.0.0.0/0 dev "$main_dev" initcwnd 15 initrwnd 15 2>/dev/null; then
+                [[ "$is_silent" == "false" ]] && succ "InitCWND 已通过接口注入生效"
+                return 0
+            else
+                [[ "$is_silent" == "false" ]] && warn "系统环境限制(如OpenVZ/LXC)，InitCWND 优化尝试失败"
+                return 1
+            fi
+        fi
+    else
+        [[ "$is_silent" == "false" ]] && warn "未找到有效默认路由，跳过 CWND 优化"
+        return 1
+    fi
+}
+
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
     local input_port
@@ -413,17 +451,7 @@ SYSCTL
     sysctl -p >/dev/null 2>&1 || true
 
     # 5. InitCWND 注入 (提升握手速度)
-    # 取黄金分割点 15 (比默认 10 强 50%，比 20 更隐蔽)
-    if command -v ip >/dev/null; then
-        local default_route=$(ip route show default | head -n1)
-        if [[ $default_route == *"via"* ]]; then
-            if ip route change $default_route initcwnd 15 initrwnd 15 2>/dev/null; then
-                succ "黄金平衡版：InitCWND 设为 15，兼顾速度与隐蔽性"
-            else
-                warn "系统环境限制，跳过 InitCWND 优化(不影响使用)"
-            fi
-        fi
-    fi
+    apply_initcwnd_optimization "false"
 }
 
 
@@ -617,8 +645,8 @@ WorkingDirectory=/etc/sing-box
 # 运行时环境优化
 $systemd_envs
 
-# --- 修正点：对 $ 符号进行了转义，确保命令原封不动写入 service 文件 ---
-ExecStartPre=/bin/sh -c 'GW=\$(ip route show default | head -n1); if [ -n "\$GW" ]; then ip route change \$GW initcwnd 15 initrwnd 15 || true; fi'
+# --- 自动修复 InitCWND (调用模式) ---
+ExecStartPre=/usr/local/bin/sb --apply-cwnd
 
 # 进程调度优化
 Nice=${VAR_SYSTEMD_NICE}
@@ -733,7 +761,7 @@ RAW_IP6='${RAW_IP6:-}'
 EOF
 
     # 声明函数并追加到核心脚本
-    declare -f prompt_for_port get_env_data display_links display_system_status detect_os copy_to_clipboard create_config setup_service install_singbox info err warn succ >> "$SBOX_CORE"
+    declare -f apply_initcwnd_optimization prompt_for_port get_env_data display_links display_system_status detect_os copy_to_clipboard create_config setup_service install_singbox info err warn succ >> "$SBOX_CORE"
     
     # 追加逻辑部分 (这里需要重新计算optimize_system吗？不需要，因为变量已固化，但若更新内核或重置端口需要用到)
     # 为方便起见，管理脚本中的 update/reset 将复用 optimize_system 的逻辑，所以我们也追加 optimize_system 函数
@@ -764,6 +792,10 @@ elif [[ "${1:-}" == "--update-kernel" ]]; then
         setup_service
         echo -e "\033[1;32m[OK]\033[0m 内核已更新并重新应用优化"
     fi
+elif [[ "${1:-}" == "--apply-cwnd" ]]; then
+    # 调用我们独立出来的全能版优化函数
+    # 使用静默模式，防止 Systemd 日志里出现太多颜色代码
+    apply_initcwnd_optimization "true"
 fi
 EOF
 
