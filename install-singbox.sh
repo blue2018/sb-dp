@@ -19,6 +19,7 @@ VAR_UDP_RMEM=""
 VAR_UDP_WMEM=""
 VAR_SYSTEMD_NICE=""
 VAR_SYSTEMD_IOSCHED=""
+VAR_HY2_BW="200"
 
 # TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
@@ -242,23 +243,23 @@ optimize_system() {
         SBOX_GOLIMIT="420MiB"; SBOX_GOGC="120"
         VAR_UDP_RMEM="33554432"; VAR_UDP_WMEM="33554432" # 32MB
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"
-        SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
+        VAR_HY2_BW="1000"; SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
         SBOX_GOLIMIT="210MiB"; SBOX_GOGC="100"
         VAR_UDP_RMEM="16777216"; VAR_UDP_WMEM="16777216" # 16MB
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"
-        SBOX_OPTIMIZE_LEVEL="256M 增强版"
+        VAR_HY2_BW="500"; SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
         SBOX_GOLIMIT="100MiB"; SBOX_GOGC="70"
         VAR_UDP_RMEM="8388608"; VAR_UDP_WMEM="8388608" # 8MB
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"
-        SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
+        VAR_HY2_BW="300"; SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
         SBOX_GOLIMIT="52MiB"; SBOX_GOGC="50"
         VAR_UDP_RMEM="4194304"; VAR_UDP_WMEM="4194304" # 4MB
         VAR_SYSTEMD_NICE="-2"; VAR_SYSTEMD_IOSCHED="best-effort"
         SBOX_GOMAXPROCS="1" # 针对极小内存单核优化
-        SBOX_OPTIMIZE_LEVEL="64M 生存版"
+        VAR_HY2_BW="200"; SBOX_OPTIMIZE_LEVEL="64M 生存版"
     fi
 
     # [动态算法] RTT 驱动的 UDP 动态缓冲池 (High BDP Tuning)
@@ -332,13 +333,22 @@ net.ipv4.tcp_max_syn_backlog = 32768
 # === UDP 极限优化 (变量注入) ===
 net.core.rmem_max = $VAR_UDP_RMEM
 net.core.wmem_max = $VAR_UDP_WMEM
-net.core.rmem_default = 1048576
-net.core.wmem_default = 1048576
+net.core.rmem_default = 2097152
+net.core.wmem_default = 2097152
+
+# TCP 窗口缩放 (确保高延迟下 TCP 协议也能压榨带宽)
+net.ipv4.tcp_rmem = 4096 87380 $VAR_UDP_RMEM
+net.ipv4.tcp_wmem = 4096 65536 $VAR_UDP_WMEM
+net.ipv4.tcp_window_scaling = 1
+
 # 动态计算的 UDP 内存池
 net.ipv4.udp_mem = $udp_mem_scale
-# 提升 UDP 最小水位
 net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
+
+# 针对高延迟线路的连接跟踪优化 (防止丢包僵死)
+net.netfilter.nf_conntrack_udp_timeout = 10
+net.netfilter.nf_conntrack_udp_timeout_stream = 60
 
 # === 路由与 MTU ===
 net.ipv4.ip_no_pmtu_disc = 0
@@ -521,8 +531,10 @@ create_config() {
     "listen": "::",
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
-    "ignore_client_bandwidth": true,
-    "udp_timeout": "5m",
+    "ignore_client_bandwidth": false,
+    "up_mbps": ${VAR_HY2_BW:-100},
+    "down_mbps": ${VAR_HY2_BW:-100}
+    "udp_timeout": "10s",
     "udp_fragment": true,
     "tls": {
       "enabled": true,
