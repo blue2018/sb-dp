@@ -486,7 +486,7 @@ install_singbox() {
     local LOCAL_VER="未安装"
     [ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version | head -n1 | awk '{print $3}')
 
-    info "正在连接 GitHub API 获取版本信息 (限时 23s)..."
+    info "正在连接 GitHub 获取版本信息 (限时 23s)..."
     
     # 策略 1: GitHub API (首选)
     local RELEASE_JSON=$(curl -sL --max-time 23 https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null)
@@ -533,13 +533,27 @@ install_singbox() {
         curl -fL --max-time 23 "$URL" -o "$TMP_D/sb.tar.gz"
     fi
 
+    # 校验逻辑
     if [ -f "$TMP_D/sb.tar.gz" ] && [ $(stat -c%s "$TMP_D/sb.tar.gz") -gt 1000000 ]; then
         tar -xf "$TMP_D/sb.tar.gz" -C "$TMP_D"
-        pgrep sing-box >/dev/null && (systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true)
-        install -m 755 "$TMP_D"/sing-box-*/sing-box /usr/bin/sing-box
-        rm -rf "$TMP_D"
-        succ "内核安装成功: v$(/usr/bin/sing-box version | head -n1 | awk '{print $3}')"
-        return 0
+        local NEW_BIN=$(find "$TMP_D" -type f -name "sing-box" | head -n1)
+
+        # --- 核心修改：新增下载文件可用性校验 ---
+        if [ -n "$NEW_BIN" ] && chmod +x "$NEW_BIN" && "$NEW_BIN" version >/dev/null 2>&1; then
+            info "新内核校验通过，正在替换..."
+            # 停止服务
+            pgrep sing-box >/dev/null && (systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true)
+            # 安全替换
+            install -m 755 "$NEW_BIN" /usr/bin/sing-box
+            rm -rf "$TMP_D"
+            succ "内核安装成功: v$(/usr/bin/sing-box version | head -n1 | awk '{print $3}')"
+            return 0
+        else
+            rm -rf "$TMP_D"
+            warn "下载的内核文件损坏或不兼容，本次不进行替换。"
+            [ "$LOCAL_VER" != "未安装" ] && return 0 || { err "无可用内核，安装终止"; exit 1; }
+        fi
+        # --------------------------------------
     else
         rm -rf "$TMP_D"
         if [ "$LOCAL_VER" != "未安装" ]; then
