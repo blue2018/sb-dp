@@ -956,6 +956,9 @@ USER_PORT=$(prompt_for_port)
 
 optimize_system    # 计算差异化优化参数
 install_singbox "install"
+PSK="${PSK:-}"
+SBOX_OBFS="${SBOX_OBFS:-}"
+VAR_HY2_BW="${VAR_HY2_BW:-100}"
 generate_cert
 create_config "$USER_PORT"
 setup_service      # 应用 Systemd 优化参数
