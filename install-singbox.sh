@@ -252,7 +252,7 @@ apply_initcwnd_optimization() {
         fi
     fi
     [[ "$is_silent" == "false" ]] && warn "InitCWND 优化受限 (当前内核不支持修改)"
-    return 1
+    return 0
 }
 
 # 获取并校验端口 (范围：1025-65535)
