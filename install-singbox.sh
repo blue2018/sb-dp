@@ -380,7 +380,7 @@ optimize_system() {
     SBOX_MEM_MAX="$((mem_total * 92 / 100))M"
     # 软限制水位线 (80% 处触发激进回收)
     SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"
-    # Go 运行时内存限制 (动态对齐软限制，防止 OOM)
+    # Go 运行时内存限制 (动态对齐软限制，使用 MiB 确保精准)
     SBOX_GOLIMIT="$((mem_total * 80 / 100))MiB"
 
     # 差异化档位计算（核心算法：RTT 放大 + 内存钳位）
@@ -395,26 +395,26 @@ optimize_system() {
 
     # 基础档位选择 (注意：此处已移除硬编码的 SBOX_GOLIMIT 以支持动态计算)
     if [ "$mem_total" -ge 450 ]; then
-        SBOX_GOGC="120"; VAR_HY2_BW="1000"
+        SBOX_GOGC="120"
         VAR_UDP_RMEM="33554432"; VAR_UDP_WMEM="33554432" # 32MB
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"
-        SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
+        VAR_HY2_BW="1000"; SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
-        SBOX_GOGC="100"; VAR_HY2_BW="500"
+        SBOX_GOGC="100"
         VAR_UDP_RMEM="16777216"; VAR_UDP_WMEM="16777216" # 16MB
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"
-        SBOX_OPTIMIZE_LEVEL="256M 增强版"
+        VAR_HY2_BW="500"; SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
-        SBOX_GOGC="70"; VAR_HY2_BW="300"
+        SBOX_GOGC="70"
         VAR_UDP_RMEM="8388608"; VAR_UDP_WMEM="8388608" # 8MB
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"
-        SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
+        VAR_HY2_BW="300"; SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
-        SBOX_GOGC="50"; VAR_HY2_BW="200"
+        SBOX_GOGC="50"
         VAR_UDP_RMEM="4194304"; VAR_UDP_WMEM="4194304" # 4MB
         VAR_SYSTEMD_NICE="-2"; VAR_SYSTEMD_IOSCHED="best-effort"
         SBOX_GOMAXPROCS="1" # 针对极小内存单核优化
-        SBOX_OPTIMIZE_LEVEL="64M 生存版"
+        VAR_HY2_BW="200"; SBOX_OPTIMIZE_LEVEL="64M 生存版"
     fi
 
     # [动态算法] RTT 驱动的 UDP 动态缓冲池 (High BDP Tuning)
@@ -513,7 +513,6 @@ SYSCTL
     # 5. InitCWND 注入 (提升握手速度)
     apply_initcwnd_optimization "false"
 }
-
 
 # ==========================================
 # 安装/更新 Sing-box 内核
