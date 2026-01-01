@@ -834,7 +834,7 @@ EOF
     # 写入 sb 管理菜单入口 (这是用户直接运行的文件)
     cat > "$SB_PATH" <<'EOF'
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 CORE="/etc/sing-box/core_script.sh"
 if [ ! -f "$CORE" ]; then echo "核心文件丢失"; exit 1; fi
 source "$CORE" --detect-only
@@ -866,7 +866,7 @@ while true; do
     case "$opt" in
         1) 
            source "$CORE" --show-only
-           read -r -p $'\n按回车键返回菜单...' ;;
+           read -r -p $'\n按回车键返回菜单...' _ ;;
         2) 
            OLD_MD5=$(md5sum /etc/sing-box/config.json 2>/dev/null | awk '{print $1}')  
            vi /etc/sing-box/config.json
@@ -877,17 +877,17 @@ while true; do
            else
                echo -e "\n\033[1;33m[INFO]\033[0m 配置未作变更"
            fi
-           read -r -p $'\n按回车键返回菜单...' ;;
+           read -r -p $'\n按回车键返回菜单...' _ ;;
         3) 
            NEW_PORT=$(prompt_for_port)
            source "$CORE" --reset-port "$NEW_PORT"
-           read -r -p $'\n按回车键返回菜单...' ;;
+           read -r -p $'\n按回车键返回菜单...' _ ;;
         4) 
            source "$CORE" --update-kernel
-           read -r -p $'\n按回车键返回菜单...' ;;
+           read -r -p $'\n按回车键返回菜单...' _ ;;
         5) 
            service_ctrl restart && info "服务已重启"
-           read -r -p $'\n按回车键返回菜单...' ;;
+           read -r -p $'\n按回车键返回菜单...' _ ;;
         6) 
             read -r -p "是否确定卸载？(默认N) [Y/N]: " confirm
             confirm="${confirm,,}" 
