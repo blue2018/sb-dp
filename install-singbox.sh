@@ -599,32 +599,30 @@ create_config() {
     local PORT_HY2="${1:-}"
     mkdir -p /etc/sing-box
     
-    # --- 变量预初始化 (解决 PSK: unbound variable) ---
+    # --- 核心修复：强制初始化所有变量 ---
     local PSK=""
     local SBOX_OBFS=""
-    local HY2_BW="${VAR_HY2_BW:-100}" # 预存带宽，防止引用未定义变量
+    local HY2_BW="100" 
 
-    # 1. 端口确定逻辑
-    if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then
-            # 增加 jq 运行失败的容错
-            PORT_HY2=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-        fi
-        # 如果读取失败或新安装，随机生成
-        [ -z "$PORT_HY2" ] && PORT_HY2=$(shuf -i 10000-60000 -n 1)
-    fi
-
-    # 2. PSK (密码) 与 OBFS (混淆) 读取逻辑
+    # 1. 尝试从现有配置读取 (容错处理)
     if [ -f /etc/sing-box/config.json ]; then
-        PSK=$(jq -r '.inbounds[0].users[0].password // empty' /etc/sing-box/config.json 2>/dev/null)
-        SBOX_OBFS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null)
+        # 使用 || true 确保即使 jq 出错，脚本也不中断
+        PORT_HY2=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null) || PORT_HY2=""
+        PSK=$(jq -r '.inbounds[0].users[0].password // empty' /etc/sing-box/config.json 2>/dev/null) || PSK=""
+        SBOX_OBFS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null) || SBOX_OBFS=""
     fi
-    
-    # 3. 兜底生成逻辑 (防止变量为空导致 JSON 损坏)
+
+    # 2. 确定最终参数
+    [ -z "$PORT_HY2" ] && PORT_HY2=$(shuf -i 10000-60000 -n 1)
     [ -z "$PSK" ] && PSK=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 12)
     [ -z "$SBOX_OBFS" ] && SBOX_OBFS=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 16)
+    
+    # 处理带宽变量，如果全局变量 VAR_HY2_BW 没定义，则使用默认值 100
+    if [ -n "${VAR_HY2_BW:-}" ]; then
+        HY2_BW="$VAR_HY2_BW"
+    fi
 
-    # 4. 写入配置
+    # 3. 写入配置 (使用 ${VAR} 格式确保解析安全)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "warn", "timestamp": true },
@@ -632,11 +630,11 @@ create_config() {
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
-    "listen_port": $PORT_HY2,
-    "users": [ { "password": "$PSK" } ],
+    "listen_port": ${PORT_HY2},
+    "users": [ { "password": "${PSK}" } ],
     "ignore_client_bandwidth": false,
-    "up_mbps": $HY2_BW,
-    "down_mbps": $HY2_BW,
+    "up_mbps": ${HY2_BW},
+    "down_mbps": ${HY2_BW},
     "udp_timeout": "10s",
     "udp_fragment": true,
     "tls": {
@@ -647,7 +645,7 @@ create_config() {
     },
     "obfs": {
       "type": "salamander",
-      "password": "$SBOX_OBFS"
+      "password": "${SBOX_OBFS}"
     },
     "masquerade": "https://www.bing.com"
   }],
