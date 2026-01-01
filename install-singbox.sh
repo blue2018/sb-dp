@@ -543,7 +543,7 @@ create_config() {
     "users": [ { "password": "$PSK" } ],
     "ignore_client_bandwidth": false,
     "up_mbps": ${VAR_HY2_BW:-100},
-    "down_mbps": ${VAR_HY2_BW:-100}
+    "down_mbps": ${VAR_HY2_BW:-100},
     "udp_timeout": "10s",
     "udp_fragment": true,
     "tls": {
