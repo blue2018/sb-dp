@@ -847,6 +847,8 @@ elif [[ "${1:-}" == "--update-kernel" ]]; then
     fi
 elif [[ "${1:-}" == "--apply-cwnd" ]]; then
     apply_initcwnd_optimization "true" || true
+elif [[ "${1:-}" == "--uninstall" ]]; then
+    do_uninstall_process
 fi
 EOF
 
