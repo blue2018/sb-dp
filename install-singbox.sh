@@ -903,8 +903,10 @@ while true; do
 done
 EOF
     chmod +x "$SB_PATH"
-    ln -sf "$SB_PATH" "/usr/local/bin/sb"
-    ln -sf "$SB_PATH" "/usr/local/bin/SB"
+    # 方案：先删除再创建，或者允许失败
+    rm -f /usr/local/bin/sb /usr/local/bin/SB 2>/dev/null
+    ln -sf "$SBOX_CORE" "/usr/local/bin/sb" || true
+    ln -sf "$SBOX_CORE" "/usr/local/bin/SB" || true
 }
 
 
