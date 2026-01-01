@@ -137,49 +137,41 @@ get_network_info() {
 # === 网络延迟探测模块 ===
 probe_network_rtt() {
     local RTT_VAL
-    # 0. RTT 感知模块 (全能适配版)
-    # 临时关闭“错误即退出”，防止因禁 Ping 杀掉脚本，随后再恢复
     set +e 
-    # 优先探测阿里 (评估移动回国链路)
+    # 提示信息通过 >&2 输出，不带颜色代码，且不会被变量捕获
+    echo "[INFO] 正在探测网络延迟..." >&2
+
+    # 优先探测阿里 (223.5.5.5)
     RTT_VAL=$(ping -c 2 -W 1 223.5.5.5 2>/dev/null | awk -F'/' 'END{print int($5)}')
-    # 探测 Cloudflare (评估国际物理延迟)
+    
+    # 备选探测 Cloudflare (1.1.1.1)
     if [ -z "$RTT_VAL" ] || [ "$RTT_VAL" -eq 0 ]; then
         RTT_VAL=$(ping -c 2 -W 1 1.1.1.1 2>/dev/null | awk -F'/' 'END{print int($5)}')
     fi
     set -e
 
-    # 结果处理：如果 Ping 成功则显示实测值，失败则启动智能补偿
     if [ -n "${RTT_VAL:-}" ] && [ "$RTT_VAL" -gt 0 ]; then
-        info "实时网络探测完成，当前平均 RTT: ${RTT_VAL}ms"
+        echo "[OK] 实测平均 RTT: ${RTT_VAL}ms" >&2
         echo "$RTT_VAL"
     else
-        # 智能地理位置补偿 (当 Ping 不通时触发)
         if [ -z "${RAW_IP4:-}" ]; then
-            # 如果没有获取到 IPv4，直接进入全球兜底
-            warn "未检测到公网 IPv4，无法查询位置，应用全球平均预估值: 150ms"
+            echo "[WARN] 未检测到公网IP，应用全球预估值: 150ms" >&2
             echo "150"
         else
-            info "Ping 探测受阻，正在通过 IP-API 预估 RTT..."
-            # 尝试在线查询国家名称
+            echo "[INFO] Ping 受阻，正在通过 IP-API 预估 RTT..." >&2
             local LOC=$(curl -s --max-time 3 "http://ip-api.com/line/${RAW_IP4}?fields=country" || echo "Unknown")
             
-            # 根据国家名精准匹配 RTT
             case "$LOC" in
                 "China"|"Hong Kong"|"Japan"|"Korea"|"Singapore"|"Taiwan")
-                    info "判定为亚洲节点 ($LOC)，预估 RTT: 50ms"
+                    echo "[OK] 判定为亚洲节点 ($LOC)，预估 RTT: 50ms" >&2
                     echo "50"
                     ;;
                 "Germany"|"France"|"United Kingdom"|"Netherlands"|"Spain"|"Poland"|"Italy")
-                    info "判定为欧洲节点 ($LOC)，预估 RTT: 180ms"
+                    echo "[OK] 判定为欧洲节点 ($LOC)，预估 RTT: 180ms" >&2
                     echo "180"
                     ;;
-                "United States"|"Canada"|"Mexico")
-                    info "判定为北美节点 ($LOC)，预估 RTT: 220ms"
-                    echo "220"
-                    ;;
                 *)
-                    # 最终兜底：API 失败或位置无法匹配，统一采用 150ms
-                    warn "API 查询失败或位置未知 ($LOC)，应用全球平均预估值: 150ms"
+                    echo "[WARN] 节点位置未知 ($LOC)，应用全球预估值: 150ms" >&2
                     echo "150"
                     ;;
             esac
@@ -192,82 +184,75 @@ probe_memory_total() {
     # 1. 内存检测逻辑（Cgroup / Host / Proc 多路径容错）
     local mem_total=64
     local mem_cgroup=0
-    local mem_host_total
-    mem_host_total=$(free -m | awk '/Mem:/ {print $2}')
+    
+    # 获取宿主机物理内存，强制过滤非数字字符
+    local mem_host_total=$(free -m | awk '/Mem:/ {print $2}' | tr -cd '0-9')
 
-    # 路径 A: Cgroup v1 (容器常用)
+    # 路径 A: Cgroup v1 (容器常用，如旧版 Docker/LXC)
     if [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-        mem_cgroup=$(($(cat /sys/fs/cgroup/memory/memory.limit_in_bytes) / 1024 / 1024))
-    # 路径 B: Cgroup v2 (新版系统)
+        local m_limit=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes | tr -cd '0-9')
+        # 很多环境默认限制是一个巨大的数字(即无限制)，需进行长度校验
+        if [ "${#m_limit}" -lt 15 ]; then
+            mem_cgroup=$((m_limit / 1024 / 1024))
+        fi
+    # 路径 B: Cgroup v2 (新版系统，如 Debian 11+, Ubuntu 22.04+)
     elif [ -f /sys/fs/cgroup/memory.max ]; then
-        local m_max
-        m_max=$(cat /sys/fs/cgroup/memory.max)
-        # 排除 "max" 字符串的情况
-        [[ "$m_max" =~ ^[0-9]+$ ]] && mem_cgroup=$((m_max / 1024 / 1024))
-    # 路径 C: /proc/meminfo (物理机/虚拟机)
+        local m_max=$(cat /sys/fs/cgroup/memory.max | tr -cd '0-9')
+        # 如果获取到的是纯数字则计算
+        [ -n "$m_max" ] && mem_cgroup=$((m_max / 1024 / 1024))
+    # 路径 C: /proc/meminfo (传统 Linux 获取方式)
     elif grep -q "MemTotal" /proc/meminfo; then
-        local m_proc
-        m_proc=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        local m_proc=$(grep MemTotal /proc/meminfo | awk '{print $2}' | tr -cd '0-9')
         mem_cgroup=$((m_proc / 1024))
     fi
 
     # 决策逻辑：如果 Cgroup 读取有效且小于物理总内存，则认为是容器限制
+    # 如果 mem_cgroup 为 0（代表无限制），则 fallback 到物理内存
     if [ "$mem_cgroup" -gt 0 ] && [ "$mem_cgroup" -le "$mem_host_total" ]; then
         mem_total=$mem_cgroup
     else
         mem_total=$mem_host_total
     fi
 
-    # 针对 OpenVZ/LXC 的特殊补丁：如果检测到 user_beancounters，强制信任 free -m
+    # 针对 OpenVZ/LXC 的特殊补丁：如果检测到 user_beancounters，通常 free -m 的结果更准确
     if [ -f /proc/user_beancounters ]; then
         mem_total=$mem_host_total
-        # 注意：此变量由于在子 shell 运行，可能需要 echo 传出，这里我们保证 mem_total 正确即可
     fi
 
-    # 最终异常值校验
-    if [ "$mem_total" -le 0 ] || [ "$mem_total" -gt 64000 ]; then 
+    # 最终异常值校验：防止结果为 0 或 异常大（超过 64GB 视为云环境或读取异常）
+    if [ -z "$mem_total" ] || [ "$mem_total" -le 0 ] || [ "$mem_total" -gt 64000 ]; then 
         mem_total=64 
     fi
 
-    echo "$mem_total"  
+    # 最终仅输出纯数字，确保被变量捕获后不含杂质
+    echo "$mem_total"
 }
 
 # InitCWND 专项优化模块 (全能兼容版：含替换、变更、强制注入)
 apply_initcwnd_optimization() {
-    local is_silent="${1:-false}" # 默认不静默
-    
-    if ! command -v ip >/dev/null; then
-        [[ "$is_silent" == "false" ]] && warn "未找到 ip 命令，跳过 CWND 优化"
-        return 1
-    fi
+    local is_silent="${1:-false}"
+    if ! command -v ip >/dev/null; then return 1; fi
 
-    # 获取纯净路由核心：default via [网关] dev [网卡]
-    local route_core=$(ip route show default | head -n1 | awk '/via/ {print "default via " $3 " dev " $5}')
+    # 提取：default via [网关] dev [网卡]
+    local route_core=$(ip route show default | head -n1 | awk '{print "via " $3 " dev " $5}')
     # 取黄金分割点 15 (比默认 10 强 50%，比 20 更隐蔽)
     if [ -n "$route_core" ]; then
-        # 尝试方案 A: 路由替换 (KVM/物理机首选)
-        if ip route replace $route_core initcwnd 15 initrwnd 15 2>/dev/null; then
-            [[ "$is_silent" == "false" ]] && succ "InitCWND 已通过 replace 设为 15"
-            return 0
-        # 尝试方案 B: 原始路由变更 (标准内核兼容)
-        elif ip route change default initcwnd 15 initrwnd 15 2>/dev/null; then
-            [[ "$is_silent" == "false" ]] && succ "InitCWND 已通过 change 设为 15"
+        # 尝试方案 A & B (合并尝试)
+        if ip route change default $route_core initcwnd 15 initrwnd 15 2>/dev/null || \
+           ip route replace default $route_core initcwnd 15 initrwnd 15 2>/dev/null; then
+            [[ "$is_silent" == "false" ]] && succ "InitCWND 优化成功"
             return 0
         else
-            # 尝试方案 C: 接口级强制注入 (方案 C 归位，针对 OpenVZ/LXC 补丁)
-            local main_dev=$(echo "$route_core" | awk '{print $5}')
-            if [ -n "$main_dev" ] && ip route add 0.0.0.0/0 dev "$main_dev" initcwnd 15 initrwnd 15 2>/dev/null; then
-                [[ "$is_silent" == "false" ]] && succ "InitCWND 已通过接口注入生效"
+            # 方案 C: Alpine/OpenVZ 强制追加模式
+            local dev=$(echo "$route_core" | awk '{print $4}')
+            if ip route add 0.0.0.0/0 dev "$dev" initcwnd 15 initrwnd 15 2>/dev/null; then
+                [[ "$is_silent" == "false" ]] && succ "InitCWND 强制注入成功"
                 return 0
-            else
-                [[ "$is_silent" == "false" ]] && warn "系统环境限制(如OpenVZ/LXC)，InitCWND 优化尝试失败"
-                return 1
             fi
         fi
-    else
-        [[ "$is_silent" == "false" ]] && warn "未找到有效默认路由，跳过 CWND 优化"
-        return 1
     fi
+    [[ "$is_silent" == "false" ]] && warn "InitCWND 优化受限 (当前内核不支持修改)"
+    return 1
 }
 
 # 获取并校验端口 (范围：1025-65535)
@@ -630,7 +615,6 @@ EOF
         # Systemd 完整优化版
         local systemd_envs=$(printf "%s\n" "${env_list[@]}")
         cat > /etc/systemd/system/sing-box.service <<EOF
-cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service (Optimized)
 # 确保执行 Pre 脚本时网卡已完全就绪
