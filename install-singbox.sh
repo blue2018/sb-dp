@@ -138,8 +138,7 @@ get_network_info() {
 probe_network_rtt() {
     local RTT_VAL
     set +e 
-    # 提示信息通过 >&2 输出，不带颜色代码，且不会被变量捕获
-    echo "[INFO] 正在探测网络延迟..." >&2
+    echo -e "\033[1;34m[INFO]\033[0m 正在探测网络延迟..." >&2
 
     # 优先探测阿里 (223.5.5.5)
     RTT_VAL=$(ping -c 2 -W 1 223.5.5.5 2>/dev/null | awk -F'/' 'END{print int($5)}')
@@ -151,27 +150,27 @@ probe_network_rtt() {
     set -e
 
     if [ -n "${RTT_VAL:-}" ] && [ "$RTT_VAL" -gt 0 ]; then
-        echo "[OK] 实测平均 RTT: ${RTT_VAL}ms" >&2
+        echo -e "\033[1;32m[OK]\033[0m 实测平均 RTT: ${RTT_VAL}ms" >&2
         echo "$RTT_VAL"
     else
         if [ -z "${RAW_IP4:-}" ]; then
-            echo "[WARN] 未检测到公网IP，应用全球预估值: 150ms" >&2
+            echo -e "\033[1;33m[WARN]\033[0m 未检测到公网IP，应用全球预估值: 150ms" >&2
             echo "150"
         else
-            echo "[INFO] Ping 受阻，正在通过 IP-API 预估 RTT..." >&2
+            echo -e "\033[1;34m[INFO]\033[0m Ping 受阻，正在通过 IP-API 预估 RTT..." >&2
             local LOC=$(curl -s --max-time 3 "http://ip-api.com/line/${RAW_IP4}?fields=country" || echo "Unknown")
             
             case "$LOC" in
                 "China"|"Hong Kong"|"Japan"|"Korea"|"Singapore"|"Taiwan")
-                    echo "[OK] 判定为亚洲节点 ($LOC)，预估 RTT: 50ms" >&2
+                    echo -e "\033[1;32m[OK]\033[0m 判定为亚洲节点 ($LOC)，预估 RTT: 50ms" >&2
                     echo "50"
                     ;;
                 "Germany"|"France"|"United Kingdom"|"Netherlands"|"Spain"|"Poland"|"Italy")
-                    echo "[OK] 判定为欧洲节点 ($LOC)，预估 RTT: 180ms" >&2
+                    echo -e "\033[1;32m[OK]\033[0m 判定为欧洲节点 ($LOC)，预估 RTT: 180ms" >&2
                     echo "180"
                     ;;
                 *)
-                    echo "[WARN] 节点位置未知 ($LOC)，应用全球预估值: 150ms" >&2
+                    echo -e "\033[1;33m[WARN]\033[0m 节点位置未知 ($LOC)，应用全球预估值: 150ms" >&2
                     echo "150"
                     ;;
             esac
