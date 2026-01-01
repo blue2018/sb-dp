@@ -187,14 +187,8 @@ probe_network_rtt() {
     fi
 }
 
-
-# ==========================================
-# 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
-# ==========================================
-optimize_system() {
-    # 引用 RTT 探测函数获取结果
-    local RTT_AVG=$(probe_network_rtt)
-
+# === 内存资源探测模块 ===
+probe_memory_total() {
     # 1. 内存检测逻辑（Cgroup / Host / Proc 多路径容错）
     local mem_total=64
     local mem_cgroup=0
@@ -227,14 +221,71 @@ optimize_system() {
     # 针对 OpenVZ/LXC 的特殊补丁：如果检测到 user_beancounters，强制信任 free -m
     if [ -f /proc/user_beancounters ]; then
         mem_total=$mem_host_total
-        SBOX_OPTIMIZE_LEVEL="OpenVZ容器版"
+        # 注意：此变量由于在子 shell 运行，可能需要 echo 传出，这里我们保证 mem_total 正确即可
     fi
 
-    if [ "$mem_total" -le 0 ] || [ "$mem_total" -gt 64000 ]; then mem_total=64; fi
+    # 最终异常值校验
+    if [ "$mem_total" -le 0 ] || [ "$mem_total" -gt 64000 ]; then 
+        mem_total=64 
+    fi
+
+    echo "$mem_total"  
+}
+
+#生成端口
+prompt_for_port() {
+    local input_port
+    while true; do
+        read -p "请输入端口 [1025-65535] (回车随机生成): " input_port
+        if [[ -z "$input_port" ]]; then
+            input_port=$(shuf -i 10000-60000 -n 1)
+            echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $input_port" >&2
+            echo "$input_port"
+            return 0
+        elif is_valid_port "$input_port"; then
+            echo "$input_port"
+            return 0
+        else
+            echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字或直接回车" >&2
+        fi
+    done
+}
+
+#校验端口
+is_valid_port() {
+    local port="$1"
+    if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1025 ] && [ "$port" -le 65535 ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+#生成 ECC P-256 高性能证书
+generate_cert() {
+    info "生成 ECC P-256 高性能证书 (伪装: $TLS_DOMAIN)..."
+    mkdir -p /etc/sing-box/certs
+    if [ ! -f /etc/sing-box/certs/fullchain.pem ]; then
+        openssl ecparam -genkey -name prime256v1 -out /etc/sing-box/certs/privkey.pem
+        openssl req -new -x509 -days 3650 \
+          -key /etc/sing-box/certs/privkey.pem \
+          -out /etc/sing-box/certs/fullchain.pem \
+          -subj "/CN=$TLS_DOMAIN"
+    fi
+}
+
+
+# ==========================================
+# 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
+# ==========================================
+optimize_system() {
+    # 执行独立探测模块获取环境画像
+    local RTT_AVG=$(probe_network_rtt)
+    local mem_total=$(probe_memory_total)
 
     info "系统画像: 可用内存=${mem_total}MB | 平均延迟=${RTT_AVG}ms"
 
-    # 2. 差异化档位计算（核心算法：RTT 放大 + 内存钳位）
+    # 差异化档位计算（核心算法：RTT 放大 + 内存钳位）
     local udp_mem_scale
     # [安全锁] 计算物理内存的 40% 作为 UDP 缓冲区的绝对上限 (Page单位, 1Page=4KB)
     # 40% 内存 (MB) * 1024 / 4 = Pages
@@ -448,49 +499,6 @@ install_singbox() {
             warn "下载彻底失败，保留现有本地版本继续安装"; return 0
         fi
         err "下载失败且本地无可用内核，无法继续"; exit 1
-    fi
-}
-
-
-# ==========================================
-# 端口与证书工具
-# ==========================================
-is_valid_port() {
-    local port="$1"
-    if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1025 ] && [ "$port" -le 65535 ]; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-prompt_for_port() {
-    local input_port
-    while true; do
-        read -p "请输入端口 [1025-65535] (回车随机生成): " input_port
-        if [[ -z "$input_port" ]]; then
-            input_port=$(shuf -i 10000-60000 -n 1)
-            echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $input_port" >&2
-            echo "$input_port"
-            return 0
-        elif is_valid_port "$input_port"; then
-            echo "$input_port"
-            return 0
-        else
-            echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字或直接回车" >&2
-        fi
-    done
-}
-
-generate_cert() {
-    info "生成 ECC P-256 高性能证书 (伪装: $TLS_DOMAIN)..."
-    mkdir -p /etc/sing-box/certs
-    if [ ! -f /etc/sing-box/certs/fullchain.pem ]; then
-        openssl ecparam -genkey -name prime256v1 -out /etc/sing-box/certs/privkey.pem
-        openssl req -new -x509 -days 3650 \
-          -key /etc/sing-box/certs/privkey.pem \
-          -out /etc/sing-box/certs/fullchain.pem \
-          -subj "/CN=$TLS_DOMAIN"
     fi
 }
 
