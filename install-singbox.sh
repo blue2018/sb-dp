@@ -230,27 +230,51 @@ probe_memory_total() {
 # InitCWND 专项优化模块 (全能兼容版：含替换、变更、强制注入)
 apply_initcwnd_optimization() {
     local is_silent="${1:-false}"
-    if ! command -v ip >/dev/null; then return 1; fi
+    if ! command -v ip >/dev/null; then return 0; fi
 
-    # 提取：default via [网关] dev [网卡]
-    local route_core=$(ip route show default | head -n1 | awk '{print "via " $3 " dev " $5}')
-    # 取黄金分割点 15 (比默认 10 强 50%，比 20 更隐蔽)
-    if [ -n "$route_core" ]; then
-        # 尝试方案 A & B (合并尝试)
-        if ip route change default $route_core initcwnd 15 initrwnd 15 2>/dev/null || \
-           ip route replace default $route_core initcwnd 15 initrwnd 15 2>/dev/null; then
-            [[ "$is_silent" == "false" ]] && succ "InitCWND 优化成功"
+    # 1. 精准提取 IPv4 默认网关、网卡及当前度量值
+    # 使用 grep 确保只取一行 IPv4 默认路由
+    local default_route=$(ip -4 route show default | head -n1)
+    
+    if [ -z "$default_route" ]; then
+        [[ "$is_silent" == "false" ]] && warn "未发现默认路由，跳过 CWND 优化"
+        return 0
+    fi
+
+    # 提取核心参数
+    local gw=$(echo "$default_route" | awk '/via/ {print $3}')
+    local dev=$(echo "$default_route" | awk '/dev/ {print $5}')
+    
+    # 2. 构造基础命令块
+    local route_cmd="initcwnd 15 initrwnd 15"
+    
+    # 如果找到了网关和网卡
+    if [ -n "$gw" ] && [ -n "$dev" ]; then
+        # 尝试方案 A: 标准修改 (change)
+        if ip route change default via "$gw" dev "$dev" $route_cmd 2>/dev/null; then
+            [[ "$is_silent" == "false" ]] && succ "InitCWND 修改成功 (Standard)"
             return 0
-        else
-            # 方案 C: Alpine/OpenVZ 强制追加模式
-            local dev=$(echo "$route_core" | awk '{print $4}')
-            if ip route add 0.0.0.0/0 dev "$dev" initcwnd 15 initrwnd 15 2>/dev/null; then
-                [[ "$is_silent" == "false" ]] && succ "InitCWND 强制注入成功"
-                return 0
-            fi
+        # 尝试方案 B: 强制替换 (replace)
+        elif ip route replace default via "$gw" dev "$dev" $route_cmd 2>/dev/null; then
+            [[ "$is_silent" == "false" ]] && succ "InitCWND 替换成功 (Replace)"
+            return 0
+        # 尝试方案 C: 针对受限环境，添加一条高优先级静态路由指向网关
+        elif ip route add "$gw" dev "$dev" $route_cmd 2>/dev/null; then
+             [[ "$is_silent" == "false" ]] && succ "InitCWND 静态注入成功 (Static)"
+             return 0
         fi
     fi
-    [[ "$is_silent" == "false" ]] && warn "InitCWND 优化受限 (当前内核不支持修改)"
+
+    # 3. 针对 OpenVZ/LXC 的终极尝试：不带 via，直接绑定网卡
+    if [ -n "$dev" ]; then
+        if ip route change default dev "$dev" $route_cmd 2>/dev/null || \
+           ip route replace default dev "$dev" $route_cmd 2>/dev/null; then
+            [[ "$is_silent" == "false" ]] && succ "InitCWND 修改成功 (Interface-only)"
+            return 0
+        fi
+    fi
+
+    [[ "$is_silent" == "false" ]] && warn "InitCWND 优化受限 (虚拟化环境只读)"
     return 0
 }
 
