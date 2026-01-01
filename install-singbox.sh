@@ -622,7 +622,7 @@ create_config() {
     # 这种语法即使在 set -u 下，如果变量未定义也会视为空值，不会报错
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "warn", "timestamp": true },
+  "log": { "level": "error", "timestamp": true },
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
