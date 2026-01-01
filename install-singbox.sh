@@ -705,7 +705,7 @@ ExecStartPre=/usr/local/bin/sb --apply-cwnd
 
 # 进程调度优化
 Nice=${VAR_SYSTEMD_NICE:-0}
-IOSchedulingClass=${VAR_SYSTEMD_IOSCHED:-best-effort}
+IOSchedulingClass=${VAR_SYSTEMD_IOSCHED:-}
 IOSchedulingPriority=0
 
 ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
