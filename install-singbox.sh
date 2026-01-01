@@ -828,11 +828,10 @@ elif [[ "${1:-}" == "--apply-cwnd" ]]; then
 fi
 EOF
 
-    chmod 700 "$SBOX_CORE"
+    chmod 755 "$SBOX_CORE"
     local SB_PATH="/usr/local/bin/sb"
     
-    # 写入 sb 管理菜单入口 (无需变动，保持原样即可，这里省略重复代码)
-    # ... (如果你需要我也把这部分贴出来，请告诉我，通常这部分没变) ...
+    # 写入 sb 管理菜单入口 (这是用户直接运行的文件)
     cat > "$SB_PATH" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -902,11 +901,11 @@ while true; do
     esac
 done
 EOF
+
     chmod +x "$SB_PATH"
-    # 方案：先删除再创建，或者允许失败
-    rm -f /usr/local/bin/sb /usr/local/bin/SB 2>/dev/null
-    ln -sf "$SBOX_CORE" "/usr/local/bin/sb" || true
-    ln -sf "$SBOX_CORE" "/usr/local/bin/SB" || true
+    # 只需要创建一个大写的软链接指向小写的 sb 即可
+    ln -sf "$SB_PATH" "/usr/local/bin/SB" 2>/dev/null || true
+    info "脚本部署完毕，输入 'sb' 或 'SB' 管理"
 }
 
 
