@@ -20,6 +20,7 @@ VAR_UDP_WMEM=""
 VAR_SYSTEMD_NICE=""
 VAR_SYSTEMD_IOSCHED=""
 VAR_HY2_BW="200"
+SBOX_OBFS=""
 
 # TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
@@ -580,23 +581,18 @@ create_config() {
         fi
     fi
 
-    # 2. PSK (密码) 确定逻辑
+    # 2. PSK (密码) 与 OBFS (混淆) 确定逻辑
     local PSK
     if [ -f /etc/sing-box/config.json ]; then
         PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
-    elif command -v uuidgen >/dev/null 2>&1; then
-        PSK=$(uuidgen)
-    elif [ -f /proc/sys/kernel/random/uuid ]; then
-        PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
-    else
-        # 兜底：使用 openssl 生成符合标准 UUID 格式的随机数
-        local seed=$(openssl rand -hex 16)
-        PSK="${seed:0:8}-${seed:8:4}-${seed:12:4}-${seed:16:4}-${seed:20:12}"
+        # 从配置中读取现有的混淆密码，如果没有则新生成
+        SBOX_OBFS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json)
     fi
     
-    # 3. 写入 Sing-box 配置文件
-    # 注意：PMTUD 和 UDP Buffer 优化已在 optimize_system 的 sysctl 中完成，
-    # 这里的 config.json 保持标准结构以避免不兼容。
+    [ -z "$PSK" ] && PSK=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 12)
+    [ -z "$SBOX_OBFS" ] && SBOX_OBFS=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 16)
+
+    # 3. 写入配置 (加入混淆与伪装)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "warn", "timestamp": true },
@@ -616,7 +612,12 @@ create_config() {
       "alpn": ["h3"],
       "certificate_path": "/etc/sing-box/certs/fullchain.pem",
       "key_path": "/etc/sing-box/certs/privkey.pem"
-    }
+    },
+    "obfs": {
+      "type": "salamander",
+      "password": "$SBOX_OBFS"
+    },
+    "masquerade": "https://www.bing.com"
   }],
   "outbounds": [{ "type": "direct", "tag": "direct-out" }]
 }
@@ -714,6 +715,7 @@ get_env_data() {
     
     RAW_PSK=$(jq -r '.inbounds[0].users[0].password' "$CONFIG_FILE" | xargs)
     RAW_PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG_FILE" | xargs)
+    SBOX_OBFS=$(jq -r '.inbounds[0].obfs.password' "$CONFIG_FILE" | xargs) # 新增
     local CERT_PATH=$(jq -r '.inbounds[0].tls.certificate_path' "$CONFIG_FILE" | xargs)
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/' | xargs || echo "unknown")
 }
@@ -729,14 +731,14 @@ display_links() {
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT}\033[0m"
 
     if [ -n "${RAW_IP4:-}" ]; then
-        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?sni=$RAW_SNI&alpn=h3&insecure=1#$(hostname)_v4"
+        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?sni=$RAW_SNI&alpn=h3&obfs=salamander&obfs-password=$SBOX_OBFS&insecure=1#$(hostname)_v4"
         FULL_CLIP="$LINK_V4"
         echo -e "\n\033[1;35m[IPv4节点链接]\033[0m"
         echo -e "$LINK_V4\n"
     fi
 
     if [ -n "${RAW_IP6:-}" ]; then
-        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?sni=$RAW_SNI&alpn=h3&insecure=1#$(hostname)_v6"
+        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?sni=$RAW_SNI&alpn=h3&obfs=salamander&obfs-password=$SBOX_OBFS&insecure=1#$(hostname)_v6"
         [ -n "$FULL_CLIP" ] && FULL_CLIP="${FULL_CLIP}\n${LINK_V6}" || FULL_CLIP="$LINK_V6"
         echo -e "\033[1;36m[IPv6节点链接]\033[0m"
         echo -e "$LINK_V6"
@@ -791,6 +793,7 @@ VAR_UDP_WMEM='${VAR_UDP_WMEM:-4194304}'
 TLS_DOMAIN_POOL=($(printf "'%s' " "${TLS_DOMAIN_POOL[@]}"))
 RAW_IP4='${RAW_IP4:-}'
 RAW_IP6='${RAW_IP6:-}'
+SBOX_OBFS='$SBOX_OBFS'
 EOF
 
     # 声明函数并追加到核心脚本，补全所有依赖函数，确保 optimize_system 能够独立运行
