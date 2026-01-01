@@ -816,7 +816,7 @@ RAW_IP6='${RAW_IP6:-}'
 EOF
 
     # 声明函数并追加到核心脚本
-    declare -f do_uninstall_process apply_initcwnd_optimization prompt_for_port get_env_data display_links display_system_status detect_os copy_to_clipboard create_config setup_service install_singbox info err warn succ >> "$SBOX_CORE"
+    declare -f apply_initcwnd_optimization prompt_for_port get_env_data display_links display_system_status detect_os copy_to_clipboard create_config setup_service install_singbox info err warn succ >> "$SBOX_CORE"
     
     # 追加逻辑部分 (这里需要重新计算optimize_system吗？不需要，因为变量已固化，但若更新内核或重置端口需要用到)
     # 为方便起见，管理脚本中的 update/reset 将复用 optimize_system 的逻辑，所以我们也追加 optimize_system 函数
@@ -847,8 +847,6 @@ elif [[ "${1:-}" == "--update-kernel" ]]; then
     fi
 elif [[ "${1:-}" == "--apply-cwnd" ]]; then
     apply_initcwnd_optimization "true" || true
-elif [[ "${1:-}" == "--uninstall" ]]; then
-    do_uninstall_process
 fi
 EOF
 
@@ -911,10 +909,12 @@ while true; do
            service_ctrl restart && info "服务已重启"
            read -r -p $'\n按回车键返回菜单...' ;;
         6) 
-           read -p "确定深度卸载并还原系统状态？[Y/N](默认N): " confirm
+           read -p "是否确定卸载？输入 y 确认，直接回车取消: " confirm
            if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
-               # 调用核心脚本中的卸载函数（增加 --uninstall 参数支持）
-               source "$CORE" --uninstall
+               service_ctrl stop
+               [ -f /etc/init.d/sing-box ] && rc-update del sing-box
+               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/local/bin/SB /etc/systemd/system/sing-box.service /etc/init.d/sing-box "$CORE"
+               info "卸载完成！"
                exit 0
            else
                info "已取消卸载！"
