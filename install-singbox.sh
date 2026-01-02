@@ -693,33 +693,29 @@ get_env_data() {
 
 display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP=""
-    
-    # 检查是否有公网 IP
-    if [ -z "${RAW_IP4:-}" ] && [ -z "${RAW_IP6:-}" ]; then
+    # 显式初始化所有可能用到的变量，防止 set -u 报错
+    local OBFS_PART="" RAW_IP4="${RAW_IP4:-}" RAW_IP6="${RAW_IP6:-}" RAW_SALA="${RAW_SALA:-}"
+
+    # 检查是否有 IP 地址
+    if [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ]; then
         echo -e "\n\033[1;31m警告: 未检测到任何公网 IP 地址，请检查网络！\033[0m"
         return
     fi
 
-    # 构造混淆参数字符串
-    local OBFS_PARAM=""
-    if [ -n "${RAW_SALA:-}" ]; then
-        OBFS_PARAM="&obfs=salamander&obfs-password=${RAW_SALA}"
+    if [ -n "$RAW_SALA" ]; then
+        OBFS_PART="&obfs=salamander&obfs-password=${RAW_SALA}"
     fi
 
-    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT}\033[0m"
+    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m"
 
-    # IPv4 链接生成
-    if [ -n "${RAW_IP4:-}" ]; then
-        # 在 insecure=1 后面追加混淆参数
-        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?sni=$RAW_SNI&alpn=h3&insecure=1${OBFS_PARAM}#$(hostname)_v4"
+    if [ -n "$RAW_IP4" ]; then
+        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?sni=$RAW_SNI&alpn=h3&insecure=1${OBFS_PART}#$(hostname)_v4"
         FULL_CLIP="$LINK_V4"
         echo -e "\n\033[1;35m[IPv4节点链接]\033[0m"
         echo -e "$LINK_V4\n"
     fi
 
-    # IPv6 链接生成
-    if [ -n "${RAW_IP6:-}" ]; then
-        # 同理追加混淆参数
+    if [ -n "$RAW_IP6" ]; then
         LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?sni=$RAW_SNI&alpn=h3&insecure=1${OBFS_PART}#$(hostname)_v6"
         [ -n "$FULL_CLIP" ] && FULL_CLIP="${FULL_CLIP}\n${LINK_V6}" || FULL_CLIP="$LINK_V6"
         echo -e "\033[1;36m[IPv6节点链接]\033[0m"
