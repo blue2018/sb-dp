@@ -21,6 +21,8 @@ VAR_SYSTEMD_NICE=""
 VAR_SYSTEMD_IOSCHED=""
 VAR_HY2_BW="200"
 SBOX_OBFS=""
+SBOX_UDP_FRAG="true"
+VAR_HY2_MTU="1350"
 
 # TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
@@ -360,27 +362,29 @@ optimize_system() {
         SBOX_GOLIMIT="420MiB"; SBOX_GOGC="120"
         VAR_UDP_RMEM="33554432"; VAR_UDP_WMEM="33554432"
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"
-        VAR_HY2_BW="500"; SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
+        VAR_HY2_BW="500"; SBOX_UDP_FRAG="true"
+        SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
         local swappiness_val=10; busy_poll_val=50
     elif [ "$mem_total" -ge 200 ]; then
         SBOX_GOLIMIT="210MiB"; SBOX_GOGC="100"
         VAR_UDP_RMEM="16777216"; VAR_UDP_WMEM="16777216"
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="300"; SBOX_OPTIMIZE_LEVEL="256M 增强版"
+        VAR_HY2_BW="300"; SBOX_UDP_FRAG="true"
+        SBOX_OPTIMIZE_LEVEL="256M 增强版"
         local swappiness_val=10; busy_poll_val=20
     elif [ "$mem_total" -ge 100 ]; then
         SBOX_GOLIMIT="90MiB"; SBOX_GOGC="800"
         VAR_UDP_RMEM="8388608"; VAR_UDP_WMEM="8388608"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="200"; SBOX_GOMAXPROCS="1"
+        VAR_HY2_BW="200"; SBOX_GOMAXPROCS="1"; SBOX_UDP_FRAG="true"
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版(LazyGC)"
         local swappiness_val=60; busy_poll_val=0
     else
         SBOX_GOLIMIT="48MiB"; SBOX_GOGC="800"
         VAR_UDP_RMEM="2097152"; VAR_UDP_WMEM="2097152"
         VAR_SYSTEMD_NICE="-2"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="80"; SBOX_GOMAXPROCS="1"
-        SBOX_OPTIMIZE_LEVEL="64M 生存版(LazyGC)"
+        VAR_HY2_BW="80"; SBOX_GOMAXPROCS="1"; SBOX_UDP_FRAG="false"
+        VAR_HY2_MTU="1200"; SBOX_OPTIMIZE_LEVEL="64M 生存版(LazyGC)"
         local swappiness_val=100; busy_poll_val=0
     fi
 
@@ -590,7 +594,8 @@ create_config() {
     "up_mbps": ${HY2_BW:-100},
     "down_mbps": ${HY2_BW:-100},
     "udp_timeout": "10s",
-    "udp_fragment": true,
+    "mtu": ${VAR_HY2_MTU:-1350},
+    "udp_fragment": ${SBOX_UDP_FRAG:-true},
     "tls": {
       "enabled": true,
       "alpn": ["h3"],
