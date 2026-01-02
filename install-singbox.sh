@@ -558,25 +558,21 @@ create_config() {
     local PSK
     if [ -f /etc/sing-box/config.json ]; then
         PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
-    elif command -v uuidgen >/dev/null 2>&1; then
-        PSK=$(uuidgen)
     elif [ -f /proc/sys/kernel/random/uuid ]; then
         PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     else
-        # 兜底：使用 openssl 生成符合标准 UUID 格式的随机数
         local seed=$(openssl rand -hex 16)
         PSK="${seed:0:8}-${seed:8:4}-${seed:12:4}-${seed:16:4}-${seed:20:12}"
     fi
 
-    # 3. 新增：Salamander 混淆密码确定逻辑 (同样遵循“存在即继承”原则)
-    local SALA_PASS="" # ⬅️ 显式初始化，防止 set -u 报错
+    # 3. Salamander 混淆密码
+    local SALA_PASS=""
     if [ -f /etc/sing-box/config.json ]; then
         SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     fi
-    # 如果为空则生成新密码
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
     
-    # 4. 写入 Sing-box 配置文件
+    # 4. 写入 Sing-box 配置文件 (注意这里的逗号和新增的 max_transmit_unit)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "error", "timestamp": true },
@@ -591,7 +587,7 @@ create_config() {
     "down_mbps": ${VAR_HY2_BW:-200},
     "udp_timeout": "10s",
     "udp_fragment": true,
-    "max_transmit_unit": 1380,      # 主动将 MTU 降至 1380，规避绝大多数分片
+    "max_transmit_unit": 1380,
     "tls": {
       "enabled": true,
       "alpn": ["h3"],
