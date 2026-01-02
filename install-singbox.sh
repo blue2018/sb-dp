@@ -754,7 +754,7 @@ display_system_status() {
 # ==========================================
 create_sb_tool() {
     mkdir -p /etc/sing-box
-    local CURRENT_SALA=$(jq -r '.inbounds[0].tls.salamander.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
+    local FINAL_SALA=$(jq -r '.inbounds[0].tls.salamander.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     # 写入固化变量
     cat > "$SBOX_CORE" <<EOF
 #!/usr/bin/env bash
@@ -771,7 +771,7 @@ VAR_SYSTEMD_IOSCHED='$VAR_SYSTEMD_IOSCHED'
 VAR_UDP_RMEM='${VAR_UDP_RMEM:-4194304}'
 VAR_UDP_WMEM='${VAR_UDP_WMEM:-4194304}'
 TLS_DOMAIN_POOL=($(printf "'%s' " "${TLS_DOMAIN_POOL[@]}"))
-RAW_SALA='$CURRENT_SALA'
+RAW_SALA='$FINAL_SALA'
 RAW_IP4='${RAW_IP4:-}'
 RAW_IP6='${RAW_IP6:-}'
 EOF
