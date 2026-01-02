@@ -415,13 +415,15 @@ optimize_system() {
         SBOX_GOLIMIT="90MiB"; SBOX_GOGC="800"
         VAR_UDP_RMEM="8388608"; VAR_UDP_WMEM="8388608"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="200"; SBOX_OPTIMIZE_LEVEL="128M 紧凑版(LazyGC)"
+        VAR_HY2_BW="200"; SBOX_GOMAXPROCS="1"
+        SBOX_OPTIMIZE_LEVEL="128M 紧凑版(LazyGC)"
         local swappiness_val=60; busy_poll_val=0
     else
         SBOX_GOLIMIT="48MiB"; SBOX_GOGC="800"
         VAR_UDP_RMEM="2097152"; VAR_UDP_WMEM="2097152"
         VAR_SYSTEMD_NICE="-2"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="100"; SBOX_OPTIMIZE_LEVEL="64M 生存版(LazyGC)"
+        VAR_HY2_BW="80"; SBOX_GOMAXPROCS="1"
+        SBOX_OPTIMIZE_LEVEL="64M 生存版(LazyGC)"
         local swappiness_val=100; busy_poll_val=0
     fi
 
