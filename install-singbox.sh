@@ -587,50 +587,27 @@ create_config() {
     SBOX_OBFS="$OBFS_VAL"
 
     # 3. 写入配置（使用引号包裹变量，防止空值导致语法错误）
-    cat > "/etc/sing-box/config.json" <<EOF
+    cat > /etc/sing-box/config.json <<EOF
 {
-  "log": {
-    "level": "error",
-    "timestamp": true
-  },
-  "inbounds": [
-    {
-      "type": "hysteria2",
-      "tag": "hy2-in",
-      "listen": "0.0.0.0",
-      "listen_port": ${PORT_HY2},
-      "users": [
-        {
-          "password": "${PSK_VAL}"
-        }
-      ],
-      "ignore_client_bandwidth": false,
-      "up_mbps": ${VAR_HY2_BW:-200},
-      "down_mbps": ${VAR_HY2_BW:-200},
-      "udp_timeout": "10s",
-      "mtu": ${VAR_HY2_MTU:-1350},
-      "udp_fragment": ${SBOX_UDP_FRAG:-true},
-      "tls": {
-        "enabled": true,
-        "alpn": [
-          "h3"
-        ],
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-        "key_path": "/etc/sing-box/certs/privkey.pem"
-      },
-      "obfs": {
-        "type": "salamander",
-        "password": "${OBFS_VAL}"
-      },
-      "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+  "log": { "level": "error", "timestamp": true },
+  "inbounds": [{
+    "type": "hysteria2",
+    "tag": "hy2-in",
+    "listen": "0.0.0.0",
+    "listen_port": 25968,
+    "users": [ { "password": "your_password_123" } ],
+    "tls": {
+      "enabled": true,
+      "alpn": ["h3"],
+      "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+      "key_path": "/etc/sing-box/certs/privkey.pem"
+    },
+    "obfs": {
+      "type": "salamander",
+      "password": "your_obfs_password"
     }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct-out"
-    }
-  ]
+  }],
+  "outbounds": [{ "type": "direct", "tag": "direct-out" }]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
