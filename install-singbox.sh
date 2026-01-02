@@ -557,12 +557,16 @@ create_config() {
     fi
 
     # 3. 新增：Salamander 混淆密码确定逻辑 (同样遵循“存在即继承”原则)
-    local SALA_PASS
+    local SALA_PASS="" # 先初始化为空字符串
     if [ -f /etc/sing-box/config.json ]; then
-        # 尝试从现有配置读取，如果不存在则生成新的
-        SALA_PASS=$(jq -r '.inbounds[0].tls.salamander.password // empty' /etc/sing-box/config.json)
+        # 读取旧密码，如果读取不到则保持空
+        SALA_PASS=$(jq -r '.inbounds[0].tls.salamander.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     fi
-    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+    
+    # 如果密码为空（新安装或旧配置没这行），则生成新密码
+    if [ -z "$SALA_PASS" ]; then
+        SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+    fi
     
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
