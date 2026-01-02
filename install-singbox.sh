@@ -559,7 +559,7 @@ create_config() {
     # 3. 新增：Salamander 混淆密码确定逻辑 (同样遵循“存在即继承”原则)
     local SALA_PASS="" # ⬅️ 显式初始化，防止 set -u 报错
     if [ -f /etc/sing-box/config.json ]; then
-        SALA_PASS=$(jq -r '.inbounds[0].tls.salamander.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
+        SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     fi
     # 如果为空则生成新密码
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
@@ -688,7 +688,7 @@ get_env_data() {
     # 读取 PSK、端口、混淆密码
     RAW_PSK=$(jq -r '.inbounds[0].users[0].password // ""' "$CONFIG_FILE" | xargs)
     RAW_PORT=$(jq -r '.inbounds[0].listen_port // ""' "$CONFIG_FILE" | xargs)
-    RAW_SALA=$(jq -r '.inbounds[0].tls.salamander.password // ""' "$CONFIG_FILE" | xargs)
+    RAW_SALA=$(jq -r '.inbounds[0].obfs.password // ""' "$CONFIG_FILE" | xargs)
     
     local CERT_PATH=$(jq -r '.inbounds[0].tls.certificate_path' "$CONFIG_FILE" | xargs)
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' | xargs || echo "unknown")
@@ -755,7 +755,7 @@ display_system_status() {
 # ==========================================
 create_sb_tool() {
     mkdir -p /etc/sing-box
-    local FINAL_SALA=$(jq -r '.inbounds[0].tls.salamander.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
+    local FINAL_SALA=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     # 写入固化变量
     cat > "$SBOX_CORE" <<EOF
 #!/usr/bin/env bash
