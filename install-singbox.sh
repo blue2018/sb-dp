@@ -603,7 +603,7 @@ create_config() {
       "type": "salamander",
       "password": "${SBOX_OBFS}"
     },
-    "masquerade": "https://${TLS_DOMAIN}"
+    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
   "outbounds": [{ "type": "direct", "tag": "direct-out" }]
 }
@@ -786,6 +786,7 @@ VAR_SYSTEMD_IOSCHED='$VAR_SYSTEMD_IOSCHED'
 VAR_UDP_RMEM='${VAR_UDP_RMEM:-4194304}'
 VAR_UDP_WMEM='${VAR_UDP_WMEM:-4194304}'
 TLS_DOMAIN_POOL=($(printf "'%s' " "${TLS_DOMAIN_POOL[@]}"))
+TLS_DOMAIN='${TLS_DOMAIN}'
 RAW_IP4='${RAW_IP4:-}'
 RAW_IP6='${RAW_IP6:-}'
 SBOX_OBFS='$SBOX_OBFS'
