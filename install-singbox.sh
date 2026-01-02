@@ -684,16 +684,19 @@ get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
     
-    RAW_PSK=$(jq -r '.inbounds[0].users[0].password' "$CONFIG_FILE")
-    RAW_PORT=$(jq -r '.inbounds[0].listen_port' "$CONFIG_FILE")
-    RAW_SALAMANDER=$(jq -r '.inbounds[0].tls.salamander.password' "$CONFIG_FILE") # 新增
-    local CERT_PATH=$(jq -r '.inbounds[0].tls.certificate_path' "$CONFIG_FILE")
-    RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 | sed 's/.*CN=\([^,]*\).*/\1/' || echo "unknown")
+    # 读取 PSK、端口、混淆密码
+    RAW_PSK=$(jq -r '.inbounds[0].users[0].password // ""' "$CONFIG_FILE" | xargs)
+    RAW_PORT=$(jq -r '.inbounds[0].listen_port // ""' "$CONFIG_FILE" | xargs)
+    RAW_SALA=$(jq -r '.inbounds[0].tls.salamander.password // ""' "$CONFIG_FILE" | xargs)
+    
+    local CERT_PATH=$(jq -r '.inbounds[0].tls.certificate_path' "$CONFIG_FILE" | xargs)
+    RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' | xargs || echo "unknown")
 }
 
 display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP=""
-    local OBFS_PART="" RAW_IP4="${RAW_IP4:-}" RAW_IP6="${RAW_IP6:-}" RAW_SALA="${RAW_SALA:-}"
+    local OBFS_PART="" RAW_IP4="${RAW_IP4:-}" RAW_IP6="${RAW_IP6:-}"
+    local RAW_SALA="${RAW_SALA:-}"
     
     if [ -n "$RAW_SALA" ]; then
         OBFS_PART="&obfs=salamander&obfs-password=${RAW_SALA}"
