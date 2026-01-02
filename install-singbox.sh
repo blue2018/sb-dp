@@ -583,10 +583,11 @@ create_config() {
       "enabled": true,
       "alpn": ["h3"],
       "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-      "key_path": "/etc/sing-box/certs/privkey.pem",
-      "salamander": {
-        "password": "$SALA_PASS"
-      }
+      "key_path": "/etc/sing-box/certs/privkey.pem"
+    },
+    "transport": {
+      "type": "salamander",
+      "password": "$SALA_PASS"
     },
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
