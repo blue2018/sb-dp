@@ -582,7 +582,8 @@ create_config() {
     "up_mbps": ${VAR_HY2_BW:-200},
     "down_mbps": ${VAR_HY2_BW:-200},
     "udp_timeout": "10s",
-    "udp_fragment": true,
+    "mtu": ${VAR_HY2_MTU:-1350},
+    "udp_fragment": ${SBOX_UDP_FRAG:-true},
     "tls": {
       "enabled": true,
       "alpn": ["h3"],
