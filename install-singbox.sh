@@ -585,7 +585,7 @@ create_config() {
       "certificate_path": "/etc/sing-box/certs/fullchain.pem",
       "key_path": "/etc/sing-box/certs/privkey.pem"
     },
-    "transport": {
+    "obfs": {
       "type": "salamander",
       "password": "$SALA_PASS"
     },
