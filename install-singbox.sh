@@ -34,7 +34,6 @@ TLS_DOMAIN_POOL=(
 pick_tls_domain() { echo "${TLS_DOMAIN_POOL[$RANDOM % ${#TLS_DOMAIN_POOL[@]}]}"; }
 TLS_DOMAIN="$(pick_tls_domain)"
 
-
 # ==========================================
 # 彩色输出与工具函数
 # ==========================================
@@ -88,41 +87,28 @@ detect_os() {
 
 # 依赖安装 (容错增强版)
 install_dependencies() {
-    info "正在检查并安装必要依赖 (curl, jq, openssl)..."
-    
+    local pkgs="curl jq openssl coreutils grep"
+    local pkg_cmd=""
+
     case "$OS" in
         alpine)
-            info "检测到 Alpine 系统，正在同步仓库并安装依赖..."
-            # --no-cache 确保获取最新索引，不保留临时文件
-            apk add --no-cache bash curl jq openssl openrc iproute2 coreutils grep
-            ;;
+            info "检测到 Alpine 系统，正在同步并安装依赖..."
+            pkg_cmd="apk add --no-cache $pkgs bash openrc iproute2" ;;
         debian)
-            # Ubuntu 和 Debian 都走这个逻辑
-            info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..."
+            info "检测到 Debian/Ubuntu 系统，正在更新并安装依赖..."
             export DEBIAN_FRONTEND=noninteractive
-            # 允许 update 失败以便在某些源失效时仍尝试安装
             apt-get update -y || true
-            # 移除 -q 参数，让你看到实时安装滚动条
-            apt-get install -y curl jq openssl coreutils grep
-            ;;
+            pkg_cmd="apt-get install -y $pkgs" ;;
         redhat)
             info "检测到 RHEL/CentOS 系统，正在安装依赖..."
-            # yum/dnf 安装过程通常比较详细
-            yum install -y curl jq openssl coreutils grep
-            ;;
+            pkg_cmd="yum install -y $pkgs" ;;
         *)
-            err "不支持的系统发行版: $OS"
-            exit 1
-            ;;
+            err "不支持的系统发行版: $OS" && exit 1 ;;
     esac
 
-    # 验证关键工具是否安装成功
-    if ! command -v jq >/dev/null 2>&1; then
-        err "依赖安装失败：未找到 jq，请手动运行安装命令查看报错"
-        exit 1
-    fi
-    
-    succ "所需依赖已就绪！"
+    $pkg_cmd >/dev/null 2>&1 || $pkg_cmd
+    command -v jq &>/dev/null || { err "依赖安装失败：未找到 jq" && exit 1; }
+    succ "所需依赖已安装"
 }
 
 #获取公网IP
@@ -307,83 +293,53 @@ prompt_for_port() {
 # 生成 ECC P-256 高性能证书 (绝对兼容稳定版)
 generate_cert() {
     [ -f /etc/sing-box/certs/fullchain.pem ] && return 0
-    info "生成深度伪装 ECC P-256 证书 (目标: $TLS_DOMAIN)..."
-    mkdir -p /etc/sing-box/certs
+    info "生成 ECC P-256 伪装证书 ($TLS_DOMAIN)..."
+    mkdir -p /etc/sing-box/certs && chmod 700 /etc/sing-box/certs
 
-    # 1. 简单的变量准备 (不使用复杂管道，防止 pipefail)
-    local ORG="CloudData"
-    local DAYS=3650
-    local SERIAL=$((RANDOM + 10000))
-
-    # 2. 直接通过管道传递配置，不产生临时文件，避免权限或路径问题
-    # 使用 printf 构造配置，兼容性最强
-    local SSL_CONF=$(printf "[req]\ndistinguished_name=dn\nx509_extensions=v3\nprompt=no\n[dn]\nCN=%s\nO=%s Inc.\n[v3]\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:%s,DNS:*.%s" "$TLS_DOMAIN" "$ORG" "$TLS_DOMAIN" "$TLS_DOMAIN")
-
-    # 3. 执行生成
-    # 先生成私钥
-    openssl ecparam -genkey -name prime256v1 -out /etc/sing-box/certs/privkey.pem >/dev/null 2>&1 || true
-    
-    # 核心步骤：使用 -config <(echo ...) 语法
-    openssl req -new -x509 -sha256 \
-        -key /etc/sing-box/certs/privkey.pem \
+    # 1. 一键生成：合并私钥生成与证书签发
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+        -keyout /etc/sing-box/certs/privkey.pem \
         -out /etc/sing-box/certs/fullchain.pem \
-        -days "$DAYS" \
-        -set_serial "$SERIAL" \
-        -config <(echo -e "$SSL_CONF") >/dev/null 2>&1
-
-    # 检查结果，如果失败则尝试最简生成
-    if [ ! -f /etc/sing-box/certs/fullchain.pem ]; then
-        warn "加固证书生成失败，尝试基础模式..."
-        openssl req -new -x509 -days 3650 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
+        -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN/O=CloudData Inc." \
+        -addext "subjectAltName=DNS:$TLS_DOMAIN,DNS:*.$TLS_DOMAIN" &>/dev/null || {
+        
+        # 2. 备选方案：如果旧版 OpenSSL 不支持 -addext，则使用最简模式
+        warn "加固模式失败，切换基础模式..."
+        openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
             -keyout /etc/sing-box/certs/privkey.pem \
             -out /etc/sing-box/certs/fullchain.pem \
-            -subj "/CN=$TLS_DOMAIN" >/dev/null 2>&1
-    fi
+            -days 3650 -subj "/CN=$TLS_DOMAIN" &>/dev/null
+    }
 
     chmod 600 /etc/sing-box/certs/*.pem
-    succ "ECC 证书就绪"
+    [ -f /etc/sing-box/certs/fullchain.pem ] && succ "ECC 证书就绪" || err "证书生成失败"
 }
 
 #卸载脚本，清理系统
 uninstall_all() {
     info "正在执行深度卸载..."
-    # 1. 停止并清理服务
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl disable --now sing-box 2>/dev/null
-        rm -f /etc/systemd/system/sing-box.service
-        systemctl daemon-reload
+    
+    # 1. 停止并清理服务 (兼容 Systemd 和 OpenRC)
+    if command -v systemctl >&2; then
+        systemctl disable --now sing-box &>/dev/null && rm -f /etc/systemd/system/sing-box.service && systemctl daemon-reload
     else
-        rc-service sing-box stop 2>/dev/null
-        rc-update del sing-box default 2>/dev/null
-        rm -f /etc/init.d/sing-box
+        rc-service sing-box stop &>/dev/null && rc-update del sing-box default &>/dev/null && rm -f /etc/init.d/sing-box
     fi
-    # 2. 还原内核参数 (删除独立配置并重载)
-    if [ -f /etc/sysctl.d/99-singbox.conf ]; then
-        rm -f /etc/sysctl.d/99-singbox.conf
-        sysctl --system >/dev/null 2>&1 || true
-        info "内核优化参数已清理"
-    fi
-    # 3. 还原路由表 InitCWND 到默认值 10
-    local dev=$(ip route show default | awk '/dev/ {print $5; exit}')
-    if [ -n "$dev" ]; then
-        ip route change default dev "$dev" initcwnd 10 initrwnd 10 2>/dev/null || true
-        info "InitCWND 已还原"
-    fi
-    # 4. 彻底删除文件与快捷键
-    rm -rf "/etc/sing-box"
-    rm -f "/usr/bin/sing-box"
-    rm -f "/usr/local/bin/sb"
-    rm -f "/usr/local/bin/SB"
 
-    succ "卸载完成！系统已被重置"
-    exit 0
+    # 2. 还原内核参数与 InitCWND (合并处理)
+    [ -f /etc/sysctl.d/99-singbox.conf ] && rm -f /etc/sysctl.d/99-singbox.conf && sysctl --system &>/dev/null
+    local dev=$(ip route show default | awk '/dev/ {print $5; exit}')
+    [ -n "$dev" ] && ip route change default dev "$dev" initcwnd 10 initrwnd 10 &>/dev/null || true
+
+    # 3. 批量删除残留文件与快捷键 (核心简洁点)
+    rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB}
+    
+    succ "卸载完成！系统已重置" && exit 0
 }
 
-
 # ==========================================
 # 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
 # ==========================================
-# 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
 optimize_system() {
     # 1. 执行独立探测模块获取环境画像
     local RTT_AVG=$(probe_network_rtt)
@@ -507,7 +463,6 @@ SYSCTL
     apply_initcwnd_optimization "false"
 }
 
-
 # ==========================================
 # 安装/更新 Sing-box 内核
 # ==========================================
@@ -593,7 +548,6 @@ install_singbox() {
     fi
 }
 
-
 # ==========================================
 # 配置文件生成
 # ==========================================
@@ -653,7 +607,6 @@ create_config() {
 EOF
     chmod 600 "/etc/sing-box/config.json"
 }
-
 
 # ==========================================
 # 服务配置 (核心优化：应用 Nice/IOSched/Env)
@@ -734,7 +687,6 @@ EOF
     fi
 }
 
-
 # ==========================================
 # 信息展示模块
 # ==========================================
@@ -797,7 +749,6 @@ display_system_status() {
     echo -e "IPv4地址: \033[1;33m${RAW_IP4:-无}\033[0m"
     echo -e "IPv6地址: \033[1;33m${RAW_IP6:-无}\033[0m"
 }
-
 
 # ==========================================
 # 管理脚本生成 (固化优化变量)
@@ -935,27 +886,21 @@ done
 EOF
 
     chmod +x "$SB_PATH"
-    # 只需要创建一个大写的软链接指向小写的 sb 即可
     ln -sf "$SB_PATH" "/usr/local/bin/SB" 2>/dev/null || true
     info "脚本部署完毕，输入 'sb' 或 'SB' 管理"
 }
-
 
 # ==========================================
 # 主运行逻辑
 # ==========================================
 detect_os
 [ "$(id -u)" != "0" ] && err "请使用 root 运行" && exit 1
-
 # 调用安装依赖函数
 install_dependencies
-
 # 获取并显示网络 IP
 get_network_info
-
 echo -e "-----------------------------------------------"
 USER_PORT=$(prompt_for_port)
-
 optimize_system    # 计算差异化优化参数
 install_singbox "install"
 PSK="${PSK:-}"
@@ -966,7 +911,6 @@ generate_cert      # 生成证书
 create_config "$USER_PORT" # 创建配置
 setup_service      # 应用 Systemd 优化参数
 create_sb_tool     # 生成管理脚本
-
 # 初始显示
 get_env_data
 echo -e "\n\033[1;34m==========================================\033[0m"
