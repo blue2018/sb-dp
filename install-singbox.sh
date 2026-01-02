@@ -80,7 +80,7 @@ detect_os() {
 
 # 依赖安装 (容错增强版)
 install_dependencies() {
-    local pkgs="curl jq openssl coreutils grep"
+    local pkgs="curl jq openssl coreutils grep iptables"
     
     case "$OS" in
         alpine)
@@ -552,7 +552,7 @@ install_singbox() {
 create_config() {
     # 1. 初始化局部变量，确保在 set -u 下安全
     local INPUT_PORT="${1:-}"; local PORT_HY2=""; local PSK=""
-    local SBOX_OBFS=""; local HY2_BW="${VAR_HY2_BW:-200}"
+    local HY2_BW="${VAR_HY2_BW:-200}"
 
     mkdir -p /etc/sing-box
 
