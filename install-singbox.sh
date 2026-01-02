@@ -409,6 +409,10 @@ optimize_system() {
 
     # 5. 写入 Sysctl (深度 BBR 锐化参数)
     cat > /etc/sysctl.conf <<SYSCTL
+# === 路径 MTU 探测优化 ===
+net.ipv4.ip_no_pmtu_disc = 0
+net.ipv4.tcp_mtu_probing = 1
+
 # === BBR 锐化与拥塞控制 ===
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = $tcp_cca
@@ -444,11 +448,20 @@ SYSCTL
 
     sysctl -p >/dev/null 2>&1 || true
 
-    # 6. NIC 卸载与 InitCWND
+    # === 6. NIC 卸载与高级 MTU 探测 (防分片精调版) ===
     if command -v ethtool >/dev/null 2>&1; then
         local IFACE=$(ip route show default | awk '{print $5; exit}')
-        [ -n "$IFACE" ] && ethtool -K "$IFACE" gro on gso on tso off lro off >/dev/null 2>&1 || true
+        if [ -n "$IFACE" ]; then
+            # 禁用 TSO/LRO 防止产生越界的巨型帧，保留 GSO/GRO 维持高性能
+            ethtool -K "$IFACE" gro on gso on tso off lro off >/dev/null 2>&1 || true
+            info "网卡优化：已禁用 TSO/LRO，规避分片丢包"
+        fi
     fi
+
+    # 注入路径 MTU 动态发现逻辑
+    sysctl -w net.ipv4.ip_no_pmtu_disc=0 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
+    
     apply_initcwnd_optimization "false"
 }
 
@@ -578,6 +591,7 @@ create_config() {
     "down_mbps": ${VAR_HY2_BW:-200},
     "udp_timeout": "10s",
     "udp_fragment": true,
+    "max_transmit_unit": 1380,      # 主动将 MTU 降至 1380，规避绝大多数分片
     "tls": {
       "enabled": true,
       "alpn": ["h3"],
