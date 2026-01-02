@@ -550,13 +550,9 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    # 1. 初始化局部变量，确保在 set -u 下安全
-    local INPUT_PORT="${1:-}"; local PORT_HY2=""; local PSK=""
-    local HY2_BW="${VAR_HY2_BW:-200}"
 
     mkdir -p /etc/sing-box
 
-    # 2. 从旧配置读取 (增加优先级判断)
     if [ -f /etc/sing-box/config.json ]; then
         # 只有在没传新端口参数时，才读取旧端口
         if [ -z "$INPUT_PORT" ]; then
@@ -564,20 +560,17 @@ create_config() {
         else
             PORT_HY2="$INPUT_PORT"
         fi
-        # 读取旧凭据
+
         PSK=$(jq -r '.inbounds[0].users[0].password // ""' /etc/sing-box/config.json 2>/dev/null || echo "")
         SBOX_OBFS=$(jq -r '.inbounds[0].obfs.password // ""' /etc/sing-box/config.json 2>/dev/null || echo "")
     else
         PORT_HY2="$INPUT_PORT"
     fi
 
-    # 3. 变量生成 (确保此时变量绝对非空)
     [ -z "$PORT_HY2" ] && PORT_HY2=$(shuf -i 1025-65535 -n 1)
-    # 使用 ${PSK:-} 语法绕过 set -u 的检测，并提供可靠兜底
     [ -z "${PSK:-}" ] && PSK=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 12 2>/dev/null || echo "pskRandom789")
     [ -z "${SBOX_OBFS:-}" ] && SBOX_OBFS=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 16 2>/dev/null || echo "GW8DG9p7uBAtPdNw")
 
-    # 4. 写入配置 (关键：在引用变量时使用引号包裹)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "error", "timestamp": true },
@@ -588,8 +581,8 @@ create_config() {
     "listen_port": ${PORT_HY2},
     "users": [ { "password": "${PSK}" } ],
     "ignore_client_bandwidth": false,
-    "up_mbps": ${HY2_BW},
-    "down_mbps": ${HY2_BW},
+    "up_mbps": ${HY2_BW-200},
+    "down_mbps": ${HY2_BW-200},
     "udp_timeout": "10s",
     "mtu": ${VAR_HY2_MTU:-1350},
     "udp_fragment": ${SBOX_UDP_FRAG:-true},
