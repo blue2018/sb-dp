@@ -628,10 +628,12 @@ setup_service() {
     if [ "$OS" = "alpine" ]; then
         # Alpine OpenRC
         local openrc_exports=$(printf "export %s\n" "${env_list[@]}" | sed 's/Environment=//g')
+        local mem_limit_kb=$(( $(echo "$SBOX_MEM_MAX" | tr -d 'M') * 1024 ))
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
 $openrc_exports
+rc_ulimit="-v $mem_limit_kb"
 command="/usr/bin/sing-box"
 command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
@@ -672,7 +674,7 @@ RestartSec=5s
 
 # 资源限制策略
 MemoryHigh=${SBOX_MEM_HIGH:-}
-MemoryMax=${SBOX_MEM_MAX:-58M}
+MemoryMax=${SBOX_MEM_MAX}
 LimitNOFILE=1000000
 
 [Install]
