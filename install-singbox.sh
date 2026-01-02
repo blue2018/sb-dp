@@ -550,30 +550,33 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    # 1. 初始化局部变量，并显式赋予空值
+    # 1. 优先级处理：优先捕获传入的参数（新端口）
+    local INPUT_PORT="${1:-}"
     local PORT_HY2 PSK SBOX_OBFS HY2_BW
-    PORT_HY2="${1:-}"
-    PSK=""
-    SBOX_OBFS=""
+    
     HY2_BW="${VAR_HY2_BW:-100}" 
 
     mkdir -p /etc/sing-box
 
-    # 2. 从旧配置读取 (增加兜底逻辑)
+    # 2. 从旧配置读取 (增加优先级判断)
     if [ -f /etc/sing-box/config.json ]; then
-        # 如果读取失败，确保变量不被置为 undefined
-        PORT_HY2=$(jq -r '.inbounds[0].listen_port // ""' /etc/sing-box/config.json 2>/dev/null || echo "")
+        if [ -z "$INPUT_PORT" ]; then
+            PORT_HY2=$(jq -r '.inbounds[0].listen_port // ""' /etc/sing-box/config.json 2>/dev/null || echo "")
+        else
+            PORT_HY2="$INPUT_PORT"
+        fi
         PSK=$(jq -r '.inbounds[0].users[0].password // ""' /etc/sing-box/config.json 2>/dev/null || echo "")
         SBOX_OBFS=$(jq -r '.inbounds[0].obfs.password // ""' /etc/sing-box/config.json 2>/dev/null || echo "")
+    else
+        PORT_HY2="$INPUT_PORT"
     fi
 
-    # 3. 变量生成 (确保此时变量至少是空字符串)
-    [ -z "$PORT_HY2" ] && PORT_HY2=$(shuf -i 10000-60000 -n 1)
-    [ -z "$PSK" ] && PSK=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 12 2>/dev/null || echo "psk$(date +%s)")
-    [ -z "$SBOX_OBFS" ] && SBOX_OBFS=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 16 2>/dev/null || echo "obfs$(date +%s)")
+    # 3. 变量生成 (仅在变量为空时生成，并移除带时间戳的兜底)
+    [ -z "$PORT_HY2" ] && PORT_HY2=$(shuf -i 1025-65535 -n 1)
+    [ -z "$PSK" ] && PSK=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 12 2>/dev/null || echo "pskRandom789")
+    [ -z "$SBOX_OBFS" ] && SBOX_OBFS=$(tr -dc 'a-zA-Z0-9' < /dev/urandom | head -c 16 2>/dev/null || echo "GW8DG9p7uBAtPdNw")
 
-    # 4. 写入配置 (关键改动：对所有变量使用 ${VAR:-} 语法)
-    # 这种语法即使在 set -u 下，如果变量未定义也会视为空值，不会报错
+    # 4. 写入配置
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "error", "timestamp": true },
@@ -581,11 +584,11 @@ create_config() {
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
-    "listen_port": ${PORT_HY2:-12369},
-    "users": [ { "password": "${PSK:-123456}" } ],
+    "listen_port": ${PORT_HY2},
+    "users": [ { "password": "${PSK}" } ],
     "ignore_client_bandwidth": false,
-    "up_mbps": ${HY2_BW:-100},
-    "down_mbps": ${HY2_BW:-100},
+    "up_mbps": ${HY2_BW},
+    "down_mbps": ${HY2_BW},
     "udp_timeout": "10s",
     "mtu": ${VAR_HY2_MTU:-1350},
     "udp_fragment": ${SBOX_UDP_FRAG:-true},
@@ -597,7 +600,7 @@ create_config() {
     },
     "obfs": {
       "type": "salamander",
-      "password": "${SBOX_OBFS:-GW8DG9p7uBAtPdNw}"
+      "password": "${SBOX_OBFS}"
     },
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
