@@ -550,7 +550,9 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local INPUT_PORT="${1:-}"; local PORT_HY2=""
+    local INPUT_PORT="${1:-}"; local PORT_HY2=""; local PSK=""
+    local SBOX_OBFS=""; local HY2_BW="${VAR_HY2_BW:-200}"
+    
     mkdir -p /etc/sing-box
 
     if [ -f /etc/sing-box/config.json ]; then
