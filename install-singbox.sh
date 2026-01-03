@@ -601,7 +601,7 @@ EOF
 # ==========================================
 # 服务配置 (核心优化：应用 Nice/IOSched/Env)
 # ==========================================
-setup_service() {
+setup_service() {  
     info "配置系统服务 (MEM限制: $SBOX_MEM_MAX | Nice: $VAR_SYSTEMD_NICE)..."
     
     # 动态判断 GODEBUG
@@ -611,16 +611,17 @@ setup_service() {
 
     # 准备运行时环境变量
     local env_list=(
-        "Environment=GOGC=${SBOX_GOGC:-80}"
-        "Environment=GOMEMLIMIT=$SBOX_GOLIMIT"
-        "Environment=GOTRACEBACK=none"  # 崩溃时不打印巨型堆栈
+        "Environment=GOGC=${SBOX_GOGC:-100}"
+        "Environment=GOMEMLIMIT=${SBOX_GOLIMIT:-100MiB}"
+        "Environment=GOTRACEBACK=none"
         "Environment=$go_debug_val"
     )
     
-    # 如果是极低内存机器且设置了单核优化
+    # 如果是极低内存机器且设置了单核优化 (GOMAXPROCS)
     [ -n "${SBOX_GOMAXPROCS:-}" ] && env_list+=("Environment=GOMAXPROCS=$SBOX_GOMAXPROCS")
 
     if [ "$OS" = "alpine" ]; then
+        # Alpine OpenRC 逻辑
         local openrc_exports=$(printf "export %s\n" "${env_list[@]}" | sed 's/Environment=//g')
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
@@ -664,9 +665,9 @@ ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
 Restart=on-failure
 RestartSec=5s
 
-# 资源限制策略
+# 资源限制策略 (正式注入 90/80 阶梯)
 MemoryHigh=${SBOX_MEM_HIGH:-}
-MemoryMax=${SBOX_MEM_MAX:-64M}
+MemoryMax=${SBOX_MEM_MAX:-}
 LimitNOFILE=1000000
 
 [Install]
