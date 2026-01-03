@@ -367,7 +367,7 @@ optimize_system() {
         SBOX_GOLIMIT="48MiB"; SBOX_GOGC="800"
         VAR_UDP_RMEM="2097152"; VAR_UDP_WMEM="2097152"
         VAR_SYSTEMD_NICE="-2"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="80"; SBOX_GOMAXPROCS="1"
+        VAR_HY2_BW="90"; SBOX_GOMAXPROCS="1"
         SBOX_OPTIMIZE_LEVEL="64M 生存版(LazyGC)"
         local swappiness_val=100; busy_poll_val=0
     fi
