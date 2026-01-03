@@ -427,6 +427,7 @@ net.core.netdev_budget_usecs = 8000
 net.core.busy_read = $busy_poll_val
 net.core.busy_poll = $busy_poll_val
 net.ipv4.tcp_limit_output_bytes = 262144
+net.ipv4.ip_no_pmtu_disc = 0
 
 # === UDP & 内存极限优化 ===
 net.core.rmem_max = $VAR_UDP_RMEM
