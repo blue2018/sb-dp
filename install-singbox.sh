@@ -124,10 +124,19 @@ install_dependencies() {
 
 #获取公网IP
 get_network_info() {
-    info "正在获取网络地址..."
-    # 关键：使用 || true 确保即便 curl 失败(如无IPv6) 脚本也不会崩溃
-    RAW_IP4=$(curl -s4 --max-time 5 https://api.ipify.org || curl -s4 --max-time 5 https://ifconfig.me || echo "")
-    RAW_IP6=$(curl -s6 --max-time 5 https://api6.ipify.org || curl -s6 --max-time 5 https://ifconfig.co || echo "")
+    info "获取公网地址..."
+    RAW_IP4=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -vE '^(127|10|172\.(1[6-9]|2[0-9]|3[0-1])|192\.168)\.' | head -n1 || echo "")
+    RAW_IP6=$(ip -6 addr show | grep -oP '(?<=inet6\s)[\da-fA-F:]+' | grep -vE '^(::1|fe80|fd)' | head -n1 || echo "")
+
+    local t=/tmp/sb_ip; { 
+        [ -z "$RAW_IP4" ] && (curl -s4m3 api.ipify.org || curl -s4m3 ifconfig.me) > "${t}4"
+        [ -z "$RAW_IP6" ] && (curl -s6m3 api6.ipify.org || curl -s6m3 ifconfig.co) > "${t}6"
+    } & wait
+    
+    [ -z "$RAW_IP4" ] && RAW_IP4=$(cat "${t}4" 2>/dev/null || echo "")
+    [ -z "$RAW_IP6" ] && RAW_IP6=$(cat "${t}6" 2>/dev/null || echo "")
+    rm -f ${t}4 ${t}6
+    
     [ -n "$RAW_IP4" ] && echo -e "IPv4 地址: \033[32m$RAW_IP4\033[0m" || echo -e "IPv4 地址: \033[33m未检测到\033[0m"
     [ -n "$RAW_IP6" ] && echo -e "IPv6 地址: \033[32m$RAW_IP6\033[0m" || echo -e "IPv6 地址: \033[33m未检测到\033[0m"
 }
