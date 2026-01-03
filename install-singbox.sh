@@ -235,54 +235,35 @@ probe_memory_total() {
     echo "$mem_total"
 }
 
-# InitCWND 专项优化模块 (全能兼容版：含替换、变更、强制注入)
+# InitCWND 专项优化模块 (取黄金分割点 15 ，比默认 10 强 50%，比 20 更隐蔽)
 apply_initcwnd_optimization() {
     local is_silent="${1:-false}"
-    if ! command -v ip >/dev/null; then return 0; fi
+    command -v ip >/dev/null || return 0
 
-    # 1. 探测真正的出站路由 (比直接查找 default 更精准)
-    # 模拟探测 1.1.1.1 的路径，获取当前正在使用的网关和网卡
-    local route_info=$(ip route get 1.1.1.1 2>/dev/null || ip route show default | head -n1)
-    
-    if [ -z "$route_info" ]; then
-        [[ "$is_silent" == "false" ]] && warn "未发现可用路由，跳过 CWND 优化"
-        return 0
-    fi
+    local route_info
+    route_info=$(ip route get 1.1.1.1 2>/dev/null | head -n1 || ip route show default | head -n1)
+    [ -z "$route_info" ] && { [[ "$is_silent" == "false" ]] && warn "未发现可用路由"; return 0; }
 
-    # 2. 提取参数
-    local gw=$(echo "$route_info" | awk '/via/ {print $3}')
-    local dev=$(echo "$route_info" | awk '/dev/ {print $5}')
-    local mtu=$(echo "$route_info" | awk '/mtu/ {print $NF}') # 获取末尾的 MTU
+    local gw=$(echo "$route_info" | grep -oP 'via \K[^ ]+')
+    local dev=$(echo "$route_info" | grep -oP 'dev \K[^ ]+')
+    local mtu=$(echo "$route_info" | grep -oP 'mtu \K[0-9]+' || echo "1500")
     
-    [ -z "$mtu" ] || [[ ! "$mtu" =~ ^[0-9]+$ ]] && mtu=1500
-    
-    # 计算 advmss (MSS = MTU - TCP/IP Header 40字节)
     local advmss=$((mtu - 40))
-    # 取黄金分割点 15 (比默认 10 强 50%，比 20 更隐蔽)
-    local route_cmd="initcwnd 15 initrwnd 15 advmss $advmss"
-    
-    # 3. 尝试多重注入方案 (移除 proto 等标识的干扰)
-    if [ -n "$gw" ] && [ -n "$dev" ]; then
-        # 方案 A: 标准 KVM/物理机
-        if ip route replace default via "$gw" dev "$dev" $route_cmd 2>/dev/null; then
-            [[ "$is_silent" == "false" ]] && succ "InitCWND 设置为 15 (Standard)"
-            return 0
-        fi
-    fi
+    local opts="initcwnd 15 initrwnd 15 advmss $advmss"
 
-    # 方案 B: 针对 OpenVZ/LXC (无网关或点对点)
-    if [ -n "$dev" ]; then
-        if ip route replace default dev "$dev" $route_cmd 2>/dev/null; then
-            [[ "$is_silent" == "false" ]] && succ "InitCWND 设置为 15 (Device-only)"
-            return 0
-        fi
-    fi
-
-    # 方案 C: 兜底通用变更
-    if ip route change default $route_cmd 2>/dev/null; then
-         [[ "$is_silent" == "false" ]] && succ "InitCWND 设置为 15 (Change-mode)"
-         return 0
-    fi
+    {
+        # 方案 A: 带网关的标准替换 (KVM/物理机)
+        [ -n "$gw" ] && [ -n "$dev" ] && ip route replace default via "$gw" dev "$dev" $opts 2>/dev/null
+    } || {
+        # 方案 B: 仅网卡的替换 (OpenVZ/LXC/点对点)
+        [ -n "$dev" ] && ip route replace default dev "$dev" $opts 2>/dev/null
+    } || {
+        # 方案 C: 兜底变更 (针对特定虚拟化环境)
+        ip route change default $opts 2>/dev/null
+    } && {
+        [[ "$is_silent" == "false" ]] && succ "InitCWND 优化成功 (15/Advmss $advmss)"
+        return 0
+    }
 
     [[ "$is_silent" == "false" ]] && warn "InitCWND 优化受限 (虚拟化层锁定)"
     return 0
