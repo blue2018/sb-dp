@@ -692,20 +692,36 @@ while true; do
     echo "4. 更新内核"
     echo "=========================="
     read -r -p "请选择 [0-6]: " opt
+    opt=$(echo "$opt" | xargs echo -n 2>/dev/null || echo "$opt")
+    if [[ -z "$opt" ]] || [[ ! "$opt" =~ ^[0-6]$ ]]; then
+        echo -e "\033[1;31m输入有误 [$opt]，请重新输入\033[0m"
+        sleep 1.5
+        continue
+    fi
     case "$opt" in
-        1) source "$CORE" --show-only; read -r -p $'\n按回车...' ;;
-        2) vi /etc/sing-box/config.json; service_ctrl restart ;;
-        3) source "$CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车...' ;;
-        4) source "$CORE" --update-kernel; read -r -p $'\n按回车...' ;;
-        5) service_ctrl restart && echo "已重启"; read -r -p $'\n按回车...' ;;
-        6) service_ctrl stop; rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb "$CORE"; exit 0 ;;
+        1) source "$CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
+        2) f="/etc/sing-box/config.json"; old=$(md5sum $f 2>/dev/null)
+           vi $f; [ "$old" != "$(md5sum $f 2>/dev/null)" ] && \
+           { service_ctrl restart; echo -e "\n\033[1;32m[OK]\033[0m 配置变更，已重启服务"; } || \
+           echo -e "\n\033[1;33m[INFO]\033[0m 配置未作变更"; read -r -p $'\n按回车键返回菜单...' ;;
+        3) source "$CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
+        4) source "$CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
+        5) service_ctrl restart && info "服务已重启"; read -r -p $'\n按回车键返回菜单...' ;;
+        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+           if [[ "${cf,,}" == "y" ]]; then
+               service_ctrl stop; [ -f /etc/init.d/sing-box ] && rc-update del sing-box
+               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/local/bin/SB /etc/systemd/system/sing-box.service /etc/init.d/sing-box "$CORE"
+               info "卸载完成"; exit 0
+           fi
+           info "卸载操作已取消" ;;
         0) exit 0 ;;
     esac
 done
 EOF
     
     chmod +x "$SB_PATH"
-    info "脚本部署完毕，输入 'sb' 管理"
+    ln -sf "$SB_PATH" "/usr/local/bin/SB" 2>/dev/null || true
+    info "脚本部署完毕，输入 'sb' 或 'SB' 管理"
 }
 
 # ==========================================
@@ -715,6 +731,7 @@ detect_os
 [ "$(id -u)" != "0" ] && err "请使用 root 运行" && exit 1
 install_dependencies
 get_network_info
+echo -e "-----------------------------------------------"
 USER_PORT=$(prompt_for_port)
 optimize_system
 install_singbox "install"
@@ -723,5 +740,8 @@ create_config "$USER_PORT"
 setup_service
 create_sb_tool
 get_env_data
+echo -e "\n\033[1;34m==========================================\033[0m"
 display_system_status
+echo -e "\033[1;34m------------------------------------------\033[0m"
 display_links
+info "脚本部署完毕，输入 'sb' 管理"
