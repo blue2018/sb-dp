@@ -421,19 +421,11 @@ install_singbox() {
 
     if [ -f "$TMP_D/sb.tar.gz" ] && [ $(stat -c%s "$TMP_D/sb.tar.gz") -gt 1000000 ]; then
         tar -xf "$TMP_D/sb.tar.gz" -C "$TMP_D"
-        pkill -f sing-box >/dev/null || true
-        
-        local BIN_FOUND=$(find "$TMP_D" -type f -name "sing-box" | head -n1)
-        
-        if [ -n "$BIN_FOUND" ]; then
-            install -m 755 "$BIN_FOUND" /usr/bin/sing-box
-            rm -rf "$TMP_D"
-            succ "内核安装成功: v$(/usr/bin/sing-box version | head -n1 | awk '{print $3}')"
-            return 0
-        else
-            err "解压后未找到二进制文件，可能架构不匹配"
-            exit 1
-        fi
+        pgrep sing-box >/dev/null && (systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true)
+        install -m 755 "$TMP_D"/sing-box-*/sing-box /usr/bin/sing-box
+        rm -rf "$TMP_D"
+        succ "内核安装成功: v$(/usr/bin/sing-box version | head -n1 | awk '{print $3}')"
+        return 0
     else
         rm -rf "$TMP_D"
         if [ "$LOCAL_VER" != "未安装" ]; then
