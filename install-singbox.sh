@@ -9,7 +9,7 @@ SBOX_ARCH="";          OS_DISPLAY="";         SBOX_CORE="/etc/sing-box/core_scri
 SBOX_GOLIMIT="52MiB";  SBOX_GOGC="80";        SBOX_MEM_MAX="55M"
 SBOX_MEM_HIGH="";      SBOX_GOMAXPROCS="";    SBOX_OPTIMIZE_LEVEL="未检测"
 VAR_UDP_RMEM="";       VAR_UDP_WMEM="";       VAR_SYSTEMD_NICE=""
-VAR_SYSTEMD_IOSCHED="";VAR_HY2_BW="200";       RAW_SALA=""
+VAR_SYSTEMD_IOSCHED="";VAR_HY2_BW="200";       RAW_SALA="";       VAR_DEF_MEM=""
 
 # TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
@@ -251,25 +251,28 @@ optimize_system() {
         SBOX_GOLIMIT="$((mem_total * 85 / 100))MiB"; SBOX_GOGC="120"
         VAR_UDP_RMEM="33554432"; VAR_UDP_WMEM="33554432"
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"
-        VAR_HY2_BW="500"; SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
+        VAR_HY2_BW="500"; VAR_DEF_MEM="327680"
+        SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
         local swappiness_val=10; busy_poll_val=50
     elif [ "$mem_total" -ge 200 ]; then
         SBOX_GOLIMIT="$((mem_total * 82 / 100))MiB"; SBOX_GOGC="100"
         VAR_UDP_RMEM="16777216"; VAR_UDP_WMEM="16777216"
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="300"; SBOX_OPTIMIZE_LEVEL="256M 增强版"
+        VAR_HY2_BW="300"; VAR_DEF_MEM="229376"
+        SBOX_OPTIMIZE_LEVEL="256M 增强版"
         local swappiness_val=10; busy_poll_val=20
     elif [ "$mem_total" -ge 100 ]; then
         SBOX_GOLIMIT="$((mem_total * 78 / 100))MiB"; SBOX_GOGC="800"
         VAR_UDP_RMEM="8388608"; VAR_UDP_WMEM="8388608"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="200"; SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
+        VAR_HY2_BW="200"; VAR_DEF_MEM="131072"
+        SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
         local swappiness_val=60; busy_poll_val=0
     else
         SBOX_GOLIMIT="$((mem_total * 75 / 100))MiB"; SBOX_GOGC="800"
         VAR_UDP_RMEM="2097152"; VAR_UDP_WMEM="2097152"
         VAR_SYSTEMD_NICE="-2"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="90"; SBOX_GOMAXPROCS="1"
+        VAR_HY2_BW="90"; SBOX_GOMAXPROCS="1";VAR_DEF_MEM="98304"
         SBOX_OPTIMIZE_LEVEL="64M 生存版"
         local swappiness_val=100; busy_poll_val=0
     fi
@@ -327,8 +330,8 @@ net.core.netdev_budget_usecs = 8000
 # === Socket 读写优化 ===
 net.core.busy_read = $busy_poll_val
 net.core.busy_poll = $busy_poll_val
-net.core.rmem_default = 262144
-net.core.wmem_default = 262144
+net.core.rmem_default = $VAR_DEF_MEM
+net.core.wmem_default = $VAR_DEF_MEM
 net.core.rmem_max = $VAR_UDP_RMEM
 net.core.wmem_max = $VAR_UDP_WMEM
 net.core.optmem_max = 1048576
@@ -643,6 +646,7 @@ SBOX_GOMAXPROCS='${SBOX_GOMAXPROCS:-}'
 SBOX_OPTIMIZE_LEVEL='$SBOX_OPTIMIZE_LEVEL'
 VAR_SYSTEMD_NICE='$VAR_SYSTEMD_NICE'
 VAR_SYSTEMD_IOSCHED='$VAR_SYSTEMD_IOSCHED'
+VAR_DEF_MEM='${VAR_DEF_MEM:-212992}'
 VAR_UDP_RMEM='${VAR_UDP_RMEM:-4194304}'
 VAR_UDP_WMEM='${VAR_UDP_WMEM:-4194304}'
 TLS_DOMAIN_POOL=($(printf "'%s' " "${TLS_DOMAIN_POOL[@]}"))
