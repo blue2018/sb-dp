@@ -512,46 +512,30 @@ EOF
 setup_service() {  
     info "配置系统服务 (MEM限制: $SBOX_MEM_MAX | Nice: $VAR_SYSTEMD_NICE)..."
     
-    local go_debug="GODEBUG=memprofilerate=0,madvdontneed=1"
+    local go_debug_val="GODEBUG=memprofilerate=0,madvdontneed=1"
     local env_list=(
-        "GOGC=${SBOX_GOGC:-100}"
-        "GOMEMLIMIT=${SBOX_GOLIMIT:-100MiB}"
-        "GOTRACEBACK=none"
-        "$go_debug"
+        "Environment=GOGC=${SBOX_GOGC:-100}"
+        "Environment=GOMEMLIMIT=${SBOX_GOLIMIT:-100MiB}"
+        "Environment=GOTRACEBACK=none"
+        "Environment=$go_debug_val"
     )
-    [ -n "${SBOX_GOMAXPROCS:-}" ] && env_list+=("GOMAXPROCS=$SBOX_GOMAXPROCS")
+    [ -n "${SBOX_GOMAXPROCS:-}" ] && env_list+=("Environment=GOMAXPROCS=$SBOX_GOMAXPROCS")
 
     if [ "$OS" = "alpine" ]; then
-        local exports=$(printf "    export %s\n" "${env_list[@]}")
+        local openrc_exports=$(printf "export %s\n" "${env_list[@]}" | sed 's/Environment=//g')
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
-description="Sing-box Optimized Service"
-
-depend() {
-    after net
-    provide vpn
-}
-
+name="sing-box"
+$openrc_exports
 command="/usr/bin/sing-box"
 command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
-pidfile="/run/sing-box.pid"
-
-start_stop_daemon_args="--nicelevel ${VAR_SYSTEMD_NICE:-0} --quiet"
-
-start_pre() {
-$exports
-    if [ -f "$SBOX_CORE" ]; then
-        /bin/bash "$SBOX_CORE" --apply-cwnd >/dev/null 2>&1 || true
-    fi
-}
+pidfile="/run/\${RC_SVCNAME}.pid"
 EOF
         chmod +x /etc/init.d/sing-box
-        rc-update del sing-box default >/dev/null 2>&1
-        rc-update add sing-box default >/dev/null 2>&1
-        rc-service sing-box restart
+        rc-update add sing-box default && rc-service sing-box restart
     else
-        local systemd_envs=$(printf "Environment=%s\n" "${env_list[@]}")
+        local systemd_envs=$(printf "%s\n" "${env_list[@]}")
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service (Optimized)
@@ -563,7 +547,7 @@ Type=simple
 User=root
 WorkingDirectory=/etc/sing-box
 $systemd_envs
-ExecStartPre=/bin/bash -c "source $SBOX_CORE --apply-cwnd"
+ExecStartPre=/usr/local/bin/sb --apply-cwnd
 Nice=${VAR_SYSTEMD_NICE:-0}
 IOSchedulingClass=${VAR_SYSTEMD_IOSCHED:-best-effort}
 IOSchedulingPriority=0
