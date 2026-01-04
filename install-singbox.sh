@@ -509,18 +509,16 @@ EOF
 # ==========================================
 # 服务配置
 # ==========================================
-setup_service() {  
+setup_service() {  
     info "配置系统服务 (MEM限制: $SBOX_MEM_MAX | Nice: $VAR_SYSTEMD_NICE)..."
     
     local go_debug_val="GODEBUG=memprofilerate=0,madvdontneed=1"
-
     local env_list=(
         "Environment=GOGC=${SBOX_GOGC:-100}"
         "Environment=GOMEMLIMIT=${SBOX_GOLIMIT:-100MiB}"
         "Environment=GOTRACEBACK=none"
         "Environment=$go_debug_val"
     )
-    
     [ -n "${SBOX_GOMAXPROCS:-}" ] && env_list+=("Environment=GOMAXPROCS=$SBOX_GOMAXPROCS")
 
     if [ "$OS" = "alpine" ]; then
