@@ -234,13 +234,15 @@ optimize_system() {
     local busy_poll_val=0
     local quic_extra_msg=""
 
-    if [ "$OS" != "alpine" ] && [ "$mem_total" -le 512 ]; then
-        local swap_total=$(free -m | awk '/Swap:/ {print $2}')
-        if [ "$swap_total" -eq 0 ]; then
-            info "检测到低内存环境且无 Swap，正在尝试创建 512M 交换文件..."
-            fallocate -l 512M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=512 2>/dev/null
-            chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile >/dev/null 2>&1
-            [ $? -eq 0 ] && (grep -q "/swapfile" /etc/fstab || echo "/swapfile swap swap defaults 0 0" >> /etc/fstab)
+    if [[ "$OS" != "alpine" && "$mem_total" -le 600 ]]; then
+        local swap_total=$(free -m 2>/dev/null | awk '/Swap:/ {print $2}' || echo "0")
+        if [ "${swap_total:-0}" -eq 0 ] && [ ! -d /proc/vz ]; then
+            info "检测到低内存环境，正在尝试创建 512M 交换文件..."
+            # 简洁高效：创建、权限设置、格式化、挂载 一气呵成，失败则自动清理
+            (fallocate -l 512M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=512 status=none) && \
+            chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile >/dev/null 2>&1 && \
+            { grep -q "/swapfile" /etc/fstab || echo "/swapfile swap swap defaults 0 0" >> /etc/fstab; succ "Swap 已激活"; } || \
+            { rm -f /swapfile; warn "Swap 创建跳过 (受虚拟化技术限制)"; }
         fi
     fi
 
@@ -312,43 +314,43 @@ optimize_system() {
         warn "内核不支持 BBR，已尝试优化 Cubic 吞吐"
     fi
 
-    # 5. 写入 Sysctl (深度 BBR 锐化参数)
+    # 5. 写入 Sysctl
     cat > /etc/sysctl.conf <<SYSCTL
-# === BBR 锐化与拥塞控制 ===
-net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = $tcp_cca
-net.ipv4.tcp_slow_start_after_idle = 0
-net.ipv4.tcp_notsent_lowat = 16384
-net.ipv4.tcp_fastopen = 3
-
-# === 网络设备层优化 (关键) ===
-net.core.netdev_max_backlog = 65536
-net.core.dev_weight = 64
-net.core.netdev_budget = 600
-net.core.netdev_budget_usecs = 8000
-
-# === Socket 读写优化 ===
-net.core.busy_read = $busy_poll_val
-net.core.busy_poll = $busy_poll_val
-net.core.rmem_default = $VAR_DEF_MEM
-net.core.wmem_default = $VAR_DEF_MEM
-net.core.rmem_max = $VAR_UDP_RMEM
-net.core.wmem_max = $VAR_UDP_WMEM
-net.core.optmem_max = 1048576
-net.ipv4.tcp_limit_output_bytes = 262144
-net.ipv4.ip_no_pmtu_disc = 0
-
-# === TCP/UDP 协议栈 ===
-net.ipv4.tcp_rmem = 4096 87380 $VAR_UDP_RMEM
-net.ipv4.tcp_wmem = 4096 65536 $VAR_UDP_WMEM
-net.ipv4.udp_mem = $udp_mem_scale
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
-
-# === 路由转发 ===
-vm.swappiness = $swappiness_val
+# === 1. 基础转发与内存管理 ===
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
+vm.swappiness = $swappiness_val          # 交换分区权重 (当前档位: $swappiness_val)
+
+# === 2. 网络设备层优化 (网卡与 CPU 交互层) ===
+net.core.netdev_max_backlog = 65536      # 接收队列包缓冲区上限
+net.core.dev_weight = 64                 # CPU 单次处理收包权重
+net.core.netdev_budget = 600             # 软中断收包总预算
+net.core.netdev_budget_usecs = 8000      # 收包处理耗时上限 (微秒)
+net.core.busy_read = $busy_poll_val      # 繁忙轮询 (降低数据包在内核态的等待时间)
+net.core.busy_poll = $busy_poll_val
+
+# === 3. 核心 Socket 缓冲区 (全局缓冲区限制) ===
+net.core.rmem_default = $VAR_DEF_MEM     # 默认读缓存 (字节: 约 $((VAR_DEF_MEM / 1024)) KB)
+net.core.wmem_default = $VAR_DEF_MEM     # 默认写缓存 (字节: 约 $((VAR_DEF_MEM / 1024)) KB)
+net.core.rmem_max = $VAR_UDP_RMEM        # 最大读缓存 (档位上限值)
+net.core.wmem_max = $VAR_UDP_WMEM        # 最大写缓存 (档位上限值)
+net.core.optmem_max = 1048576            # 每个 Socket 辅助内存上限 (1MB)
+
+# === 4. TCP 协议栈深度调优 (BBR 锐化相关) ===
+net.core.default_qdisc = fq              # BBR 必须配合 FQ 队列调度
+net.ipv4.tcp_congestion_control = $tcp_cca # 拥塞控制算法 (当前识别: $tcp_cca)
+net.ipv4.tcp_fastopen = 3                # 开启 TCP Fast Open (减少三次握手消耗)
+net.ipv4.tcp_slow_start_after_idle = 0   # 闲置后不进入慢启动 (保持高吞吐)
+net.ipv4.tcp_notsent_lowat = 16384       # 限制待发送数据长度，降低缓冲膨胀延迟
+net.ipv4.tcp_limit_output_bytes = 262144 # 限制单个 TCP 连接占用发送队列的大小
+net.ipv4.tcp_rmem = 4096 87380 $VAR_UDP_RMEM
+net.ipv4.tcp_wmem = 4096 65536 $VAR_UDP_WMEM
+net.ipv4.ip_no_pmtu_disc = 0             # 启用 MTU 探测 (自动寻找最优包大小，防止 Hy2 丢包)
+
+# === 5. UDP 协议栈优化 (Hysteria2 传输核心) ===
+net.ipv4.udp_mem = $udp_mem_scale        # 全局 UDP 内存页配额 (根据 RTT 动态计算)
+net.ipv4.udp_rmem_min = 16384            # UDP Socket 最小读缓存保护
+net.ipv4.udp_wmem_min = 16384            # UDP Socket 最小写缓存保护
 SYSCTL
 
     sysctl -p >/dev/null 2>&1 || true
