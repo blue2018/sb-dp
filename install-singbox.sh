@@ -212,32 +212,17 @@ apply_initcwnd_optimization() {
 }
 
 # sing-box 用户态运行时调度人格（Go/QUIC/缓冲区自适应）
-apply_userspace_adaptive_profile() {
-    local lvl="$SBOX_OPTIMIZE_LEVEL" mem="$mem_total" quic_wnd quic_buf
-
-    # === 1. GOMAXPROCS / GOGC / GOMEMLIMIT ===
+apply_userspace_adaptive_profile(){ 
+    local lvl="$SBOX_OPTIMIZE_LEVEL" mem="$mem_total" quic_wnd quic_buf; 
     case "$lvl" in
-        *旗舰*) GOMAXPROCS=${SBOX_GOMAXPROCS:-$(nproc)}; GOGC=120 ;;
-        *增强*) GOMAXPROCS=${SBOX_GOMAXPROCS:-$(nproc)}; GOGC=100 ;;
-        *紧凑*) GOMAXPROCS=${SBOX_GOMAXPROCS:-$(nproc)}; GOGC=80  ;;
-        *生存*) GOMAXPROCS=1;                             GOGC=80  ;;
+        *旗舰*) GOMAXPROCS=${SBOX_GOMAXPROCS:-$(nproc)}; GOGC=120; GOMEMLIMIT="$SBOX_GOLIMIT"; quic_wnd=16; quic_buf=4194304;;
+        *增强*) GOMAXPROCS=${SBOX_GOMAXPROCS:-$(nproc)}; GOGC=100; GOMEMLIMIT="$SBOX_GOLIMIT"; quic_wnd=12; quic_buf=2097152;;
+        *紧凑*) GOMAXPROCS=${SBOX_GOMAXPROCS:-$(nproc)}; GOGC=80;  GOMEMLIMIT="$SBOX_GOLIMIT"; quic_wnd=8;  quic_buf=1048576;;
+        *生存*) GOMAXPROCS=1;                       GOGC=80;  GOMEMLIMIT="$SBOX_GOLIMIT"; quic_wnd=4;  quic_buf=524288;;
     esac
-    export GOMAXPROCS GOGC GOMEMLIMIT="$SBOX_GOLIMIT"
-
-    # === 2. QUIC / UDP 缓冲 ===
-    case "$lvl" in
-        *旗舰*) quic_wnd=16; quic_buf=4194304 ;;
-        *增强*) quic_wnd=12; quic_buf=2097152 ;;
-        *紧凑*) quic_wnd=8;  quic_buf=1048576 ;;
-        *生存*) quic_wnd=4;  quic_buf=524288 ;;
-    esac
-    export SINGBOX_QUIC_MAX_CONN_WINDOW="$quic_wnd"
-    export SINGBOX_UDP_RECVBUF="$quic_buf"
-    export SINGBOX_UDP_SENDBUF="$quic_buf"
-
-    # === 3. I/O / CPU 亲和性（非生存档启用） ===
-    command -v taskset >/dev/null && [[ "$lvl" != *生存* ]] && taskset -pc 0-$(( $(nproc) - 1 )) $$ >/dev/null 2>&1 || true
-
+    export GOMAXPROCS GOGC GOMEMLIMIT
+    export SINGBOX_QUIC_MAX_CONN_WINDOW="$quic_wnd" SINGBOX_UDP_RECVBUF="$quic_buf" SINGBOX_UDP_SENDBUF="$quic_buf"
+    ([[ "$(nproc)" -le 1 || "$lvl" == *生存* ]] || (command -v taskset >/dev/null && taskset -pc 0-$(($(nproc)-1)) $$ >/dev/null 2>&1)) || true
     info "Userspace Profile → $lvl | GOMAXPROCS=$GOMAXPROCS | QUIC_WND=$quic_wnd"
 }
 
