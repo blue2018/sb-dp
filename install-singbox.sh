@@ -762,10 +762,15 @@ RAW_IP4='${RAW_IP4:-}'
 RAW_IP6='${RAW_IP6:-}'
 EOF
 
-    # 将需要导出的函数以 declare -f 追加到核心脚本（只追加存在的函数）
+    # 需要导出的函数追加到核心脚本
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
-               get_env_data display_links display_system_status detect_os copy_to_clipboard \
-               create_config setup_service install_singbox info err warn succ optimize_system)
+get_env_data display_links display_system_status detect_os copy_to_clipboard \
+create_config setup_service install_singbox info err warn succ optimize_system \
+# 新增必加函数，影响性能优化
+apply_userspace_adaptive_profile apply_nic_core_boost \
+# 可选新增函数（证书/备份/环境管理）
+check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
+
     for f in "${funcs[@]}"; do
         if declare -f "$f" >/dev/null 2>&1; then
             declare -f "$f" >> "$CORE_TMP"
@@ -773,7 +778,7 @@ EOF
         fi
     done
 
-    # 追加 main dispatch（保留原来逻辑）
+    # 追加 main dispatch（保留原逻辑）
     cat >> "$CORE_TMP" <<'EOF'
 detect_os
 if [[ "${1:-}" == "--detect-only" ]]; then
@@ -804,18 +809,15 @@ EOF
     mv "$CORE_TMP" "$SBOX_CORE"
     chmod 700 "$SBOX_CORE"
 
-    # 生成交互管理脚本 /usr/local/bin/sb（保持原交互逻辑）
+    # 生成交互管理脚本 /usr/local/bin/sb
     local SB_PATH="/usr/local/bin/sb"
     cat > "$SB_PATH" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 CORE="/etc/sing-box/core_script.sh"
 if [ ! -f "$CORE" ]; then echo "核心文件丢失"; exit 1; fi
-
 [[ $# -gt 0 ]] && { /bin/bash "$CORE" "$@"; exit 0; }
-
 source "$CORE" --detect-only
-
 service_ctrl() {
     if [ -f /etc/init.d/sing-box ]; then rc-service sing-box $1
     else systemctl $1 sing-box; fi
