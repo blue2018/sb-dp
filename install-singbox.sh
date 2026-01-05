@@ -122,7 +122,7 @@ get_network_info() {
     fi
 
     if [ -z "$raw_v4" ]; then
-        raw_v4=$(curl -s4m3 api.ipify.org || curl -s4m3 ifconfig.me || curl -s4m3 --header "Host: api.ipify.org" 1.1.1.1/cdn-cgi/trace | grep -oE "ip=[0-9.]+" | cut -d= -f2 || echo "")
+        raw_v4=$(curl -s4m3 api.ipify.org || curl -s4m3 ifconfig.me || curl -s4m3 --header "Host: api.ipify.org" 1.1.1.1/cdn-cgi/trace | grep -oE "ip=[0-9.]+" | cut -d= -f2 || echo "")  
     fi
 
     if [ -z "$raw_v6" ]; then
