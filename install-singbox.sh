@@ -227,8 +227,9 @@ apply_userspace_adaptive_profile(){
 }
 
 # NIC/softirq 网卡入口层调度加速（RPS/XPS/批处理密度）
+# NIC/softirq 网卡入口层调度加速（RPS/XPS/批处理密度）
 apply_nic_core_boost() {
-    [ "$mem_total" -lt 80 ] && return 0  # <80MB完全关闭此功能
+    [ "$mem_total" -lt 80 ] && return 0  # <80MB完全关闭
 
     local IFACE CPU_NUM CPU_MASK
     IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}') || return 0
@@ -238,7 +239,7 @@ apply_nic_core_boost() {
 
     # softirq 批处理密度
     case 1 in
-        $(($mem_total>=512))) sysctl -w net.core.netdev_budget=1500 net.core.netdev_budget_usecs=12000 >/dev/null 2>&1 ;; 
+        $(($mem_total>=512))) sysctl -w net.core.netdev_budget=1500 net.core.netdev_budget_usecs=11000 >/dev/null 2>&1 ;; 
         $(($mem_total>=256))) sysctl -w net.core.netdev_budget=1100 net.core.netdev_budget_usecs=9000 >/dev/null 2>&1 ;; 
         $(($mem_total>=128))) sysctl -w net.core.netdev_budget=820 net.core.netdev_budget_usecs=7000 >/dev/null 2>&1 ;; 
         *) sysctl -w net.core.netdev_budget=420 net.core.netdev_budget_usecs=3800 >/dev/null 2>&1 ;;
