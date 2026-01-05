@@ -236,24 +236,25 @@ apply_userspace_adaptive_profile(){
 # NIC/softirq 网卡入口层调度加速（RPS/XPS/批处理密度）
 apply_nic_core_boost() {
     local mem=$(probe_memory_total)
-    [ "$mem" -lt 80 ] && return 0
     local IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}') || return 0
     local CPU_N=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || nproc)
-    local MASK=$(printf '%x' $(( (1<<CPU_N)-1 )))
-    
-    info "NIC Boost → $IFACE (mem:${mem}M, cpu:${CPU_N})"
-    # 动态调整网卡预算：512M->1500, 256M->1100, 128M->820, else->420
-    local bgt=420; local usc=3800
-    [ "$mem" -ge 512 ] && bgt=1500 && usc=11000 || { [ "$mem" -ge 256 ] && bgt=1100 && usc=9000; } || { [ "$mem" -ge 128 ] && bgt=820 && usc=7000; }
+
+    # --- 1. 协议栈补偿优化 (无论什么虚拟化架构都生效) ---
+    local bgt=600 usc=4000
+    [ "$mem" -ge 256 ] && bgt=1000 && usc=8000
     sysctl -w net.core.netdev_budget=$bgt net.core.netdev_budget_usecs=$usc >/dev/null 2>&1 || true
 
-    # 多核亲和性绑定：仅在真实多核且内存充足时执行
-    if [ "$mem" -ge 128 ] && [ "$CPU_N" -ge 2 ] && [ -d "/sys/class/net/$IFACE/queues" ]; then
+    # --- 2. 硬件亲和性 (仅在真正具备多核加速条件时尝试) ---
+    if [ "$CPU_N" -ge 2 ] && [ -d "/sys/class/net/$IFACE/queues" ]; then
+        local MASK=$(printf '%x' $(( (1<<CPU_N)-1 )))
         for q in /sys/class/net/"$IFACE"/queues/{rx-*,tx-*}/{rps_cpus,xps_cpus}; do
             [ -e "$q" ] && timeout 0.5s bash -c "echo '$MASK' > '$q'" 2>/dev/null || true
         done
+        info "NIC Boost → 已应用多核队列关联"
     else
-        info "环境受限，跳过队列绑定"
+        # 针对单核小鸡，我们通过增大接收队列长度来“变相优化”
+        sysctl -w net.core.netdev_max_backlog=2000 >/dev/null 2>&1 || true
+        info "NIC Boost → 单核环境，已应用 Backlog 缓冲优化"
     fi
 }
 
