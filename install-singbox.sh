@@ -129,8 +129,8 @@ get_network_info() {
         raw_v6=$(curl -s6m3 api6.ipify.org || curl -s6m3 ifconfig.co || echo "")
     fi
 
-    RAW_IP4=$(echo "$raw_v4" | tr -d '[:space:]')
-    RAW_IP6=$(echo "$raw_v6" | tr -d '[:space:]')
+    RAW_IP4=$(echo "$raw_v4" | grep -oE '[0-4]{0,1}[0-9]{1,2}(\.[0-4]{0,1}[0-9]{1,2}){3}' | head -n1)
+    RAW_IP6=$(echo "$raw_v6" | grep -oE '[a-fA-F0-9:]+' | head -n1)
     [ -n "${RAW_IP4:-}" ] && echo -e "IPv4 地址: \033[32m$RAW_IP4\033[0m" || echo -e "IPv4 地址: \033[33m未检测到\033[0m"
     [ -n "${RAW_IP6:-}" ] && echo -e "IPv6 地址: \033[32m$RAW_IP6\033[0m" || echo -e "IPv6 地址: \033[33m未检测到\033[0m"
 }
