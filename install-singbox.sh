@@ -112,35 +112,30 @@ get_network_info() {
     info "获取网络信息…"
     local v4_raw="" v6_raw="" v4_ok="\033[31m✗\033[0m" v6_ok="\033[31m✗\033[0m"
 
-    # 获取 IPv4：本地提取 (awk+case) + API 兜底
+    # IPv4 获取：本地提取 -> API 1 -> API 2
     local all_v4=$(ip -4 addr show 2>/dev/null | awk '$1 == "inet" {print $2}')
     for addr_mask in $all_v4; do
         local addr="${addr_mask%/*}"
         case "$addr" in 127.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|192.168.*|"") ;; *) v4_raw="$addr"; break ;; esac
     done
-    [ -z "$v4_raw" ] && v4_raw=$(curl -4s --max-time 3 api.ipify.org 2>/dev/null)
+    [ -z "$v4_raw" ] && v4_raw=$(curl -4s --max-time 3 api.ipify.org 2>/dev/null || curl -4s --max-time 3 ifconfig.me 2>/dev/null)
 
-    # 获取 IPv6：本地提取 + API 兜底
+    # IPv6 获取：本地提取 -> API 1 -> API 2
     local all_v6=$(ip -6 addr show 2>/dev/null | awk '$1 == "inet6" {print $2}')
     for addr_mask in $all_v6; do
         local addr="${addr_mask%/*}"
-        case "$addr" in ::1|fe80:*|f[cd]00:*|"") ;; *) v6_raw="$addr"; break ;; esac  
+        case "$addr" in ::1|fe80:*|f[cd]00:*|"") ;; *) v6_raw="$addr"; break ;; esac
     done
-    [ -z "$v6_raw" ] && v6_raw=$(curl -6s --max-time 3 api6.ipify.org 2>/dev/null)
+    [ -z "$v6_raw" ] && v6_raw=$(curl -6s --max-time 3 api6.ipify.org 2>/dev/null || curl -6s --max-time 3 ifconfig.co 2>/dev/null)
 
-    # 物理清洗与导出
-    RAW_IP4=$(echo "$v4_raw" | tr -cd '0-9.' | xargs 2>/dev/null); RAW_IP6=$(echo "$v6_raw" | tr -cd 'a-fA-F0-9:' | xargs 2>/dev/null)
-    export RAW_IP4 RAW_IP6
-
-    # 测试连通性
+    # 物理清洗、导出与连通性测试
+    RAW_IP4=$(echo "$v4_raw" | tr -cd '0-9.' | xargs 2>/dev/null); RAW_IP6=$(echo "$v6_raw" | tr -cd 'a-fA-F0-9:' | xargs 2>/dev/null); export RAW_IP4 RAW_IP6
     [ -n "$RAW_IP4" ] && ping -4 -c1 -W1 1.1.1.1 >/dev/null 2>&1 && v4_ok="\033[32m✓\033[0m"
     [ -n "$RAW_IP6" ] && ping6 -c1 -W1 2606:4700:4700::1111 >/dev/null 2>&1 && v6_ok="\033[32m✓\033[0m"
 
-    # 结果输出
+    # 结果输出与报错退出
     [ -n "$RAW_IP4" ] && info "IPv4 地址: \033[32m$RAW_IP4\033[0m [$v4_ok]" || info "IPv4 地址: \033[33m未检测到\033[0m"
     [ -n "$RAW_IP6" ] && info "IPv6 地址: \033[32m$RAW_IP6\033[0m [$v6_ok]" || info "IPv6 地址: \033[33m未检测到\033[0m"
-
-    # 报错退出
     [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "未检测到任何公网 IP，脚本退出。"; exit 1; }
     return 0
 }
