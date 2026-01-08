@@ -400,9 +400,7 @@ optimize_system() {
     if sysctl net.core.default_qdisc 2>/dev/null | grep -q "fq"; then info "FQ 调度器已就绪"; else info "准备激活 FQ 调度器..."; fi
 
     # 5. 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
-    mkdir -p /etc/sysctl.d
     local SYSCTL_FILE="/etc/sysctl.d/99-sing-box.conf"
-    [ -f /etc/sysctl.d/99-sysctl.conf ] && mv /etc/sysctl.d/99-sysctl.conf /etc/sysctl.d/99-sysctl.conf.bak 2>/dev/null
     cat > "$SYSCTL_FILE" <<SYSCTL
 # === 1. 基础转发与内存管理 ===
 net.ipv4.ip_forward = 1
@@ -449,17 +447,11 @@ net.ipv4.udp_rmem_min = 16384            # UDP Socket 最小读缓存保护
 net.ipv4.udp_wmem_min = 16384            # UDP Socket 最小写缓存保护
 SYSCTL
 
-    # 针对 Debian 小鸡：同时也向主 sysctl.conf 写入核心转发参数（双重保险）
-    for key in "net.ipv4.ip_forward=1" "net.ipv6.conf.all.forwarding=1"; do
-        sed -i "/^${key%%=*}/d" /etc/sysctl.conf 2>/dev/null || true
-        echo "$key" >> /etc/sysctl.conf
-    done
-
-    # 尝试所有可能的加载方式
-    if command -v sysctl >/dev/null 2>&1; then
-        sysctl --system >/dev/null 2>&1 || true
+    # 兼容地加载 sysctl（优先 sysctl --system，其次回退）
+    if command -v sysctl >/dev/null 2>&1 && sysctl --system >/dev/null 2>&1; then
+        true
+    else
         sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true
-        [ -f /etc/sysctl.conf ] && sysctl -p /etc/sysctl.conf >/dev/null 2>&1 || true
     fi
 
     # 网卡队列长度优化 (txqueuelen) 
@@ -478,12 +470,6 @@ SYSCTL
     apply_initcwnd_optimization "false"
     apply_userspace_adaptive_profile
     apply_nic_core_boost
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
-    sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
-    # 针对某些 Debian 环境，手动放行一次 IPTABLES 规则（非 NAT 伪装，仅端口）
-    if command -v iptables >/dev/null 2>&1; then
-        iptables -I INPUT -p udp --dport "$USER_PORT" -j ACCEPT 2>/dev/null || true
-    fi
 }
 
 # ==========================================
@@ -614,11 +600,7 @@ EOF
 # 服务配置
 # ==========================================
 setup_service() {  
-    # 动态抓取端口：防止变量空值导致 ExecStartPre 崩溃
-    local current_port
-    current_port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null || echo "${USER_PORT:-}")
-    
-    info "配置系统服务 (MEM限制: $SBOX_MEM_MAX | Nice: ${VAR_SYSTEMD_NICE:-0})..."
+    info "配置系统服务 (MEM限制: $SBOX_MEM_MAX | Nice: $VAR_SYSTEMD_NICE)..."
     
     local go_debug_val="GODEBUG=memprofilerate=0,madvdontneed=1"
     local env_list=(
@@ -655,21 +637,13 @@ Type=simple
 User=root
 WorkingDirectory=/etc/sing-box
 $systemd_envs
-
-ExecStartPre=-/usr/bin/env bash -c "sysctl -w net.ipv4.ip_forward=1"
-ExecStartPre=-iptables -t nat -D POSTROUTING -j MASQUERADE
-ExecStartPre=-iptables -D INPUT -p udp --dport $current_port -j ACCEPT
-ExecStartPre=-iptables -t nat -A POSTROUTING -j MASQUERADE
-ExecStartPre=-iptables -I INPUT -p udp --dport $current_port -j ACCEPT
 ExecStartPre=-$SBOX_CORE --apply-cwnd
-
 Nice=${VAR_SYSTEMD_NICE:-0}
 IOSchedulingClass=${VAR_SYSTEMD_IOSCHED:-best-effort}
 IOSchedulingPriority=0
 ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
-
 Restart=on-failure
-RestartSec=3s
+RestartSec=5s
 MemoryHigh=${SBOX_MEM_HIGH:-}
 MemoryMax=${SBOX_MEM_MAX:-}
 LimitNOFILE=1000000
@@ -678,7 +652,7 @@ LimitNOFILE=1000000
 WantedBy=multi-user.target
 EOF
 
-        systemctl daemon-reload && systemctl enable sing-box --now && systemctl restart sing-box
+        systemctl daemon-reexec && systemctl daemon-reload && systemctl enable sing-box --now
         sleep 1
         if systemctl is-active --quiet sing-box; then
             local info=$(ps -p $(systemctl show -p MainPID --value sing-box) -o pid=,rss= 2>/dev/null)
