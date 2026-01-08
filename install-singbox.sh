@@ -400,7 +400,9 @@ optimize_system() {
     if sysctl net.core.default_qdisc 2>/dev/null | grep -q "fq"; then info "FQ 调度器已就绪"; else info "准备激活 FQ 调度器..."; fi
 
     # 5. 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
+    mkdir -p /etc/sysctl.d
     local SYSCTL_FILE="/etc/sysctl.d/99-sing-box.conf"
+    [ -f /etc/sysctl.d/99-sysctl.conf ] && mv /etc/sysctl.d/99-sysctl.conf /etc/sysctl.d/99-sysctl.conf.bak 2>/dev/null
     cat > "$SYSCTL_FILE" <<SYSCTL
 # === 1. 基础转发与内存管理 ===
 net.ipv4.ip_forward = 1
@@ -445,13 +447,19 @@ net.ipv4.tcp_max_orphans = $((mem_total * 1024))
 net.ipv4.udp_mem = $udp_mem_scale        # 全局 UDP 内存页配额 (根据 RTT 动态计算)
 net.ipv4.udp_rmem_min = 16384            # UDP Socket 最小读缓存保护
 net.ipv4.udp_wmem_min = 16384            # UDP Socket 最小写缓存保护
-
 SYSCTL
-    # 兼容地加载 sysctl（优先 sysctl --system，其次回退）
-    if command -v sysctl >/dev/null 2>&1 && sysctl --system >/dev/null 2>&1; then
-        true
-    else
+
+    # 针对 Debian 小鸡：同时也向主 sysctl.conf 写入核心转发参数（双重保险）
+    for key in "net.ipv4.ip_forward=1" "net.ipv6.conf.all.forwarding=1"; do
+        sed -i "/^${key%%=*}/d" /etc/sysctl.conf 2>/dev/null || true
+        echo "$key" >> /etc/sysctl.conf
+    done
+
+    # 尝试所有可能的加载方式
+    if command -v sysctl >/dev/null 2>&1; then
+        sysctl --system >/dev/null 2>&1 || true
         sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true
+        [ -f /etc/sysctl.conf ] && sysctl -p /etc/sysctl.conf >/dev/null 2>&1 || true
     fi
 
     # 网卡队列长度优化 (txqueuelen) 
@@ -472,6 +480,10 @@ SYSCTL
     apply_nic_core_boost
     sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
     sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+    # 针对某些 Debian 环境，手动放行一次 IPTABLES 规则（非 NAT 伪装，仅端口）
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -I INPUT -p udp --dport "${USER_PORT:-$PORT_HY2}" -j ACCEPT 2>/dev/null || true
+    fi
 }
 
 # ==========================================
