@@ -636,24 +636,17 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/etc/sing-box
-PrivateTmp=no
-ProtectSystem=off
-ProtectHome=no
-NoNewPrivileges=no
-ProtectKernelTunables=no
-ProtectControlGroups=no
-ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
-Restart=always
-RestartSec=3
-TimeoutStopSec=10
-LimitNOFILE=1048576
 $systemd_envs
 ExecStartPre=/usr/local/bin/sb --apply-cwnd
 Nice=${VAR_SYSTEMD_NICE:-0}
 IOSchedulingClass=${VAR_SYSTEMD_IOSCHED:-best-effort}
 IOSchedulingPriority=0
+ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
+Restart=on-failure
+RestartSec=5s
 MemoryHigh=${SBOX_MEM_HIGH:-}
 MemoryMax=${SBOX_MEM_MAX:-}
+LimitNOFILE=1000000
 
 [Install]
 WantedBy=multi-user.target
