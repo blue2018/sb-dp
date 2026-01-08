@@ -801,6 +801,7 @@ elif [[ "${1:-}" == "--reset-port" ]]; then
     create_config "$2"
     apply_firewall
     setup_service
+    systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
     get_env_data
     display_links
@@ -809,6 +810,7 @@ elif [[ "${1:-}" == "--update-kernel" ]]; then
         optimize_system
         setup_service
         apply_firewall
+        systemctl daemon-reload >/dev/null 2>&1 || true
         systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
         echo -e "\033[1;32m[OK]\033[0m 内核已更新并应用防火墙规则"
     fi
@@ -832,10 +834,13 @@ if [ ! -f "$CORE" ]; then echo "核心文件丢失"; exit 1; fi
 source "$CORE" --detect-only
 
 service_ctrl() {
-    # 每次启动/重启前调用核心脚本中的防火墙放行逻辑
-    /bin/bash "$CORE" --apply-cwnd >/dev/null 2>&1 || true
-    if [ -f /etc/init.d/sing-box ]; then rc-service sing-box $1
-    else systemctl $1 sing-box; fi
+    /bin/bash "$CORE" --apply-cwnd >/dev/null 2>&1 || true  # 这里内部会调用 apply_firewall
+    if [ -f /etc/init.d/sing-box ]; then 
+        rc-service sing-box $1
+    else 
+        systemctl daemon-reload >/dev/null 2>&1 || true    # 确保 Systemd 意识到配置已改
+        systemctl $1 sing-box
+    fi
 }
 
 while true; do
