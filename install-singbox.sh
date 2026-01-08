@@ -505,8 +505,9 @@ install_singbox() {
     fi
 
     local URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"
-    local TMP_D TMP_FILE="$TMP_D/sb.tar.gz"
-    TMP_D=$(mktemp -d || echo "/tmp/sb-tmp-$$")
+    local TMP_D TMP_FILE
+    TMP_D=$(mktemp -d 2>/dev/null || echo "/tmp/sb-tmp-$$")
+    TMP_FILE="$TMP_D/sb.tar.gz"
     trap 'rm -rf "$TMP_D" >/dev/null 2>&1 || true' EXIT
 
     info "下载 sing-box 内核..."
