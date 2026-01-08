@@ -614,7 +614,11 @@ EOF
 # 服务配置
 # ==========================================
 setup_service() {  
-    info "配置系统服务 (MEM限制: $SBOX_MEM_MAX | Nice: $VAR_SYSTEMD_NICE)..."
+    # 动态抓取端口：防止变量空值导致 ExecStartPre 崩溃
+    local current_port
+    current_port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null || echo "${USER_PORT:-}")
+    
+    info "配置系统服务 (MEM限制: $SBOX_MEM_MAX | Nice: ${VAR_SYSTEMD_NICE:-0})..."
     
     local go_debug_val="GODEBUG=memprofilerate=0,madvdontneed=1"
     local env_list=(
@@ -652,10 +656,15 @@ User=root
 WorkingDirectory=/etc/sing-box
 $systemd_envs
 
-ExecStartPre=-/usr/sbin/iptables -t nat -A POSTROUTING -j MASQUERADE
-ExecStartPre=-/usr/sbin/iptables -I INPUT -p udp --dport $USER_PORT -j ACCEPT
+# === 核心修复：确保 NAT 转发开启与规则刷新 ===
+ExecStartPre=/usr/bin/env bash -c "sysctl -w net.ipv4.ip_forward=1"
+ExecStartPre=-/usr/sbin/iptables -t nat -D POSTROUTING -j MASQUERADE
+ExecStartPre=-/usr/sbin/iptables -D INPUT -p udp --dport $current_port -j ACCEPT
+ExecStartPre=/usr/sbin/iptables -t nat -A POSTROUTING -j MASQUERADE
+ExecStartPre=/usr/sbin/iptables -I INPUT -p udp --dport $current_port -j ACCEPT
 ExecStartPre=-$SBOX_CORE --apply-cwnd
 
+# === 性能优化参数 ===
 Nice=${VAR_SYSTEMD_NICE:-0}
 IOSchedulingClass=${VAR_SYSTEMD_IOSCHED:-best-effort}
 IOSchedulingPriority=0
@@ -671,18 +680,18 @@ LimitNOFILE=1000000
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reexec && systemctl daemon-reload && systemctl enable sing-box --now
-sleep 1
-if systemctl is-active --quiet sing-box; then
-    local info=$(ps -p $(systemctl show -p MainPID --value sing-box) -o pid=,rss= 2>/dev/null)
-    local pid=$(echo $info | awk '{print $1}')
-    local rss_mb=$(echo $info | awk '{printf "%.2f MB", $2/1024}')
-    succ "sing-box 启动成功 | PID: ${pid:-N/A} | 内存: ${rss_mb:-N/A}"
-else
-    err "sing-box 启动失败。最近 3 行日志："
-    journalctl -u sing-box -n 3 --no-pager | tail -n 3
-    exit 1
-fi
+        systemctl daemon-reload && systemctl enable sing-box --now && systemctl restart sing-box
+        sleep 1
+        if systemctl is-active --quiet sing-box; then
+            local info=$(ps -p $(systemctl show -p MainPID --value sing-box) -o pid=,rss= 2>/dev/null)
+            local pid=$(echo $info | awk '{print $1}')
+            local rss_mb=$(echo $info | awk '{printf "%.2f MB", $2/1024}')
+            succ "sing-box 启动成功 | PID: ${pid:-N/A} | 内存: ${rss_mb:-N/A}"
+        else
+            err "sing-box 启动失败。最近 3 行日志："
+            journalctl -u sing-box -n 3 --no-pager | tail -n 3
+            exit 1
+        fi
 fi
 }
 
