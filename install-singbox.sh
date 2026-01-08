@@ -790,6 +790,7 @@ elif [[ "${1:-}" == "--show-only" ]]; then
 elif [[ "${1:-}" == "--reset-port" ]]; then
     optimize_system
     create_config "$2"
+    iptables -I INPUT -p udp --dport "$2" -j ACCEPT 2>/dev/null
     setup_service
     get_env_data
     display_links
