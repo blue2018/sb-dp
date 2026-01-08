@@ -674,12 +674,13 @@ EOF
 systemctl daemon-reexec && systemctl daemon-reload && systemctl enable sing-box --now
 sleep 1
 if systemctl is-active --quiet sing-box; then
-    local pid rss
-    pid=$(systemctl show -p MainPID --value sing-box)
-    rss=$(awk '/VmRSS/{print $2$3}' /proc/$pid/status 2>/dev/null)
-    succ "sing-box 服务启动成功 (PID=$pid | RSS=$rss)"
+    local info=$(ps -p $(systemctl show -p MainPID --value sing-box) -o pid=,rss= 2>/dev/null)
+    local pid=$(echo $info | awk '{print $1}')
+    local rss_mb=$(echo $info | awk '{printf "%.2f MB", $2/1024}')
+    succ "sing-box 启动成功 | PID: ${pid:-N/A} | 内存: ${rss_mb:-N/A}"
 else
-    error "sing-box 服务启动失败，请执行: systemctl status sing-box 查看原因"
+    err "sing-box 启动失败。最近 3 行日志："
+    journalctl -u sing-box -n 3 --no-pager | tail -n 3
     exit 1
 fi
 fi
