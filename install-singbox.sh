@@ -662,8 +662,6 @@ ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
 Restart=always
 RestartSec=3
 TimeoutStopSec=10
-KillMode=process
-RuntimeDirectory=sing-box
 LimitNOFILE=1048576
 
 [Install]
