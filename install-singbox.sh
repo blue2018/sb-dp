@@ -110,39 +110,61 @@ install_dependencies() {
 #获取公网IP
 get_network_info() {
     info "获取网络信息…"
-    local v4_raw="" v6_raw="" v4_ok="\033[31m✗\033[0m" v6_ok="\033[31m✗\033[0m" a line addr ip_cmd
+    
+    # 检查必要依赖
+    for cmd in curl ip ping; do
+        if ! command -v $cmd &> /dev/null; then
+            err "错误: 未找到 $cmd 命令，请先安装 (apt install curl iproute2 iputils-ping -y)"
+            exit 1
+        fi
+    done
 
-    # ---------- IPv4 ----------
-    while read -r a; do
-        [[ ! "${a%/*}" =~ ^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.) ]] && v4_raw="${a%/*}" && break
-    done < <(ip -4 addr show 2>/dev/null | awk '$1=="inet"{print $2}')
+    local v4_raw="" v6_raw="" v4_ok="\033[31m✗\033[0m" v6_ok="\033[31m✗\033[0m"
 
-    [ -z "$v4_raw" ] && v4_raw=$(curl -4sL --max-time 3 api.ipify.org 2>/dev/null || curl -4sL --max-time 3 ifconfig.me 2>/dev/null)
+    # --- IPv4 获取逻辑 ---
+    # 1. 先尝试从本地网卡提取非私有地址
+    v4_raw=$(ip -4 addr show scope global | awk '$1=="inet"{print $2}' | cut -d/ -f1 | grep -Ev "^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)" | head -n 1)
+    
+    # 2. 如果本地没拿到，再请求公网API (增加 5秒 总超时)
+    if [ -z "$v4_raw" ]; then
+        v4_raw=$(curl -4sL --connect-timeout 3 --max-time 5 api.ipify.org || curl -4sL --connect-timeout 3 --max-time 5 ifconfig.me)
+    fi
 
-    # ---------- IPv6（兼容 BusyBox / iproute2） ----------
-    ip -6 addr show scope global >/dev/null 2>&1 && ip_cmd="ip -6 addr show scope global" || ip_cmd="ip -6 addr show"
+    # --- IPv6 获取逻辑 ---
+    # 排除临时地址(temporary)和管理地址(mngtmpaddr)
+    v6_raw=$(ip -6 addr show scope global | grep -v "temporary" | grep -v "mngtmpaddr" | awk '/inet6 /{print $2}' | cut -d/ -f1 | head -n 1)
+    
+    if [ -z "$v6_raw" ]; then
+        v6_raw=$(curl -6sL --connect-timeout 3 --max-time 5 api6.ipify.org || curl -6sL --connect-timeout 3 --max-time 5 ifconfig.co)
+    fi
 
-    while read -r line; do
-        addr="${line%%/*}"
-        [[ "$line" =~ temporary|mngtmpaddr ]] && continue
-        [[ "$addr" =~ ^([0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}$ ]] && v6_raw="$addr" && break
-    done < <($ip_cmd 2>/dev/null | awk '/inet6 /{print $2"|"$0}')
+    # 清洗变量中的空格
+    export RAW_IP4=$(echo "$v4_raw" | tr -d '[:space:]')
+    export RAW_IP6=$(echo "$v6_raw" | tr -d '[:space:]')
 
-    [ -z "$v6_raw" ] && v6_raw=$(curl -6sL --max-time 3 api6.ipify.org 2>/dev/null || curl -6sL --max-time 3 ifconfig.co 2>/dev/null)
+    # --- 连通性测试 ---
+    # 只有在获取到 IP 的情况下才测试，避免空变量导致 ping 命令语法错误
+    if [ -n "$RAW_IP4" ]; then
+        if ping -4 -c1 -W2 1.1.1.1 >/dev/null 2>&1; then
+            v4_ok="\033[32m✓\033[0m"
+        fi
+        info "IPv4 地址: \033[32m$RAW_IP4\033[0m [$v4_ok]"
+    else
+        info "IPv4 地址: \033[33m未检测到\033[0m"
+    fi
 
-    # ---------- 清洗 ----------
-    export RAW_IP4=$(tr -d '[:space:]' <<<"$v4_raw") RAW_IP6=$(tr -d '[:space:]' <<<"$v6_raw")
-    [[ -z "$RAW_IP4" && -z "$RAW_IP6" ]] && { err "未检测到公网IP，退出脚本安装"; exit 1; }
+    if [ -n "$RAW_IP6" ]; then
+        if ping6 -c1 -W2 2606:4700:4700::1111 >/dev/null 2>&1; then
+            v6_ok="\033[32m✓\033[0m"
+        fi
+        info "IPv6 地址: \033[32m$RAW_IP6\033[0m [$v6_ok]"
+    else
+        info "IPv6 地址: \033[33m未检测到\033[0m"
+    fi
 
-    # ---------- 连通性 ----------
-    [ -n "$RAW_IP4" ] && ping -4 -c1 -W1 1.1.1.1 >/dev/null 2>&1 && v4_ok="\033[32m✓\033[0m"
-    [ -n "$RAW_IP6" ] && ping6 -c1 -W1 2606:4700:4700::1111 >/dev/null 2>&1 && v6_ok="\033[32m✓\033[0m"
-
-    # ---------- 输出 ----------
-    [ -n "$RAW_IP4" ] && info "IPv4 地址: \033[32m$RAW_IP4\033[0m [$v4_ok]" || info "IPv4 地址: \033[33m未检测到\033[0m"
-    [ -n "$RAW_IP6" ] && info "IPv6 地址: \033[32m$RAW_IP6\033[0m [$v6_ok]" || info "IPv6 地址: \033[33m未检测到\033[0m"
+    # 如果两者都没有，才报错退出
+    [[ -z "$RAW_IP4" && -z "$RAW_IP6" ]] && { err "未检测到公网IP，退出脚本"; exit 1; }
 }
-
 
 # === 网络延迟探测模块 ===
 probe_network_rtt() {
