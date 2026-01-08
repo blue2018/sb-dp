@@ -644,7 +644,7 @@ EOF
         local systemd_envs=$(printf "%s\n" "${env_list[@]}")
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
-Description=Sing-box Service (Optimized)
+Description=Sing-box Service
 After=network-online.target
 Wants=network-online.target
 
@@ -652,23 +652,27 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/etc/sing-box
-$systemd_envs
-ExecStartPre=/usr/local/bin/sb --apply-cwnd
-Nice=${VAR_SYSTEMD_NICE:-0}
-IOSchedulingClass=${VAR_SYSTEMD_IOSCHED:-best-effort}
-IOSchedulingPriority=0
-ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
-Restart=on-failure
-RestartSec=5s
-MemoryHigh=${SBOX_MEM_HIGH:-}
-MemoryMax=${SBOX_MEM_MAX:-}
-LimitNOFILE=1000000
 
-[Install]
-WantedBy=multi-user.target
+Environment=GOGC=${SBOX_GOGC:-100}
+Environment=GOMEMLIMIT=${SBOX_GOLIMIT:-128MiB}
+Environment=GOTRACEBACK=none
+Environment=GODEBUG=memprofilerate=0,madvdontneed=1
+${SBOX_GOMAXPROCS:+Environment=GOMAXPROCS=$SBOX_GOMAXPROCS}
+
+ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
+
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+KillMode=process
+
+RuntimeDirectory=sing-box
+LimitNOFILE=1048576
 EOF
-        systemctl daemon-reload && systemctl enable sing-box --now
-    fi
+
+systemctl daemon-reexec && systemctl daemon-reload && systemctl enable sing-box --now
+
+fi
 }
 
 # ==========================================
