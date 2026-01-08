@@ -643,6 +643,7 @@ EOF
     else
         local systemd_envs=$(printf "%s\n" "${env_list[@]}")
         cat > /etc/systemd/system/sing-box.service <<EOF
+cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
 After=network-online.target
@@ -652,22 +653,21 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/etc/sing-box
-
 Environment=GOGC=${SBOX_GOGC:-100}
 Environment=GOMEMLIMIT=${SBOX_GOLIMIT:-128MiB}
 Environment=GOTRACEBACK=none
 Environment=GODEBUG=memprofilerate=0,madvdontneed=1
 ${SBOX_GOMAXPROCS:+Environment=GOMAXPROCS=$SBOX_GOMAXPROCS}
-
 ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
-
 Restart=always
 RestartSec=3
 TimeoutStopSec=10
 KillMode=process
-
 RuntimeDirectory=sing-box
 LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reexec && systemctl daemon-reload && systemctl enable sing-box --now
