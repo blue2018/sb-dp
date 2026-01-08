@@ -369,7 +369,7 @@ optimize_system() {
         VAR_UDP_RMEM="2097152"; VAR_UDP_WMEM="2097152"
         VAR_SYSTEMD_NICE="-2"; VAR_SYSTEMD_IOSCHED="best-effort"
         VAR_HY2_BW="100"; SBOX_GOMAXPROCS="1"; VAR_DEF_MEM="65536"
-        VAR_BACKLOG=4000; swappiness_val=100; busy_poll_val=0
+        VAR_BACKLOG=5000; swappiness_val=100; busy_poll_val=0
         SBOX_OPTIMIZE_LEVEL="64M 生存版"
     fi
 
