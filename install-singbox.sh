@@ -127,7 +127,7 @@ get_network_info() {
 
     # 清洗与连通性测试
     export RAW_IP4=$(echo "$v4_raw" | tr -d '[:space:]') RAW_IP6=$(echo "$v6_raw" | tr -d '[:space:]')
-    [[ -z "$RAW_IP4" && -z "$RAW_IP6" ]] && { err "未检测到公网 IP"; exit 1; }
+    [[ -z "$RAW_IP4" && -z "$RAW_IP6" ]] && { err "未检测到公网IP，退出脚本安装"; exit 1; }
     [ -n "$RAW_IP4" ] && ping -4 -c1 -W1 1.1.1.1 >/dev/null 2>&1 && v4_ok="\033[32m✓\033[0m"
     [ -n "$RAW_IP6" ] && ping6 -c1 -W1 2606:4700:4700::1111 >/dev/null 2>&1 && v6_ok="\033[32m✓\033[0m"
 
