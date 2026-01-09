@@ -219,22 +219,37 @@ apply_nic_core_boost() {
     local mem=$(probe_memory_total)
     local IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}') || return 0
     local CPU_N=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || nproc)
-    # --- 1. 协议栈补偿优化 (无论什么虚拟化架构都生效) ---
-    local bgt=600 usc=4000
-    [ "$mem" -ge 256 ] && bgt=1000 && usc=8000
+    # --- 1. 协议栈补偿优化 (CPU 算力与内存双维判定) ---
+    local bgt=600 usc=2000  # 基础档位
+    
+    if [ "$CPU_N" -ge 2 ]; then
+        # 多核环境：算力充足，追求低延迟切换
+        [ "$mem" -ge 256 ] && bgt=1000 && usc=1500
+        [ "$mem" -ge 512 ] && bgt=3000 && usc=1000
+    else
+        # 单核环境：内存再大也减少切换频率，保住单核吞吐量
+        [ "$mem" -ge 256 ] && bgt=1200 && usc=3000
+        [ "$mem" -ge 512 ] && bgt=2500 && usc=4000
+    fi
+    
     sysctl -w net.core.netdev_budget=$bgt net.core.netdev_budget_usecs=$usc >/dev/null 2>&1 || true
 
-    # --- 2. 硬件亲和性 (仅在真正具备多核加速条件时尝试) ---
+    # --- 2. 硬件层：关闭中断聚合 (消除忽快忽慢的核心) ---
+    if command -v ethtool >/dev/null 2>&1; then
+        ethtool -C "$IFACE" adaptive-rx off adaptive-tx off rx-usecs 0 rx-frames 1 tx-usecs 0 tx-frames 1 >/dev/null 2>&1 || true
+        ethtool -K "$IFACE" gro on gso on tso off lro off >/dev/null 2>&1 || true
+    fi
+
+    # --- 3. 调度与亲和性 ---
     if [ "$CPU_N" -ge 2 ] && [ -d "/sys/class/net/$IFACE/queues" ]; then
         local MASK=$(printf '%x' $(( (1<<CPU_N)-1 )))
         for q in /sys/class/net/"$IFACE"/queues/{rx-*,tx-*}/{rps_cpus,xps_cpus}; do
             [ -e "$q" ] && timeout 0.5s bash -c "echo '$MASK' > '$q'" 2>/dev/null || true
         done
-        info "NIC Boost → 已应用多核队列关联"
+        info "NIC Boost → 多核模式 (bgt:$bgt, usc:$usc)"
     else
-        # 针对单核小鸡，我们通过增大接收队列长度来“变相优化”
-        sysctl -w net.core.netdev_max_backlog=2000 >/dev/null 2>&1 || true
-        info "NIC Boost → 单核环境，已应用 Backlog 缓冲优化"
+        sysctl -w net.core.netdev_max_backlog=5000 >/dev/null 2>&1 || true
+        info "NIC Boost → 单核模式 (bgt:$bgt, usc:$usc)"
     fi
 }
 
@@ -553,7 +568,13 @@ EOF
 # 服务配置
 # ==========================================
 setup_service() {  
-    info "配置系统服务 (MEM限制: $SBOX_MEM_MAX | Nice: $VAR_SYSTEMD_NICE)..."
+    local CPU_N=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || nproc)
+    local SCHED_P="rr" SCHED_VAL="CPUSchedulingPriority=50"
+    # 单核/弱CPU采用 batch 策略：一旦占用 CPU 则尽量不被打断，适合单核处理加密流
+    [ "$CPU_N" -le 1 ] && SCHED_P="batch" && SCHED_VAL=""
+
+    info "配置系统服务 (核心数: $CPU_N | 策略: $SCHED_P | Nice: $VAR_SYSTEMD_NICE)..."
+    
     local go_debug_val="GODEBUG=memprofilerate=0,madvdontneed=1"
     local env_list=(
         "Environment=GOGC=${SBOX_GOGC:-100}"
@@ -591,10 +612,17 @@ WorkingDirectory=/etc/sing-box
 $systemd_envs
 ExecStartPre=-$SBOX_CORE --apply-cwnd
 Nice=${VAR_SYSTEMD_NICE:--5}
+CPUSchedulingPolicy=$SCHED_P
+$SCHED_VAL
 LimitMEMLOCK=infinity
+CPUWeight=1000
+IOWeight=1000
 ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
-Restart=on-failure
-RestartSec=5s
+Restart=always
+RestartSec=3s
+# 如果在 60 秒内重启超过 5 次，就暂时停止，防止死循环
+StartLimitIntervalSec=60
+StartLimitBurst=5
 MemoryHigh=${SBOX_MEM_HIGH:-}
 MemoryMax=${SBOX_MEM_MAX:-}
 LimitNOFILE=1000000
@@ -606,13 +634,13 @@ EOF
         systemctl daemon-reload && systemctl enable sing-box --now
         sleep 1
         if systemctl is-active --quiet sing-box; then
-        local info=$(ps -p $(systemctl show -p MainPID --value sing-box) -o pid=,rss= 2>/dev/null)
-        local pid=$(echo $info | awk '{print $1}') rss=$(echo $info | awk '{printf "%.2f MB", $2/1024}')
-        succ "sing-box 启动成功 | PID: ${pid:-N/A} | 内存: ${rss:-N/A}"
+            local info=$(ps -p $(systemctl show -p MainPID --value sing-box) -o pid=,rss= 2>/dev/null)
+            local pid=$(echo $info | awk '{print $1}') rss=$(echo $info | awk '{printf "%.2f MB", $2/1024}')
+            succ "sing-box 启动成功 | PID: ${pid:-N/A} | 内存: ${rss:-N/A}"  
         else
             err "sing-box 启动失败，最近 3 行日志："; journalctl -u sing-box -n 3 --no-pager | tail -n 3; exit 1
         fi
-fi
+    fi
 }
 
 # ==========================================
