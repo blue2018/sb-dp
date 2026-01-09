@@ -810,12 +810,12 @@ service_ctrl() {
 while true; do
     echo "=========================="
     echo " Sing-box HY2 管理 (sb)"
-    echo " 档位: ${SBOX_OPTIMIZE_LEVEL:-未知} | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核15" || echo "应用补偿")"
     echo "=========================="
-    echo "1. 查看信息    5. 重启服务"
-    echo "2. 修改配置    6. 卸载脚本"
-    echo "3. 重置端口    0. 退出"
-    echo "4. 更新内核"
+    echo " 档位: ${SBOX_OPTIMIZE_LEVEL:-未知} | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "启用补偿")"
+    echo "--------------------------"
+    echo "1. 查看信息    2. 修改配置    3. 重置端口
+    echo "4. 更新内核"   5. 重启服务"   6. 卸载脚本"
+    echo "0. 退出"
     echo "=========================="
     read -r -p "请选择 [0-6]: " opt
     opt=$(echo "$opt" | xargs echo -n 2>/dev/null || echo "$opt")
