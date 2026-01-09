@@ -210,7 +210,7 @@ apply_initcwnd_optimization() {
 # sing-box 用户态运行时调度人格（Go/QUIC/缓冲区自适应）
 apply_userspace_adaptive_profile(){
     local lvl="${SBOX_OPTIMIZE_LEVEL:-紧凑版}"
-    local real_c=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
+    local real_c="$CPU_CORE"
     local g_procs=1 GOGC=200 wnd=4 buf=1048576
     
     [[ "$lvl" == *旗舰* ]] && { g_procs=$real_c; GOGC=150; wnd=16; buf=4194304; }
@@ -238,7 +238,7 @@ apply_userspace_adaptive_profile(){
 apply_nic_core_boost() {
     local mem=$(probe_memory_total)
     local IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}') || return 0
-    local CPU_N=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || nproc)
+    local CPU_N="$CPU_CORE"
     # --- 1. 协议栈补偿优化 (CPU 算力与内存双维判定) ---
     local bgt=600 usc=2000  # 基础档位
     
@@ -601,7 +601,7 @@ EOF
 # 服务配置
 # ==========================================
 setup_service() {  
-    local CPU_N=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || nproc)
+    local CPU_N="$CPU_CORE"
     local current_nice="${VAR_SYSTEMD_NICE:--5}"
     [[ "$current_nice" == "-5" ]] && { [ "$CPU_N" -le 1 ] && current_nice="-10" || current_nice="-15"; }
 
