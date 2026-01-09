@@ -581,13 +581,10 @@ EOF
 # ==========================================
 setup_service() {  
     local CPU_N=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || nproc)
-    # 差异化 Nice 值：单核小鸡建议 -10 (稳)，多核建议 -15 (强)
     local current_nice="${VAR_SYSTEMD_NICE:--5}"
-    [ -z "$current_nice" ] && { [ "$CPU_N" -le 1 ] && current_nice="-10" || current_nice="-15"; }
+    [[ "$current_nice" == "-5" ]] && { [ "$CPU_N" -le 1 ] && current_nice="-10" || current_nice="-15"; }
 
-    local SCHED_P="rr" SCHED_VAL="CPUSchedulingPriority=50"
-    [ "$CPU_N" -le 1 ] && SCHED_P="batch" && SCHED_VAL=""
-    info "配置系统服务 (核心数: $CPU_N | 策略: $SCHED_P | Nice: $current_nice)..."
+    info "配置系统服务 (核心数: $CPU_N | Nice: $current_nice)..."
     
     local go_debug_val="GODEBUG=memprofilerate=0,madvdontneed=1"
     local env_list=(
@@ -597,9 +594,6 @@ setup_service() {
         "Environment=$go_debug_val"
     )
     [ -n "${SBOX_GOMAXPROCS:-}" ] && env_list+=("Environment=GOMAXPROCS=$SBOX_GOMAXPROCS")
-
-    # 联动判定：如果内核 initcwnd 修改失败，则由 ExecStartPre 执行应用层补偿
-    local pre_cmd="ExecStartPre=-$SBOX_CORE --apply-cwnd"
 
     if [ "$OS" = "alpine" ]; then
         local openrc_exports=$(printf "export %s\n" "${env_list[@]}" | sed 's/Environment=//g')
@@ -627,22 +621,20 @@ Type=simple
 User=root
 WorkingDirectory=/etc/sing-box
 $systemd_envs
-$pre_cmd
+ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
 Nice=$current_nice
-CPUSchedulingPolicy=$SCHED_P
-$SCHED_VAL
 LimitMEMLOCK=infinity
 CPUWeight=1000
 IOWeight=1000
 ExecStart=$SBOX_CORE run -c /etc/sing-box/config.json
-# 联动补刀：针对 KVM 环境，启动后 3 秒重新应用一次 15 窗口设置，防止路由重置
-ExecStartPost=/bin/sh -c 'if [ "$INITCWND_DONE" = "true" ]; then sleep 3; \$(declare -f apply_initcwnd_optimization); apply_initcwnd_optimization true; fi'
+# 联动补刀：改用固化接口，启动 3 秒后再次强制刷一次 initcwnd
+ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
 Restart=always
 RestartSec=3s
-StartLimitIntervalSec=60
+StartLimitIntervalSec=0
 StartLimitBurst=5
-MemoryHigh=${SBOX_MEM_HIGH:-}
-MemoryMax=${SBOX_MEM_MAX:-}
+$( [[ -n "${SBOX_MEM_HIGH:-}" ]] && echo "MemoryHigh=$SBOX_MEM_HIGH" )
+$( [[ -n "${SBOX_MEM_MAX:-}" ]] && echo "MemoryMax=$SBOX_MEM_MAX" )
 LimitNOFILE=1000000
 
 [Install]
@@ -650,15 +642,14 @@ WantedBy=multi-user.target
 EOF
 
         systemctl daemon-reload && systemctl enable sing-box --now
-        sleep 1
+        sleep 1.5
         if systemctl is-active --quiet sing-box; then
             local info=$(ps -p $(systemctl show -p MainPID --value sing-box) -o pid=,rss= 2>/dev/null)
-            local pid=$(echo $info | awk '{print $1}') rss=$(echo $info | awk '{printf "%.2f MB", $2/1024}')
-            # [MOD] 输出中加入优化模式标记
+            local pid=$(echo $info | awk '{print $1}') rss=$(echo $info | awk '{printf "%.2f MB", $2/1024}')  
             local mode_tag=$([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")
             succ "sing-box 启动成功 | PID: ${pid:-N/A} | 内存: ${rss:-N/A} | 网络模式: $mode_tag"  
         else
-            err "sing-box 启动失败，最近 3 行日志："; journalctl -u sing-box -n 3 --no-pager | tail -n 3; exit 1
+            err "sing-box 启动失败，最近 5 行日志："; journalctl -u sing-box -n 5 --no-pager; exit 1
         fi
     fi
 }
