@@ -372,7 +372,7 @@ optimize_system() {
     [ "$quic_max" -gt "$rtt_scale_max" ] && rtt_scale_max=$quic_max
     if [ "$rtt_scale_max" -gt "$max_udp_pages" ]; then
         rtt_scale_max=$max_udp_pages; rtt_scale_pressure=$((max_udp_pages * 3 / 4)); rtt_scale_min=$((max_udp_pages / 2))
-        SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} [内存锁限制]"
+        SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL}"
     fi
     local udp_mem_scale="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
     SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
@@ -627,6 +627,8 @@ ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
 Nice=$current_nice
 LimitMEMLOCK=infinity
+CPUWeight=1000
+IOWeight=1000
 Restart=always
 RestartSec=3s
 StartLimitBurst=5
@@ -841,7 +843,8 @@ while true; do
                rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/sb /usr/local/bin/SB \
                       /etc/systemd/system/sing-box.service /etc/init.d/sing-box "$CORE"
                echo "卸载完成，系统配置已还原"; exit 0
-           fi ;;
+           fi
+           info "卸载操作已取消" ;;
         0) exit 0 ;;
     esac
 done
