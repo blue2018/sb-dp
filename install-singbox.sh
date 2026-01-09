@@ -844,7 +844,7 @@ while true; do
                       /etc/systemd/system/sing-box.service /etc/init.d/sing-box "$CORE"
                echo "卸载完成，系统配置已还原"; exit 0
            fi
-           info "卸载操作已取消" ;;
+           info "卸载操作已取消"; read -r -p $'\n按回车键返回菜单...' ;;
         0) exit 0 ;;
     esac
 done
