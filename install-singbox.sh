@@ -303,6 +303,7 @@ optimize_system() {
     local max_udp_mb=$((mem_total * 40 / 100))
     local max_udp_pages=$((max_udp_mb * 256))
     local swappiness_val=10 busy_poll_val=0 quic_extra_msg="" VAR_BACKLOG=2000
+    local ct_max=16384 ct_udp_to=15 ct_stream_to=30
 
     if [[ "$OS" != "alpine" && "$mem_total" -le 600 ]]; then
         local swap_total
@@ -326,6 +327,7 @@ optimize_system() {
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"
         VAR_HY2_BW="500"; VAR_DEF_MEM="327680"
         VAR_BACKLOG=32768; swappiness_val=10; busy_poll_val=50
+        ct_max=65535 ct_stream_to=60
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
         SBOX_GOLIMIT="$((mem_total * 85 / 100))MiB"; SBOX_GOGC="400"
@@ -333,6 +335,7 @@ optimize_system() {
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"
         VAR_HY2_BW="300"; VAR_DEF_MEM="229376"
         VAR_BACKLOG=16384; swappiness_val=10; busy_poll_val=20
+        ct_max=32768 ct_stream_to=45
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
         SBOX_GOLIMIT="$((mem_total * 80 / 100))MiB"; SBOX_GOGC="350"
@@ -346,7 +349,7 @@ optimize_system() {
         VAR_UDP_RMEM="4194304"; VAR_UDP_WMEM="4194304"
         VAR_SYSTEMD_NICE="-4"; VAR_SYSTEMD_IOSCHED="best-effort"
         VAR_HY2_BW="100"; SBOX_GOMAXPROCS="1"; VAR_DEF_MEM="65536"
-        VAR_BACKLOG=5000; swappiness_val=100; busy_poll_val=0
+        VAR_BACKLOG=5000; swappiness_val=100; busy_poll_val=0; ct_max=16384
         SBOX_OPTIMIZE_LEVEL="64M 生存版"
     fi
 
@@ -367,7 +370,7 @@ optimize_system() {
         SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} [内存锁限制]"
     fi
     local udp_mem_scale="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
-    SBOX_MEM_MAX="$((mem_total * 92 / 100))M"; SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"
+    SBOX_MEM_MAX="$((mem_total * 90 / 100))M"; SBOX_MEM_HIGH="$((mem_total * 82 / 100))M"
 
     info "优化策略: $SBOX_OPTIMIZE_LEVEL"
 
@@ -415,11 +418,11 @@ net.ipv4.tcp_limit_output_bytes = 262144 # 限制单个 TCP 连接占用发送�
 net.ipv4.tcp_rmem = 4096 87380 $VAR_UDP_RMEM
 net.ipv4.tcp_wmem = 4096 65536 $VAR_UDP_WMEM
 net.ipv4.tcp_frto = 2                    # 针对丢包环境的重传判断优化
-net.ipv4.tcp_mtu_probing = 1             # 自动探测 MTU 解决 UDP 黑洞
 net.ipv4.tcp_ecn = 1
 net.ipv4.tcp_ecn_fallback = 1
 
 # === 5. 连接复用与超时管理 (原始逻辑回归) ===
+net.ipv4.tcp_mtu_probing = 1             # 自动探测 MTU 解决 UDP 黑洞
 net.ipv4.ip_no_pmtu_disc = 0             # 启用 MTU 探测 (自动寻找最优包大小，防止 Hy2 丢包)
 net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_tw_reuse = 1
@@ -429,6 +432,11 @@ net.ipv4.tcp_max_orphans = $((mem_total * 1024))
 net.ipv4.udp_mem = $udp_mem_scale        # 全局 UDP 内存页配额 (根据 RTT 动态计算)
 net.ipv4.udp_rmem_min = 16384            # UDP Socket 最小读缓存保护
 net.ipv4.udp_wmem_min = 16384            # UDP Socket 最小写缓存保护
+
+# === 7. Conntrack 连接跟踪自适应优化 ===
+net.netfilter.nf_conntrack_max = $ct_max
+net.netfilter.nf_conntrack_udp_timeout = $ct_udp_to
+net.netfilter.nf_conntrack_udp_timeout_stream = $ct_stream_to
 SYSCTL
 
     # 兼容地加载 sysctl（优先 sysctl --system，其次回退）
@@ -530,7 +538,13 @@ create_config() {
         SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
-    
+
+    local mem=$(probe_memory_total)
+    local timeout="30s"
+    # 动态判定：内存越小，回收越快
+    [ "$mem" -le 64 ] && timeout="20s"
+    [ "$mem" -gt 64 ] && [ "$mem" -le 128 ] && timeout="30s"
+    [ "$mem" -gt 512 ] && timeout="60s"
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
@@ -544,7 +558,7 @@ create_config() {
     "ignore_client_bandwidth": false,
     "up_mbps": ${VAR_HY2_BW:-200},
     "down_mbps": ${VAR_HY2_BW:-200},
-    "udp_timeout": "20s",
+    "udp_timeout": "$timeout",
     "udp_fragment": true,
     "tls": {
       "enabled": true,
