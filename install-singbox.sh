@@ -196,22 +196,32 @@ apply_initcwnd_optimization() {
 apply_userspace_adaptive_profile(){
     local lvl="${SBOX_OPTIMIZE_LEVEL:-紧凑版}"
     local real_c=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
-    local g_procs=1 GOGC=80 wnd=4 buf=524288
-
-    # 档位映射: 旗舰(16/4M/120GC), 增强(12/2M/100GC), 紧凑(8/1M/80GC), 生存(4/0.5M/80GC)
-    [[ "$lvl" == *旗舰* ]] && { g_procs=$real_c; GOGC=120; wnd=16; buf=4194304; }
-    [[ "$lvl" == *增强* ]] && { g_procs=$real_c; GOGC=100; wnd=12; buf=2097152; }
-    [[ "$lvl" == *紧凑* ]] && { g_procs=$real_c; GOGC=80;  wnd=8;  buf=1048576; }
+    # ---> 预设默认值 (生存档位)
+    local g_procs=1 GOGC=200 wnd=4 buf=524288
+    
+    # --- 1. 引入差异化 GOGC 以降低弱 CPU 负担(生存档: 大幅调高 GOGC，靠 GOMEMLIMIT 强制收尾，防止 CPU 空转) ---
+    [[ "$lvl" == *旗舰* ]] && { g_procs=$real_c; GOGC=150; wnd=16; buf=4194304; }
+    [[ "$lvl" == *增强* ]] && { g_procs=$real_c; GOGC=120; wnd=12; buf=2097152; }    
+    [[ "$lvl" == *紧凑* ]] && { g_procs=$real_c; GOGC=100; wnd=8;  buf=1048576; }
+    [[ "$lvl" == *生存* ]] && { g_procs=1; GOGC=200; wnd=4; buf=524288; }
     [ "$real_c" -le 1 ] && g_procs=1 # 强制单核收敛
 
-    export GOMAXPROCS="$g_procs" GOGC="$GOGC" GOMEMLIMIT="${SBOX_GOLIMIT:-64MiB}"
-    export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"
-
+    # --- 2. 导出关键环境变量 ---
+    export GOMAXPROCS="$g_procs"
+    export GOGC="$GOGC"
+    export GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}"
+    # --- 3. 性能深度开关 (关键修改：减少 CPU 开销) --->
+    # memprofilerate=0: 彻底关闭内存采样，减少单核 CPU 指令浪费
+    # madvdontneed=1: 强制 Go 立即归还物理内存页，防止小内存机型判定失误
+    export GODEBUG="memprofilerate=0,madvdontneed=1"
+    export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" 
+    export SINGBOX_UDP_RECVBUF="$buf" 
+    export SINGBOX_UDP_SENDBUF="$buf"
+    
     # CPU 亲和力设置
     [ "$real_c" -gt 1 ] && [[ "$lvl" != *生存* ]] && command -v taskset >/dev/null && \
         taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1 || true
-        
-    info "Profile → $lvl | GOMAXPROCS=$GOMAXPROCS | QUIC_WND=$wnd"
+    info "Profile → $lvl | GOMAXPROCS=$GOMAXPROCS | GOGC=$GOGC | GC_Debug=Optimized"
 }
 
 # NIC/softirq 网卡入口层调度加速（RPS/XPS/批处理密度）
