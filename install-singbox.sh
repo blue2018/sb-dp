@@ -792,16 +792,10 @@ detect_os; set +e
 # 自动从配置提取端口并放行
 apply_firewall() {
     local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    [ -z "$port" ] && return
-    
-    if [ "$OS" = "alpine" ]; then
-        apk add -q iptables ip6tables
-        iptables -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null
-        ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null
-        rc-service iptables save 2>/dev/null || true
-        rc-update add iptables default >/dev/null 2>&1
-    else
+    if [[ -n "$port" ]]; then
         [[ -x "$(command -v ufw)" ]] && ufw allow "$port"/udp >/dev/null 2>&1 || true
+        [[ -x "$(command -v firewall-cmd)" ]] && { firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1; } || true
+        [[ -x "$(command -v iptables)" ]] && iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
     fi
 }
 
