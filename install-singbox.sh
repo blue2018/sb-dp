@@ -616,59 +616,49 @@ EOF
 # ==========================================
 setup_service() {  
     local CPU_N="$CPU_CORE" core_range=""
-    local base_env="Environment=GOTRACEBACK=none"
     local taskset_bin=$(which taskset 2>/dev/null || echo "/usr/bin/taskset")
+    local nice_bin=$(which nice 2>/dev/null || echo "/usr/bin/nice")
+    local cur_nice="${VAR_SYSTEMD_NICE:--10}"
     
     [ "$CPU_N" -le 1 ] && core_range="0" || core_range="0-$((CPU_N - 1))"
-    info "配置系统服务 (核心数: $CPU_N | 绑定: $core_range | Nice: ${VAR_SYSTEMD_NICE:-5})..."
+    info "配置服务 (核心: $CPU_N | 绑定: $core_range | 优先级Nice: $cur_nice)..."
     
     if [ "$OS" = "alpine" ]; then
-        local openrc_export="export GOTRACEBACK=none"
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
-name="sing-box"
-description="Sing-box Optimized Service"
+name="sing-box"; description="Sing-box Optimized Service"
+supervisor="supervise-daemon" # 自动重启保活
+depend() { need net; after firewall; }
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
-$openrc_export
-command="$taskset_bin"
-command_args="-c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
-command_background="yes"
-pidfile="/run/\${RC_SVCNAME}.pid"
-start_pre() { /bin/bash $SBOX_CORE --apply-cwnd || true; }
+export GOTRACEBACK=none
+command="$nice_bin"; command_args="-n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
+command_background="yes"; pidfile="/run/\${RC_SVCNAME}.pid"
+start_pre() { ulimit -n 1000000; ulimit -l infinity; /bin/bash $SBOX_CORE --apply-cwnd || true; }
 start_post() { (sleep 3; /bin/bash $SBOX_CORE --apply-cwnd) & }
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default && rc-service sing-box restart
     else
-        local mem_limit=""
-        [ -n "$SBOX_MEM_HIGH" ] && mem_limit+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
-        [ -n "$SBOX_MEM_MAX" ] && mem_limit+="MemoryMax=$SBOX_MEM_MAX"
+        # Systemd 压缩版：利用变量拼接处理内存限制
+        local mem_l=""
+        [ -n "$SBOX_MEM_HIGH" ] && mem_l+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
+        [ -n "$SBOX_MEM_MAX" ] && mem_l+="MemoryMax=$SBOX_MEM_MAX"$'\n'
 
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service (Optimized)
-After=network-online.target
-Wants=network-online.target
-StartLimitIntervalSec=0
-
+After=network-online.target; Wants=network-online.target; StartLimitIntervalSec=0
 [Service]
-Type=simple
-User=root
-WorkingDirectory=/etc/sing-box
+Type=simple; User=root; WorkingDirectory=/etc/sing-box
 EnvironmentFile=-/etc/sing-box/env
-$base_env
+Environment=GOTRACEBACK=none
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
-Nice=${VAR_SYSTEMD_NICE:-5}
-LimitMEMLOCK=infinity
-CPUWeight=1000
-IOWeight=1000
-Restart=always
-RestartSec=3s
-StartLimitBurst=5
-${mem_limit}LimitNOFILE=1000000
-
+Nice=$cur_nice
+LimitMEMLOCK=infinity; LimitNOFILE=1000000
+Restart=always; RestartSec=3s; StartLimitBurst=5
+${mem_l}CPUWeight=1000; IOWeight=1000
 [Install]
 WantedBy=multi-user.target
 EOF
