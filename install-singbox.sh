@@ -647,7 +647,7 @@ start_pre() {
 }
 EOF
         chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default >/dev/null 2>&1 && rc-service sing-box restart
+        rc-update add sing-box default && rc-service sing-box restart
     else
         local mem_l="" # 利用变量拼接处理内存限制
         [ -n "$SBOX_MEM_HIGH" ] && mem_l+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
