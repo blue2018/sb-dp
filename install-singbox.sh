@@ -627,7 +627,7 @@ setup_service() {
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"; description="Sing-box Optimized Service"
-supervisor="supervise-daemon" # 自动重启保活
+supervisor="supervise-daemon"; respawn_delay=3; respawn_max=3; respawn_period=60
 depend() { need net; after firewall; }
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
@@ -647,7 +647,7 @@ EOF
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service (Optimized)
-After=network-online.target; Wants=network-online.target; StartLimitIntervalSec=0
+After=network-online.target; Wants=network-online.target; StartLimitIntervalSec=60
 [Service]
 Type=simple; User=root; WorkingDirectory=/etc/sing-box
 EnvironmentFile=-/etc/sing-box/env
@@ -657,7 +657,7 @@ ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/con
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
 Nice=$cur_nice
 LimitMEMLOCK=infinity; LimitNOFILE=1000000
-Restart=always; RestartSec=3s; StartLimitBurst=5
+Restart=always; RestartSec=3s; StartLimitBurst=3
 ${mem_l}CPUWeight=1000; IOWeight=1000
 [Install]
 WantedBy=multi-user.target
