@@ -5,11 +5,11 @@ set -euo pipefail
 # 基础变量声明与环境准备
 # ==========================================
 # === 系统与环境参数初始化 ===
-SBOX_ARCH="";          OS_DISPLAY="";         SBOX_CORE="/etc/sing-box/core_script.sh"
-SBOX_GOLIMIT="52MiB";  SBOX_GOGC="80";        SBOX_MEM_MAX="55M"
-SBOX_MEM_HIGH="";      SBOX_GOMAXPROCS="";    SBOX_OPTIMIZE_LEVEL="未检测";  CPU_CORE=1
-VAR_UDP_RMEM="";       VAR_UDP_WMEM="";       VAR_SYSTEMD_NICE="";          INITCWND_DONE="false"
-VAR_SYSTEMD_IOSCHED="";VAR_HY2_BW="200";      RAW_SALA="";                  VAR_DEF_MEM=""
+SBOX_ARCH="";            OS_DISPLAY="";         SBOX_CORE="/etc/sing-box/core_script.sh"
+SBOX_GOLIMIT="48MiB";    SBOX_GOGC="80";        SBOX_MEM_MAX="55M";      SBOX_OPTIMIZE_LEVEL="未检测"
+SBOX_MEM_HIGH="42M";     CPU_CORE="1";          INITCWND_DONE="false";   VAR_DEF_MEM=""
+VAR_UDP_RMEM="";         VAR_UDP_WMEM="";       VAR_SYSTEMD_NICE=""
+VAR_SYSTEMD_IOSCHED="";  VAR_HY2_BW="200";      RAW_SALA=""
 
 # TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
@@ -209,23 +209,36 @@ apply_initcwnd_optimization() {
 
 # sing-box 用户态运行时调度人格（Go/QUIC/缓冲区自适应）
 apply_userspace_adaptive_profile(){
-    local lvl="${SBOX_OPTIMIZE_LEVEL:-紧凑版}"
+    local lvl="${SBOX_OPTIMIZE_LEVEL:-生存}"
     local real_c="$CPU_CORE"
-    local g_procs=1 GOGC=200 wnd=4 buf=1048576
+    local g_procs=1 wnd=4 buf=524288
     
-    [[ "$lvl" == *旗舰* ]] && { g_procs=$real_c; GOGC=150; wnd=16; buf=4194304; }
-    [[ "$lvl" == *增强* ]] && { g_procs=$real_c; GOGC=120; wnd=12; buf=2097152; }
-    [[ "$lvl" == *紧凑* ]] && { g_procs=$real_c; GOGC=100; wnd=8;  buf=1572864; }
-    [[ "$lvl" == *生存* ]] && { g_procs=1; GOGC=200; wnd=4; buf=1048576; }
+    [[ "$lvl" == *旗舰* ]] && { g_procs=$real_c; wnd=16; buf=4194304; }
+    [[ "$lvl" == *增强* ]] && { g_procs=$real_c; wnd=12; buf=2097152; }
+    [[ "$lvl" == *紧凑* ]] && { g_procs=$real_c; wnd=8;  buf=1048576; }
+    [[ "$lvl" == *生存* ]] && { g_procs=1; wnd=4; buf=524288; }
+    [ "$real_c" -le 1 ] && g_procs=1 # 强制单核收敛
     
-    [ "$real_c" -le 1 ] && g_procs=1
     export GOMAXPROCS="$g_procs"
-    export GOGC="$GOGC"
+    export GOGC="${SBOX_GOGC:-200}"  # 使用 optimize_system 的值
     export GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}"
     export GODEBUG="memprofilerate=0,madvdontneed=1"
     export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd"
     export SINGBOX_UDP_RECVBUF="$buf"
     export SINGBOX_UDP_SENDBUF="$buf"
+
+    # === 固化参数到环境文件 (用于 Systemd 持久化) ===
+    mkdir -p /etc/sing-box
+    cat > /etc/sing-box/env <<EOF
+GOMAXPROCS=$GOMAXPROCS
+GOGC=$GOGC
+GOMEMLIMIT=$GOMEMLIMIT
+GODEBUG=memprofilerate=0,madvdontneed=1
+SINGBOX_QUIC_MAX_CONN_WINDOW=$SINGBOX_QUIC_MAX_CONN_WINDOW
+SINGBOX_UDP_RECVBUF=$SINGBOX_UDP_RECVBUF
+SINGBOX_UDP_SENDBUF=$SINGBOX_UDP_SENDBUF
+EOF
+    chmod 644 /etc/sing-box/env
     
     # CPU 亲和力 (KVM 环境加速)
     [ "$real_c" -gt 1 ] && [[ "$lvl" != *生存* ]] && command -v taskset >/dev/null && \
@@ -240,36 +253,37 @@ apply_nic_core_boost() {
     local IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}') || return 0
     local CPU_N="$CPU_CORE"
     # --- 1. 协议栈补偿优化 (CPU 算力与内存双维判定) ---
-    local bgt=600 usc=2000  # 基础档位
+    local bgt=600 usc=3000  # 基础档位
     
     if [ "$CPU_N" -ge 2 ]; then
         # 多核环境：算力充足，追求低延迟切换
-        [ "$mem" -ge 256 ] && bgt=1000 && usc=1500
-        [ "$mem" -ge 512 ] && bgt=3000 && usc=1000
+        [ "$mem" -ge 256 ] && bgt=1000 && usc=2500
+        [ "$mem" -ge 512 ] && bgt=3000 && usc=2000
     else
         # 单核环境：内存再大也减少切换频率，保住单核吞吐量
-        [ "$mem" -ge 256 ] && bgt=1200 && usc=3000
-        [ "$mem" -ge 512 ] && bgt=2500 && usc=4000
+        [ "$mem" -ge 256 ] && bgt=1200 && usc=4000
+        [ "$mem" -ge 512 ] && bgt=2500 && usc=5000
     fi
     
     sysctl -w net.core.netdev_budget=$bgt net.core.netdev_budget_usecs=$usc >/dev/null 2>&1 || true
 
     # --- 2. 硬件层：关闭中断聚合 (消除忽快忽慢的核心) ---
     if command -v ethtool >/dev/null 2>&1; then
-        ethtool -C "$IFACE" adaptive-rx off adaptive-tx off rx-usecs 0 rx-frames 1 tx-usecs 0 tx-frames 1 >/dev/null 2>&1 || true
+        #ethtool -C "$IFACE" adaptive-rx off adaptive-tx off rx-usecs 0 rx-frames 1 tx-usecs 0 tx-frames 1 >/dev/null 2>&1 || true
         ethtool -K "$IFACE" gro on gso on tso off lro off >/dev/null 2>&1 || true
     fi
 
-    # --- 3. 调度与亲和性 ---
+    # --- 3. 调度层：多核或单核优化 ---
     if [ "$CPU_N" -ge 2 ] && [ -d "/sys/class/net/$IFACE/queues" ]; then
         local MASK=$(printf '%x' $(( (1<<CPU_N)-1 )))
-        find "/sys/class/net/$IFACE/queues" -type f \( -name "rps_cpus" -o -name "xps_cpus" \) 2>/dev/null | while read -r q; do
-            [ -w "$q" ] && timeout 0.5s bash -c "echo '$MASK' > '$q'" 2>/dev/null || true
+        for q in /sys/class/net/"$IFACE"/queues/{rx-*,tx-*}/{rps_cpus,xps_cpus}; do
+            [ -e "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
         done
-        info "NIC Boost → 多核并行模式 (Mask: $MASK)"
+        info "NIC Boost → 多核模式 (bgt:$bgt, usc:$usc, mask:$MASK)"
     else
-        sysctl -w net.core.netdev_max_backlog=5000 >/dev/null 2>&1 || true
-        info "NIC Boost → 单核生存模式 (Backlog: 5000)"
+        # 针对单核小鸡，增大接收队列长度
+        sysctl -w net.core.netdev_max_backlog=2000 >/dev/null 2>&1 || true
+        info "NIC Boost → 单核模式 (bgt:$bgt, usc:$usc)"
     fi
 }
 
@@ -323,7 +337,7 @@ optimize_system() {
     local max_udp_mb=$((mem_total * 40 / 100))
     local max_udp_pages=$((max_udp_mb * 256))
     local swappiness_val=10 busy_poll_val=0 quic_extra_msg="" VAR_BACKLOG=2000
-    local ct_max=16384 ct_udp_to=15 ct_stream_to=30
+    local ct_max=16384 ct_udp_to=30 ct_stream_to=30
 
     if [[ "$OS" != "alpine" && "$mem_total" -le 600 ]]; then
         local swap_total
@@ -368,8 +382,8 @@ optimize_system() {
         SBOX_GOLIMIT="$((mem_total * 72 / 100))MiB"; SBOX_GOGC="300"
         VAR_UDP_RMEM="4194304"; VAR_UDP_WMEM="4194304"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="100"; SBOX_GOMAXPROCS="1"; VAR_DEF_MEM="65536"
-        VAR_BACKLOG=5000; swappiness_val=100; busy_poll_val=0; ct_max=16384
+        VAR_HY2_BW="100"; VAR_DEF_MEM="65536"
+        VAR_BACKLOG=5000; swappiness_val=100; busy_poll_val=0
         SBOX_OPTIMIZE_LEVEL="64M 生存版"
     fi
 
@@ -445,7 +459,7 @@ net.ipv4.tcp_mtu_probing = 1             # 自动探测 MTU 解决 UDP 黑洞
 net.ipv4.ip_no_pmtu_disc = 0             # 启用 MTU 探测 (自动寻找最优包大小，防止 Hy2 丢包)
 net.ipv4.tcp_fin_timeout = 20
 net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_max_orphans = $((mem_total * 16)) # 针对小内存机型更合理的上限
+net.ipv4.tcp_max_orphans = $((mem_total * 1024))
 
 # === 6. UDP 协议栈优化 (Hysteria2 传输核心) ===
 net.ipv4.udp_mem = $udp_mem_scale        # 全局 UDP 内存页配额 (根据 RTT 动态计算)
@@ -568,6 +582,7 @@ create_config() {
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "error", "timestamp": true },
+  "dns": { "strategy": "prefer_ipv4", "independent_cache": true, "servers": [{ "address": "https://8.8.4.4/dns-query" }] },
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
@@ -591,7 +606,7 @@ create_config() {
     },
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
-  "outbounds": [{ "type": "direct", "tag": "direct-out" }]
+  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "prefer_ipv4"}]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
@@ -601,62 +616,63 @@ EOF
 # 服务配置
 # ==========================================
 setup_service() {  
-    local CPU_N="$CPU_CORE"
-    local current_nice="${VAR_SYSTEMD_NICE:--5}"
-    [[ "$current_nice" == "-5" ]] && { [ "$CPU_N" -le 1 ] && current_nice="-10" || current_nice="-15"; }
-
-    info "配置系统服务 (核心数: $CPU_N | Nice: $current_nice)..."
+    local CPU_N="$CPU_CORE" core_range=""
+    local taskset_bin=$(which taskset 2>/dev/null || echo "/usr/bin/taskset")
+    local nice_bin=$(which nice 2>/dev/null || echo "/usr/bin/nice")
+    local cur_nice="${VAR_SYSTEMD_NICE:--5}"
     
-    local go_debug_val="GODEBUG=memprofilerate=0,madvdontneed=1"
-    local env_list=(
-        "Environment=GOGC=${SBOX_GOGC:-100}"
-        "Environment=GOMEMLIMIT=${SBOX_GOLIMIT:-100MiB}"
-        "Environment=GOTRACEBACK=none"
-        "Environment=$go_debug_val"
-    )
-    [ -n "${SBOX_GOMAXPROCS:-}" ] && env_list+=("Environment=GOMAXPROCS=$SBOX_GOMAXPROCS")
-
+    [ "$CPU_N" -le 1 ] && core_range="0" || core_range="0-$((CPU_N - 1))"
+    info "配置服务 (核心: $CPU_N | 绑定: $core_range | 优先级Nice: $cur_nice)..."
+    
     if [ "$OS" = "alpine" ]; then
-        local openrc_exports=$(printf "export %s\n" "${env_list[@]}" | sed 's/Environment=//g')
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
-$openrc_exports
+description="Sing-box Optimized Service"
+supervisor="supervise-daemon"
+respawn_delay=30 
+[ -f /etc/sing-box/env ] && . /etc/sing-box/env
+export GOTRACEBACK=none
 command="/usr/bin/sing-box"
 command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
+start_pre() {
+    ulimit -n 1000000 >/dev/null 2>&1 || true
+    sysctl -w net.ipv6.bindv6only=0 >/dev/null 2>&1 || true
+    ( [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd >/dev/null 2>&1 ) &
+}
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default && rc-service sing-box restart
     else
-        local systemd_envs=$(printf "%s\n" "${env_list[@]}")
+        local mem_l="" # 利用变量拼接处理内存限制
+        [ -n "$SBOX_MEM_HIGH" ] && mem_l+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
+        [ -n "$SBOX_MEM_MAX" ] && mem_l+="MemoryMax=$SBOX_MEM_MAX"$'\n'
+
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service (Optimized)
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=0
-
+StartLimitIntervalSec=60
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/etc/sing-box
-$systemd_envs
+EnvironmentFile=-/etc/sing-box/env
+Environment=GOTRACEBACK=none
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
-ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
+ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
-Nice=$current_nice
+Nice=$cur_nice
 LimitMEMLOCK=infinity
-CPUWeight=1000
-IOWeight=1000
-Restart=always
-RestartSec=3s
-StartLimitBurst=5
-MemoryHigh=${SBOX_MEM_HIGH:-}
-MemoryMax=${SBOX_MEM_MAX:-}
 LimitNOFILE=1000000
-
+Restart=always
+RestartSec=5s
+StartLimitBurst=3
+${mem_l}CPUWeight=1000
+IOWeight=1000
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -667,9 +683,9 @@ EOF
             local info=$(ps -p $(systemctl show -p MainPID --value sing-box) -o pid=,rss= 2>/dev/null)
             local pid=$(echo $info | awk '{print $1}') rss=$(echo $info | awk '{printf "%.2f MB", $2/1024}')  
             local mode_tag=$([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")
-            succ "sing-box 启动成功 | PID: ${pid:-N/A} | 内存: ${rss:-N/A} | 网络模式: $mode_tag"  
+            succ "sing-box 启动成功 | PID: ${pid:-N/A} | 内存: ${rss:-N/A} | 模式: $mode_tag"
         else
-            err "sing-box 启动失败，最近 5 行日志："; journalctl -u sing-box -n 5 --no-pager; exit 1
+            err "sing-box 启动失败，最近日志："; journalctl -u sing-box -n 5 --no-pager; exit 1
         fi
     fi
 }
@@ -748,7 +764,6 @@ SBOX_GOLIMIT='$SBOX_GOLIMIT'
 SBOX_GOGC='${SBOX_GOGC:-100}'
 SBOX_MEM_MAX='$SBOX_MEM_MAX'
 SBOX_MEM_HIGH='${SBOX_MEM_HIGH:-}'
-SBOX_GOMAXPROCS='${SBOX_GOMAXPROCS:-}'
 SBOX_OPTIMIZE_LEVEL='$SBOX_OPTIMIZE_LEVEL'
 INITCWND_DONE='${INITCWND_DONE:-false}'
 VAR_SYSTEMD_NICE='${VAR_SYSTEMD_NICE:--5}'
@@ -781,11 +796,12 @@ detect_os; set +e
 
 # 自动从配置提取端口并放行
 apply_firewall() {
-    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    if [[ -n "$port" ]]; then
-        [[ -x "$(command -v ufw)" ]] && ufw allow "$port"/udp >/dev/null 2>&1 || true
-        [[ -x "$(command -v firewall-cmd)" ]] && { firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1; } || true
-        [[ -x "$(command -v iptables)" ]] && iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
+    local port=$(jq -r '.inbounds[0].listen_port // .inbounds[0].port // empty' /etc/sing-box/config.json 2>/dev/null)
+    [ -z "$port" ] && return
+    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1 || true
+    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1 || true
+    elif command -v iptables >/dev/null 2>&1; then
+        iptables -C INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
     fi
 }
 
@@ -825,9 +841,8 @@ if [ ! -f "\$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
 source "\$SBOX_CORE" --detect-only
 
 service_ctrl() {
-    /bin/bash "\$SBOX_CORE" --apply-cwnd >/dev/null 2>&1 || true
-    if [ -f /etc/init.d/sing-box ]; then rc-service sing-box "\$1"
-    else systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "\$1" sing-box; fi
+    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "\$1" && return
+    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "\$1" sing-box
 }
 
 while true; do
@@ -862,6 +877,7 @@ while true; do
                [ -f /etc/init.d/sing-box ] && rc-update del sing-box >/dev/null 2>&1 || true
                info "重置系统参数与清理冗余..."
                rm -f /etc/sysctl.d/99-sing-box.conf
+               [ "$OS" = "alpine" ] && rm -f /run/sing-box.pid
                printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
                sysctl -p >/dev/null 2>&1 || true
                [ -f /swapfile ] && { swapoff /swapfile 2>/dev/null; rm -f /swapfile; sed -i '/\/swapfile/d' /etc/fstab; }
