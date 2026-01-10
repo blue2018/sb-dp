@@ -618,7 +618,7 @@ setup_service() {
     local CPU_N="$CPU_CORE" core_range=""
     local taskset_bin=$(which taskset 2>/dev/null || echo "/usr/bin/taskset")
     local nice_bin=$(which nice 2>/dev/null || echo "/usr/bin/nice")
-    local cur_nice="${VAR_SYSTEMD_NICE:--10}"
+    local cur_nice="${VAR_SYSTEMD_NICE:--5}"
     
     [ "$CPU_N" -le 1 ] && core_range="0" || core_range="0-$((CPU_N - 1))"
     info "配置服务 (核心: $CPU_N | 绑定: $core_range | 优先级Nice: $cur_nice)..."
