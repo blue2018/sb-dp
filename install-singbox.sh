@@ -630,21 +630,12 @@ setup_service() {
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
-description="Sing-box Optimized Service"
-
-# 引入环境文件
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 $openrc_export
-
-# Alpine 同样应用 taskset 优化
-command="$taskset_bin"
-command_args="-c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
+command="/usr/bin/sing-box"
+command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
-
-# 启动前/后补丁
-start_pre() { /bin/bash $SBOX_CORE --apply-cwnd || true; }
-start_post() { (sleep 3; /bin/bash $SBOX_CORE --apply-cwnd) & }
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default && rc-service sing-box restart
