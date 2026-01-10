@@ -627,42 +627,29 @@ setup_service() {
     
     if [ "$OS" = "alpine" ]; then
         cat > /etc/init.d/sing-box <<EOF
+if [ "$OS" = "alpine" ]; then
+    cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
 description="Sing-box Optimized Service"
-# 1. 保持基础监控模式，不使用复杂的 supervisor 逻辑
 supervisor="supervise-daemon"
-respawn_delay=5
-respawn_max=3
-
-# 2. 注入优化环境变量 (这是必须保留的)
+respawn_delay=30 
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
-
-# 3. 关键：直接运行二进制文件，不加 nice 和 taskset
 command="/usr/bin/sing-box"
 command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
-
-# 4. 将所有容易报错的优化操作移到 start_pre，并全部静默处理
 start_pre() {
-    ulimit -n 1000000
-    ulimit -l infinity
-    # 强制尝试开启双栈兼容 (仅通过 sysctl，失败也不影响启动)
+    ulimit -n 1000000 >/dev/null 2>&1 || true
     sysctl -w net.ipv6.bindv6only=0 >/dev/null 2>&1 || true
-}
-
-# 5. 把可能会卡顿的 CWND 优化彻底异步化，不阻塞主进程启动
-start_post() {
-    (sleep 5; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd >/dev/null 2>&1) &
+    ( [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd >/dev/null 2>&1 ) &
 }
 EOF
         chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default && rc-service sing-box restart
+        rc-update add sing-box default >/dev/null 2>&1 && rc-service sing-box restart
     else
-        # Systemd 压缩版：利用变量拼接处理内存限制
-        local mem_l=""
+        local mem_l="" # 利用变量拼接处理内存限制
         [ -n "$SBOX_MEM_HIGH" ] && mem_l+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_l+="MemoryMax=$SBOX_MEM_MAX"$'\n'
 
@@ -893,6 +880,7 @@ while true; do
                [ -f /etc/init.d/sing-box ] && rc-update del sing-box >/dev/null 2>&1 || true
                info "重置系统参数与清理冗余..."
                rm -f /etc/sysctl.d/99-sing-box.conf
+               [ "$OS" = "alpine" ] && rm -f /run/sing-box.pid
                printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
                sysctl -p >/dev/null 2>&1 || true
                [ -f /swapfile ] && { swapoff /swapfile 2>/dev/null; rm -f /swapfile; sed -i '/\/swapfile/d' /etc/fstab; }
