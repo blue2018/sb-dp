@@ -648,7 +648,7 @@ WorkingDirectory=/etc/sing-box
 EnvironmentFile=/etc/sing-box/env
 $base_env
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
-ExecStart=/usr/bin/sing-box run -c /etc/sing-box/config.json
+ExecStart=/usr/bin/taskset -c 0 /usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
 Nice=${VAR_SYSTEMD_NICE:-5}
 LimitMEMLOCK=infinity
