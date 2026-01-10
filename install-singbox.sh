@@ -582,7 +582,7 @@ create_config() {
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "error", "timestamp": true },
-  "dns": { "strategy": "prefer_ipv4", "independent_cache": true, "servers": [{ "address": "https://1.1.1.1/dns-query" }] },
+  "dns": { "strategy": "prefer_ipv4", "independent_cache": true, "servers": [{ "address": "https://8.8.4.4/dns-query" }] },
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
