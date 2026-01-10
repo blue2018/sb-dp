@@ -6,10 +6,10 @@ set -euo pipefail
 # ==========================================
 # === 系统与环境参数初始化 ===
 SBOX_ARCH="";          OS_DISPLAY="";         SBOX_CORE="/etc/sing-box/core_script.sh"
-SBOX_GOLIMIT="48MiB";  SBOX_GOGC="80";        SBOX_MEM_MAX="55M"
-SBOX_MEM_HIGH="";      SBOX_OPTIMIZE_LEVEL="未检测";  CPU_CORE="1"  
-VAR_UDP_RMEM="";       VAR_UDP_WMEM="";       VAR_SYSTEMD_NICE="";       INITCWND_DONE="false"
-VAR_SYSTEMD_IOSCHED="";VAR_HY2_BW="200";      RAW_SALA="";               VAR_DEF_MEM=""
+SBOX_GOLIMIT="48MiB";  SBOX_GOGC="80";        SBOX_MEM_MAX="55M";      SBOX_OPTIMIZE_LEVEL="未检测"
+SBOX_MEM_HIGH="";      CPU_CORE="1";          INITCWND_DONE="false";   VAR_DEF_MEM=""
+VAR_UDP_RMEM="";       VAR_UDP_WMEM="";       VAR_SYSTEMD_NICE=""
+VAR_SYSTEMD_IOSCHED="";VAR_HY2_BW="200";      RAW_SALA=""
 
 # TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
@@ -615,25 +615,35 @@ EOF
 # 服务配置
 # ==========================================
 setup_service() {  
-    local CPU_N="$CPU_CORE"
+    local CPU_N="$CPU_CORE" core_range=""
     local base_env="Environment=GOTRACEBACK=none"
-    info "配置系统服务 (核心数: $CPU_N | Nice: $VAR_SYSTEMD_NIC)..."
+    local taskset_bin=$(which taskset 2>/dev/null || echo "/usr/bin/taskset")
+    
+    [ "$CPU_N" -le 1 ] && core_range="0" || core_range="0-$((CPU_N - 1))"
+    info "配置系统服务 (核心数: $CPU_N | 绑定: $core_range | Nice: ${VAR_SYSTEMD_NICE:-5})..."
     
     if [ "$OS" = "alpine" ]; then
         local openrc_export="export GOTRACEBACK=none"
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
+description="Sing-box Optimized Service"
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 $openrc_export
-command="/usr/bin/sing-box"
-command_args="run -c /etc/sing-box/config.json"
+command="$taskset_bin"
+command_args="-c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
 command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
+start_pre() { /bin/bash $SBOX_CORE --apply-cwnd || true; }
+start_post() { (sleep 3; /bin/bash $SBOX_CORE --apply-cwnd) & }
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default && rc-service sing-box restart
     else
+        local mem_limit=""
+        [ -n "$SBOX_MEM_HIGH" ] && mem_limit+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
+        [ -n "$SBOX_MEM_MAX" ] && mem_limit+="MemoryMax=$SBOX_MEM_MAX"
+
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service (Optimized)
@@ -645,10 +655,10 @@ StartLimitIntervalSec=0
 Type=simple
 User=root
 WorkingDirectory=/etc/sing-box
-EnvironmentFile=/etc/sing-box/env
+EnvironmentFile=-/etc/sing-box/env
 $base_env
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
-ExecStart=/usr/bin/taskset -c 0 /usr/bin/sing-box run -c /etc/sing-box/config.json
+ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
 Nice=${VAR_SYSTEMD_NICE:-5}
 LimitMEMLOCK=infinity
@@ -657,9 +667,7 @@ IOWeight=1000
 Restart=always
 RestartSec=3s
 StartLimitBurst=5
-MemoryHigh=${SBOX_MEM_HIGH:-}
-MemoryMax=${SBOX_MEM_MAX:-}
-LimitNOFILE=1000000
+${mem_limit}LimitNOFILE=1000000
 
 [Install]
 WantedBy=multi-user.target
@@ -671,9 +679,9 @@ EOF
             local info=$(ps -p $(systemctl show -p MainPID --value sing-box) -o pid=,rss= 2>/dev/null)
             local pid=$(echo $info | awk '{print $1}') rss=$(echo $info | awk '{printf "%.2f MB", $2/1024}')  
             local mode_tag=$([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")
-            succ "sing-box 启动成功 | PID: ${pid:-N/A} | 内存: ${rss:-N/A} | 网络模式: $mode_tag"  
+            succ "sing-box 启动成功 | PID: ${pid:-N/A} | 内存: ${rss:-N/A} | 模式: $mode_tag"
         else
-            err "sing-box 启动失败，最近 5 行日志："; journalctl -u sing-box -n 5 --no-pager; exit 1
+            err "sing-box 启动失败，最近日志："; journalctl -u sing-box -n 5 --no-pager; exit 1
         fi
     fi
 }
