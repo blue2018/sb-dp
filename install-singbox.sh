@@ -572,16 +572,7 @@ create_config() {
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "error", "timestamp": true },
-  "dns": {
-    "servers": [
-      { "address": "https://1.1.1.1/dns-query", "detour": "direct-out" },
-      { "address": "https://8.8.4.4/dns-query", "detour": "direct-out" }
-    ],
-    "strategy": "prefer_ipv4",
-    "independent_cache": true,
-    "disable_cache": false,
-    "disable_expire": false
-  },
+  "dns": {"servers":[{"address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"address":"https://8.8.4.4/dns-query","detour":"direct-out"}],"strategy":"prefer_ipv4","independent_cache":true,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
