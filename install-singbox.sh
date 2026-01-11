@@ -5,11 +5,11 @@ set -euo pipefail
 # 基础变量声明与环境准备
 # ==========================================
 # === 系统与环境参数初始化 ===
-SBOX_ARCH="";            OS_DISPLAY="";         SBOX_CORE="/etc/sing-box/core_script.sh"
-SBOX_GOLIMIT="48MiB";    SBOX_GOGC="80";        SBOX_MEM_MAX="55M";      SBOX_OPTIMIZE_LEVEL="未检测"
-SBOX_MEM_HIGH="42M";     CPU_CORE="1";          INITCWND_DONE="false";   VAR_DEF_MEM=""
-VAR_UDP_RMEM="";         VAR_UDP_WMEM="";       VAR_SYSTEMD_NICE=""
-VAR_SYSTEMD_IOSCHED="";  VAR_HY2_BW="200";      RAW_SALA=""
+SBOX_ARCH="";            OS_DISPLAY="";      SBOX_CORE="/etc/sing-box/core_script.sh"
+SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";    SBOX_MEM_MAX="55M";       SBOX_OPTIMIZE_LEVEL="未检测"
+SBOX_MEM_HIGH="42M";     CPU_CORE="1";       INITCWND_DONE="false";    VAR_DEF_MEM=""
+VAR_UDP_RMEM="";         VAR_UDP_WMEM="";    VAR_SYSTEMD_NICE=""
+VAR_SYSTEMD_IOSCHED="";  VAR_HY2_BW="200";   RAW_SALA=""
 
 # TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
@@ -104,6 +104,45 @@ get_cpu_core() {
         p=${p:-100000}; c=$(( q / p )); [ "$c" -le 0 ] && c=1
         echo $(( c < n ? c : n ))
     else echo "$n"; fi
+}
+
+# 获取并校验端口 (范围：1025-65535)
+prompt_for_port() {
+    local p rand
+    while :; do
+        read -r -p "请输入端口 [1025-65535] (回车随机生成): " p
+        if [ -z "$p" ]; then
+            if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
+            elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' '); p=$((1025 + rand % 64511))
+            else p=$((1025 + RANDOM % 64511)); fi
+            echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $p" >&2; echo "$p"; return 0
+        fi
+        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then echo "$p"; return 0
+        else echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字或直接回车" >&2; fi
+    done
+}
+
+#生成 ECC P-256 高性能证书
+generate_cert() {
+    local CERT_DIR="/etc/sing-box/certs"
+    [ -f "$CERT_DIR/fullchain.pem" ] && return 0
+    
+    info "生成 ECC P-256 高性能证书..."
+    mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
+    local ORG="CloudData-$(date +%s | cut -c7-10)"
+    
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+        -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
+        -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN/O=$ORG" \
+        -addext "subjectAltName=DNS:$TLS_DOMAIN,DNS:*.$TLS_DOMAIN" &>/dev/null || {
+        
+        openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
+            -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
+            -days 3650 -subj "/CN=$TLS_DOMAIN" &>/dev/null
+    }
+
+    chmod 600 "$CERT_DIR"/*.pem
+    [ -s "$CERT_DIR/fullchain.pem" ] && succ "ECC 证书就绪" || { err "证书生成失败"; exit 1; }
 }
 
 #获取公网IP
@@ -211,31 +250,15 @@ apply_initcwnd_optimization() {
 apply_userspace_adaptive_profile() {
     local mem=$(probe_memory_total)
     local real_c="$CPU_CORE"
-    local g_procs wnd buf
+    local g_procs="$1" wnd="$2" buf="$3"
     
-    # === 1. GOMAXPROCS 计算 (CPU 核心数) ===
-    if [ "$mem" -ge 450 ]; then      # 512M: 充分利用多核
-        g_procs=$real_c
-        wnd=12; buf=2097152  # 2MB
-    elif [ "$mem" -ge 200 ]; then    # 256M: 适度并发
-        g_procs=$real_c
-        wnd=8; buf=1048576   # 1MB
-    elif [ "$mem" -ge 100 ]; then    # 128M: 保守并发
-        [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
-        wnd=6; buf=524288    # 512KB
-    else                              # 64M: 强制单核
-        g_procs=1
-        wnd=4; buf=262144    # 256KB
-    fi
-    
-    # === 2. 导出运行时变量 ===
-    export GOMAXPROCS="$g_procs"
-    export GODEBUG="madvdontneed=1"
+    # === 1. GOMAXPROCS 计算 (CPU 核心数) & 导出运行时变量 ===
+    export GOGC="$SBOX_GOGC" GOMEMLIMIT="$SBOX_GOLIMIT"
+    export GOMAXPROCS="$g_procs" GODEBUG="madvdontneed=1"
     export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd"
-    export SINGBOX_UDP_RECVBUF="$buf"
-    export SINGBOX_UDP_SENDBUF="$buf"
+    export SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"
     
-    # === 3. 持久化到环境文件 (用于服务重启) ===
+    # === 2. 持久化到环境文件 (用于服务重启) ===
     mkdir -p /etc/sing-box
     cat > /etc/sing-box/env <<EOF
 GOMAXPROCS=$GOMAXPROCS
@@ -248,7 +271,7 @@ SINGBOX_UDP_SENDBUF=$SINGBOX_UDP_SENDBUF
 EOF
     chmod 644 /etc/sing-box/env
     
-    # === 4. CPU 亲和力 (多核环境优化，单核跳过) ===
+    # === 3. CPU 亲和力 (多核环境优化，单核跳过) ===
     if [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1; then
         taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1 || true
     fi
@@ -259,87 +282,24 @@ EOF
 apply_nic_core_boost() {
     local IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
     [ -z "$IFACE" ] && return 0
-    
-    local CPU_N="$CPU_CORE"
-    local mem=$(probe_memory_total)
-    
-    # === 1. 协议栈批处理参数 (与 optimize_system 互补) ===
-    # 注意: netdev_max_backlog 已在 optimize_system 设置，这里不重复
-    local bgt usc
-    
-    # 按标准档位: 64/128/256/512
-    if [ "$CPU_N" -ge 2 ]; then
-        # 多核: 低延迟策略
-        if [ "$mem" -ge 450 ]; then   bgt=3000; usc=2000    # 512M
-        elif [ "$mem" -ge 200 ]; then bgt=1500; usc=2500    # 256M
-        elif [ "$mem" -ge 100 ]; then bgt=1000; usc=3000    # 128M
-        else                          bgt=800;  usc=3500; fi # 64M
-    else
-        # 单核: 高吞吐策略
-        if [ "$mem" -ge 450 ]; then   bgt=2500; usc=5000    # 512M
-        elif [ "$mem" -ge 200 ]; then bgt=2000; usc=4500    # 256M
-        elif [ "$mem" -ge 100 ]; then bgt=1500; usc=4000    # 128M
-        else                          bgt=1000; usc=3500; fi # 64M
-    fi
+    local CPU_N="$CPU_CORE" bgt="$1" usc="$2"
     
     sysctl -w net.core.netdev_budget=$bgt \
                net.core.netdev_budget_usecs=$usc >/dev/null 2>&1 || true
     
-    # === 2. 网卡硬件优化 (仅设置未被 optimize_system 覆盖的) ===
+    # === 网卡硬件优化 (GRO/GSO/TSO/LRO 优化) ===
     if command -v ethtool >/dev/null 2>&1; then
-        # GRO/GSO/TSO/LRO 优化
         ethtool -K "$IFACE" gro on gso on tso off lro off 2>/dev/null || true
     fi
     
-    # === 3. 多核 RPS 分发 (仅多核启用) ===
+    # === 多核 RPS 分发 (仅多核启用) ===
     if [ "$CPU_N" -ge 2 ] && [ -d "/sys/class/net/$IFACE/queues" ]; then
         local MASK=$(printf '%x' $(( (1<<CPU_N)-1 )))
         for q in /sys/class/net/"$IFACE"/queues/*/rps_cpus; do
             [ -e "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
         done
     fi
-    
     info "NIC 优化 → CPU:$CPU_N核 | budget:$bgt | usecs:$usc"
-}
-
-# 获取并校验端口 (范围：1025-65535)
-prompt_for_port() {
-    local p rand
-    while :; do
-        read -r -p "请输入端口 [1025-65535] (回车随机生成): " p
-        if [ -z "$p" ]; then
-            if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
-            elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' '); p=$((1025 + rand % 64511))
-            else p=$((1025 + RANDOM % 64511)); fi
-            echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $p" >&2; echo "$p"; return 0
-        fi
-        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then echo "$p"; return 0
-        else echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字或直接回车" >&2; fi
-    done
-}
-
-#生成 ECC P-256 高性能证书
-generate_cert() {
-    local CERT_DIR="/etc/sing-box/certs"
-    [ -f "$CERT_DIR/fullchain.pem" ] && return 0
-    
-    info "生成 ECC P-256 高性能证书..."
-    mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-    # 使用一条命令尝试生成，失败则使用最简兼容模式
-    local ORG="CloudData-$(date +%s | cut -c7-10)"
-    
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-        -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-        -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN/O=$ORG" \
-        -addext "subjectAltName=DNS:$TLS_DOMAIN,DNS:*.$TLS_DOMAIN" &>/dev/null || {
-        
-        openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
-            -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-            -days 3650 -subj "/CN=$TLS_DOMAIN" &>/dev/null
-    }
-
-    chmod 600 "$CERT_DIR"/*.pem
-    [ -s "$CERT_DIR/fullchain.pem" ] && succ "ECC 证书就绪" || { err "证书生成失败"; exit 1; }
 }
 
 # ==========================================
@@ -351,8 +311,10 @@ optimize_system() {
     local mem_total=$(probe_memory_total)
     local max_udp_mb=$((mem_total * 40 / 100))
     local max_udp_pages=$((max_udp_mb * 256))
+    local real_c="$CPU_CORE"
     local swappiness_val=10 busy_poll_val=0 quic_extra_msg="" VAR_BACKLOG=2000
     local ct_max=16384 ct_udp_to=30 ct_stream_to=30
+    local g_procs g_wnd g_buf net_bgt net_usc
 
     if [[ "$OS" != "alpine" && "$mem_total" -le 600 ]]; then
         local swap_total
@@ -376,7 +338,9 @@ optimize_system() {
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"
         VAR_HY2_BW="500"; VAR_DEF_MEM="327680"
         VAR_BACKLOG=32768; swappiness_val=10; busy_poll_val=50
-        ct_max=65535 ct_stream_to=60
+        g_procs=$real_c; g_wnd=12; g_buf=2097152
+        [ "$real_c" -ge 2 ] && { net_bgt=3000; net_usc=2000; } || { net_bgt=2500; net_usc=5000; }
+        ct_max=65535; ct_stream_to=60
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
         SBOX_GOLIMIT="$((mem_total * 80 / 100))MiB"; SBOX_GOGC="400"
@@ -384,14 +348,18 @@ optimize_system() {
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"
         VAR_HY2_BW="300"; VAR_DEF_MEM="229376"
         VAR_BACKLOG=16384; swappiness_val=10; busy_poll_val=20
-        ct_max=32768 ct_stream_to=45
+        g_procs=$real_c; g_wnd=8; g_buf=1048576
+        [ "$real_c" -ge 2 ] && { net_bgt=1500; net_usc=2500; } || { net_bgt=2000; net_usc=4500; }
+        ct_max=32768; ct_stream_to=45; 
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
         SBOX_GOLIMIT="$((mem_total * 78 / 100))MiB"; SBOX_GOGC="350"
         VAR_UDP_RMEM="8388608"; VAR_UDP_WMEM="8388608"
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="200"; VAR_DEF_MEM="131072"
+        VAR_HY2_BW="200"; VAR_DEF_MEM="131072"  
         VAR_BACKLOG=8000; swappiness_val=60; busy_poll_val=0
+        [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c; wnd=6; buf=524288
+        [ "$real_c" -ge 2 ] && { net_bgt=1000; net_usc=3000; } || { net_bgt=1500; net_usc=4000; }
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
         SBOX_GOLIMIT="$((mem_total * 72 / 100))MiB"; SBOX_GOGC="300"
@@ -399,6 +367,8 @@ optimize_system() {
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"
         VAR_HY2_BW="100"; VAR_DEF_MEM="65536"
         VAR_BACKLOG=5000; swappiness_val=100; busy_poll_val=0
+        g_procs=1; g_wnd=4; g_buf=262144
+        [ "$real_c" -ge 2 ] && { net_bgt=800; net_usc=3500; } || { net_bgt=1000; net_usc=3500; }
         SBOX_OPTIMIZE_LEVEL="64M 生存版"
     fi
 
@@ -504,7 +474,9 @@ SYSCTL
         fi
     fi
 
-    apply_initcwnd_optimization "false"; apply_userspace_adaptive_profile; apply_nic_core_boost
+    apply_initcwnd_optimization "false"
+    apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf"
+    apply_nic_core_boost "$net_bgt" "$net_usc"
 }
 
 # ==========================================
