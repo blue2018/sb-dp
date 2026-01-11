@@ -625,68 +625,100 @@ EOF
 # ==========================================
 setup_service() {  
     local CPU_N="$CPU_CORE" core_range=""
-    local taskset_bin=$(which taskset 2>/dev/null || echo "/usr/bin/taskset")
-    local nice_bin=$(which nice 2>/dev/null || echo "/usr/bin/nice")
+    local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
+    local nice_bin=$(command -v nice 2>/dev/null || echo "nice")
     local cur_nice="${VAR_SYSTEMD_NICE:--5}"
     
     [ "$CPU_N" -le 1 ] && core_range="0" || core_range="0-$((CPU_N - 1))"
-    info "配置服务 (核心: $CPU_N | 绑定: $core_range | 优先级Nice: $cur_nice)..."
+    info "配置服务 (核心: $CPU_N | Nice: $cur_nice)..."
     
     if [ "$OS" = "alpine" ]; then
+        # 确保有 taskset
+        command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
+        
+        # 构建启动命令
+        local exec_cmd="$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
+        
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
-description="Sing-box Optimized Service"
+description="Sing-box Service"
 supervisor="supervise-daemon"
-respawn_delay=30 
+respawn_delay=30
+
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
-command="/usr/bin/sing-box"
-command_args="run -c /etc/sing-box/config.json"
+
+command="$nice_bin"
+command_args="$cur_nice $exec_cmd"
 command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
+rc_ulimit="-n 1000000"
+
+depend() {
+    need net
+}
+
 start_pre() {
-    ulimit -n 1000000 >/dev/null 2>&1 || true
+    /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1
     sysctl -w net.ipv6.bindv6only=0 >/dev/null 2>&1 || true
-    ( [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd >/dev/null 2>&1 ) &
+    ( [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd ) &
+}
+
+start_post() {
+    sleep 2
+    [ -f "\$pidfile" ] && einfo "sing-box 已启动 (PID: \$(cat \$pidfile))"
+    ( sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd ) &
 }
 EOF
         chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default && rc-service sing-box restart
+        rc-update add sing-box default >/dev/null 2>&1
+        rc-service sing-box restart
+        
+        sleep 2
+        if rc-service sing-box status >/dev/null 2>&1; then
+            local pid=$(cat /run/sing-box.pid 2>/dev/null)
+            succ "sing-box 启动成功 | PID: ${pid:-N/A}"
+        else
+            err "启动失败"; exit 1
+        fi
+    
     else
-        local mem_l="" # 利用变量拼接处理内存限制
+        local mem_l=""
         [ -n "$SBOX_MEM_HIGH" ] && mem_l+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_l+="MemoryMax=$SBOX_MEM_MAX"$'\n'
+        
+        local cpu_quota=$((CPU_N * 100))
+        [ "$cpu_quota" -lt 100 ] && cpu_quota=100
 
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
-Description=Sing-box Service (Optimized)
+Description=Sing-box Service
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=60
+
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/etc/sing-box
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
+ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
 Nice=$cur_nice
-LimitMEMLOCK=infinity
 LimitNOFILE=1000000
+LimitMEMLOCK=infinity
+${mem_l}CPUQuota=${cpu_quota}%
 Restart=always
 RestartSec=5s
-StartLimitBurst=3
-${mem_l}CPUWeight=1000
-IOWeight=1000
+
 [Install]
 WantedBy=multi-user.target
 EOF
 
         systemctl daemon-reload && systemctl enable sing-box --now
-        sleep 1.5
+        sleep 2
         if systemctl is-active --quiet sing-box; then
             local info=$(ps -p $(systemctl show -p MainPID --value sing-box) -o pid=,rss= 2>/dev/null)
             local pid=$(echo $info | awk '{print $1}') rss=$(echo $info | awk '{printf "%.2f MB", $2/1024}')  
