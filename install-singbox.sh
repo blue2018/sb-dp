@@ -564,7 +564,6 @@ create_config() {
 
     local mem=$(probe_memory_total)
     local timeout="20s" idle_timeout="30s" recv_window_conn=1048576 recv_window=4194304
-
     if [ "$mem" -ge 450 ]; then
         timeout="60s"; idle_timeout="90s"; recv_window_conn=12582912; recv_window=50331648
     elif [ "$mem" -ge 200 ]; then
@@ -586,7 +585,11 @@ create_config() {
     "ignore_client_bandwidth": false,
     "up_mbps": ${VAR_HY2_BW:-200},
     "down_mbps": ${VAR_HY2_BW:-200},
+    "recv_window_conn": $recv_window_conn,
+    "recv_window": $recv_window,
+    "disable_mtu_discovery": false,
     "udp_timeout": "$timeout",
+    "max_idle_timeout": "$idle_timeout",
     "udp_fragment": true,
     "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
