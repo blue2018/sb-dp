@@ -560,7 +560,10 @@ create_config() {
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
     local mem=$(probe_memory_total)
-    local timeout="20s" idle_timeout="30s" recv_window_conn=1048576 recv_window=4194304
+    local timeout="20s"
+    local idle_timeout="30s"
+    local recv_window_conn=1048576
+    local recv_window=4194304
     if [ "$mem" -ge 450 ]; then
         timeout="60s"; idle_timeout="90s"; recv_window_conn=12582912; recv_window=50331648  # 12MB/48MB
     elif [ "$mem" -ge 200 ]; then
