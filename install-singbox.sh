@@ -602,7 +602,7 @@ setup_service() {
     local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"
     local mem_total=$(probe_memory_total)
     [ "$CPU_N" -le 1 ] && core_range="0" || core_range="0-$((CPU_N - 1))"
-    info "配置服务 (核心: $CPU_N | 绑定: $core_range | 进程Nice: $cur_nice)..."
+    info "配置服务 (核心: $CPU_N | 绑定: $core_range | 权重: $cur_nice)..."
     
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
