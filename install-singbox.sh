@@ -657,16 +657,8 @@ rc_ulimit="-n 1000000"
 rc_nice="$cur_nice"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
-start_pre() {
-    /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1
-    ( [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd ) &
-}
-start_post() {
-    sleep 2
-    if pgrep -f "sing-box run" >/dev/null; then
-        ( sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd ) &
-    fi
-}
+start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
+start_post() { sleep 2; pgrep -f "sing-box run" >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1
