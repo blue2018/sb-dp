@@ -358,7 +358,7 @@ optimize_system() {
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"
         VAR_HY2_BW="200"; VAR_DEF_MEM="131072"  
         VAR_BACKLOG=8000; swappiness_val=60; busy_poll_val=0
-        [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c; wnd=6; buf=524288
+        [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c; g_wnd=6; g_buf=524288
         [ "$real_c" -ge 2 ] && { net_bgt=1000; net_usc=3000; } || { net_bgt=1500; net_usc=4000; }
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
@@ -562,32 +562,60 @@ create_config() {
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
     local mem=$(probe_memory_total)
-    local timeout="30s"
-    # 动态判定：内存越小，回收越快
-    [ "$mem" -le 64 ] && timeout="20s"
-    [ "$mem" -gt 64 ] && [ "$mem" -le 128 ] && timeout="30s"
-    [ "$mem" -gt 512 ] && timeout="60s"
+    local timeout="20s" idle_timeout="30s" recv_window_conn=1048576 recv_window=4194304
+    if [ "$mem" -ge 450 ]; then
+        timeout="60s"; idle_timeout="90s"; recv_window_conn=12582912; recv_window=50331648
+    elif [ "$mem" -ge 200 ]; then
+        timeout="50s"; idle_timeout="75s"; recv_window_conn=6291456; recv_window=25165824
+    elif [ "$mem" -ge 100 ]; then
+        timeout="40s"; idle_timeout="60s"; recv_window_conn=3145728; recv_window=12582912
+    fi
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "error", "timestamp": true },
-  "dns": {"servers":[{"address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"address":"https://8.8.4.4/dns-query","detour":"direct-out"}],"strategy":"$ds","independent_cache":true,"disable_cache":false,"disable_expire":false},
-  "inbounds": [{
-    "type": "hysteria2",
-    "tag": "hy2-in",
-    "listen": "::",
-    "listen_port": $PORT_HY2,
-    "users": [ { "password": "$PSK" } ],
-    "ignore_client_bandwidth": false,
-    "up_mbps": ${VAR_HY2_BW:-200},
-    "down_mbps": ${VAR_HY2_BW:-200},
-    "udp_timeout": "$timeout",
-    "udp_fragment": true,
-    "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
-    "obfs": {"type": "salamander", "password": "$SALA_PASS"},
-    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
-  }],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
+    "log": { "level": "error", "timestamp": true },
+"dns": {
+  "servers": [
+    { "address": "https://1.1.1.1/dns-query", "detour": "direct-out" },
+    { "address": "https://8.8.4.4/dns-query", "detour": "direct-out" }
+  ],
+  "strategy": "$ds",
+  "independent_cache": true,
+  "disable_cache": false,
+  "disable_expire": false
+},
+"inbounds": [{
+  "type": "hysteria2",
+  "tag": "hy2-in",
+  "listen": "::",
+  "listen_port": $PORT_HY2,
+  "users": [{ "password": "$PSK" }],
+  "ignore_client_bandwidth": false,
+  "up_mbps": ${VAR_HY2_BW:-200},
+  "down_mbps": ${VAR_HY2_BW:-200},
+  "udp_timeout": "$timeout",
+  "udp_fragment": true,
+
+  "transport": {
+    "type": "udp",
+    "recv_window_conn": $recv_window_conn,
+    "recv_window": $recv_window,
+    "disable_mtu_discovery": false,
+    "max_idle_timeout": "$idle_timeout"
+  },
+
+  "tls": {
+    "enabled": true,
+    "alpn": ["h3"],
+    "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+    "key_path": "/etc/sing-box/certs/privkey.pem"
+  },
+  "obfs": { "type": "salamander", "password": "$SALA_PASS" },
+  "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+}],
+"outbounds": [
+  { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }
+]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
