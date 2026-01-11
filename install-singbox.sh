@@ -625,54 +625,87 @@ EOF
 setup_service() {  
     local CPU_N="$CPU_CORE" core_range=""
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
-    local nice_bin=$(command -v nice 2>/dev/null || echo "nice")
+    local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
     local cur_nice="${VAR_SYSTEMD_NICE:--5}"
+    local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"
+    local mem_total=$(probe_memory_total)
     [ "$CPU_N" -le 1 ] && core_range="0" || core_range="0-$((CPU_N - 1))"
     info "配置服务 (核心: $CPU_N | 绑定: $core_range | 进程Nice: $cur_nice)..."
     
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
         local exec_cmd="$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
+
+        if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
+            local io_prio=2
+            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
+            exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
+        fi
+        
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
 description="Sing-box Service"
 supervisor="supervise-daemon"
-respawn_delay=5
-respawn_max=3
-respawn_period=60
+respawn_delay=20
+respawn_max=5
+respawn_period=90
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
-command="$nice_bin"
-command_args="$cur_nice $exec_cmd"
+command="$exec_cmd"
 command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
 rc_ulimit="-n 1000000"
-
-depend() {
-    need net
-}
-
+rc_nice="$cur_nice"
+rc_oom_score_adj="-500"
+retry_timeout="10"
+depend() { need net; after firewall; }
 start_pre() {
     /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1
     sysctl -w net.ipv6.bindv6only=0 >/dev/null 2>&1 || true
     ( [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd ) &
 }
-
 start_post() {
     sleep 2
-    [ -f "\$pidfile" ] && einfo "sing-box 已启动 (PID: \$(cat \$pidfile))"
-    ( sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd ) &
+    if [ -f "\$pidfile" ] && kill -0 \$(cat "\$pidfile" 2>/dev/null) 2>/dev/null; then
+        ( sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd ) &
+        einfo "sing-box 已启动 (PID: \$(cat \$pidfile))"
+    else
+        eerror "启动验证失败"; return 1
+    fi
+}
+stop_pre() {
+    [ -f "\$pidfile" ] || return 0
+    local pid=\$(cat "\$pidfile"); kill -TERM \$pid 2>/dev/null || true
+    local wait=0
+    while [ \$wait -lt \${retry_timeout} ]; do
+        kill -0 \$pid 2>/dev/null || break
+        sleep 1; wait=\$((wait + 1))
+    done
 }
 EOF
         chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default >/dev/null 2>&1 && rc-service sing-box restart && sleep 2
-        rc-service sing-box status >/dev/null 2>&1 && succ "sing-box 启动成功 | PID: $(cat /run/sing-box.pid 2>/dev/null || echo 'N/A')" || { err "sing-box 启动失败"; exit 1; }
+        rc-update add sing-box default >/dev/null 2>&1; rc-service sing-box restart
+        sleep 2
+        if rc-service sing-box status >/dev/null 2>&1; then
+            local pid=$(cat /run/sing-box.pid 2>/dev/null || echo "N/A")
+            local nice_val=$(ps -o nice= -p "$pid" 2>/dev/null | xargs || echo "N/A")
+            succ "sing-box 启动成功 | PID: $pid | Nice: $nice_val"
+        else
+            err "sing-box 启动失败"; exit 1
+        fi
     
     else
-        local mem_l=""
-        [ -n "$SBOX_MEM_HIGH" ] && mem_l+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
-        [ -n "$SBOX_MEM_MAX" ] && mem_l+="MemoryMax=$SBOX_MEM_MAX"$'\n'
+        local mem_config=""; [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
+        [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
+        local io_config=""
+        if [ "$mem_total" -ge 200 ]; then
+            [ "$io_class" = "realtime" ] && [ "$mem_total" -ge 450 ] && \
+                io_config="IOSchedulingClass=realtime"$'\n'"IOSchedulingPriority=0" || \
+                io_config="IOSchedulingClass=best-effort"$'\n'"IOSchedulingPriority=2"
+        else
+            io_config="IOSchedulingClass=best-effort"$'\n'"IOSchedulingPriority=4"
+        fi
         local cpu_quota=$((CPU_N * 100))
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         cat > /etc/systemd/system/sing-box.service <<EOF
@@ -680,7 +713,8 @@ EOF
 Description=Sing-box Service
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=60
+StartLimitIntervalSec=90
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -692,12 +726,14 @@ ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
 Nice=$cur_nice
+${io_config}
+OOMScoreAdjust=-500
 LimitNOFILE=1000000
 LimitMEMLOCK=infinity
-${mem_l}CPUQuota=${cpu_quota}%
+${mem_config}CPUQuota=${cpu_quota}%
 Restart=always
 RestartSec=5s
-StartLimitBurst=3
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target
