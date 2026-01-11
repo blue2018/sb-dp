@@ -208,47 +208,54 @@ apply_initcwnd_optimization() {
 }
 
 # sing-box 用户态运行时调度人格（Go/QUIC/缓冲区自适应）
-apply_userspace_adaptive_profile(){
-    local lvl="${SBOX_OPTIMIZE_LEVEL:-生存}"
+apply_userspace_adaptive_profile() {
+    local mem=$(probe_memory_total)
     local real_c="$CPU_CORE"
-    local g_procs=1 wnd=4 buf=524288
+    local g_procs wnd buf
     
-    [[ "$lvl" == *旗舰* ]] && { g_procs=$real_c; wnd=16; buf=4194304; }
-    [[ "$lvl" == *增强* ]] && { g_procs=$real_c; wnd=12; buf=2097152; }
-    [[ "$lvl" == *紧凑* ]] && { g_procs=$real_c; wnd=8;  buf=1048576; }
-    [[ "$lvl" == *生存* ]] && { g_procs=1; wnd=4; buf=524288; }
-    [ "$real_c" -le 1 ] && g_procs=1 # 强制单核收敛
+    # === 1. GOMAXPROCS 计算 (CPU 核心数) ===
+    if [ "$mem" -ge 450 ]; then      # 512M: 充分利用多核
+        g_procs=$real_c
+        wnd=12; buf=2097152  # 2MB
+    elif [ "$mem" -ge 200 ]; then    # 256M: 适度并发
+        g_procs=$real_c
+        wnd=8; buf=1048576   # 1MB
+    elif [ "$mem" -ge 100 ]; then    # 128M: 保守并发
+        [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
+        wnd=6; buf=524288    # 512KB
+    else                              # 64M: 强制单核
+        g_procs=1
+        wnd=4; buf=262144    # 256KB
+    fi
     
+    # === 2. 导出运行时变量 ===
     export GOMAXPROCS="$g_procs"
-    export GOGC="${SBOX_GOGC:-200}"  # 使用 optimize_system 的值
-    export GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}"
-    export GODEBUG="memprofilerate=0,madvdontneed=1"
+    export GODEBUG="madvdontneed=1"
     export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd"
     export SINGBOX_UDP_RECVBUF="$buf"
     export SINGBOX_UDP_SENDBUF="$buf"
-
-    # === 固化参数到环境文件 (用于 Systemd 持久化) ===
+    
+    # === 3. 持久化到环境文件 (用于服务重启) ===
     mkdir -p /etc/sing-box
     cat > /etc/sing-box/env <<EOF
 GOMAXPROCS=$GOMAXPROCS
-GOGC=$GOGC
-GOMEMLIMIT=$GOMEMLIMIT
-GODEBUG=memprofilerate=0,madvdontneed=1
+GOGC=${SBOX_GOGC}
+GOMEMLIMIT=${SBOX_GOLIMIT}
+GODEBUG=madvdontneed=1
 SINGBOX_QUIC_MAX_CONN_WINDOW=$SINGBOX_QUIC_MAX_CONN_WINDOW
 SINGBOX_UDP_RECVBUF=$SINGBOX_UDP_RECVBUF
 SINGBOX_UDP_SENDBUF=$SINGBOX_UDP_SENDBUF
 EOF
     chmod 644 /etc/sing-box/env
     
-    # CPU 亲和力 (KVM 环境加速)
-    [ "$real_c" -gt 1 ] && [[ "$lvl" != *生存* ]] && command -v taskset >/dev/null && \
+    # === 4. CPU 亲和力 (多核环境优化，单核跳过) ===
+    if [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1; then
         taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1 || true
-    
-    info "Profile → $lvl | GOMAXPROCS=$GOMAXPROCS | GOGC=$GOGC | Buffer=$((buf/1024))KB"
+    fi
+    info "Runtime → CPU:$g_procs核 | QUIC窗口:$wnd | Buffer:$((buf/1024))KB"
 }
 
 # NIC/softirq 网卡入口层调度加速（RPS/XPS/批处理密度）
-# NIC 网卡层优化（避免与 optimize_system 冲突）
 apply_nic_core_boost() {
     local IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
     [ -z "$IFACE" ] && return 0
