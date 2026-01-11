@@ -539,7 +539,6 @@ install_singbox() {
 create_config() {
     local PORT_HY2="${1:-}"
     mkdir -p /etc/sing-box
-
     local ds="ipv4_only"
     [ "$IS_V6_OK" = "true" ] && ds="prefer_ipv4"
     
