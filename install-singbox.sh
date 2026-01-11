@@ -560,16 +560,22 @@ create_config() {
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
     local mem=$(probe_memory_total)
-    local timeout="30s"
-    # 动态判定：内存越小，回收越快
-    [ "$mem" -le 64 ] && timeout="20s"
-    [ "$mem" -gt 64 ] && [ "$mem" -le 128 ] && timeout="30s"
-    [ "$mem" -gt 512 ] && timeout="60s"
+    local timeout idle_timeout recv_window_conn recv_window
+    if [ "$mem" -ge 450 ]; then
+        timeout="60s"; idle_timeout="90s"; recv_window_conn=12582912; recv_window=50331648  # 12MB/48MB
+    elif [ "$mem" -ge 200 ]; then
+        timeout="50s"; idle_timeout="75s"; recv_window_conn=6291456; recv_window=25165824   # 6MB/24MB
+    elif [ "$mem" -ge 100 ]; then
+        timeout="40s"; idle_timeout="60s"; recv_window_conn=3145728; recv_window=12582912   # 3MB/12MB
+    else
+        timeout="20s"; idle_timeout="30s"; recv_window_conn=1048576; recv_window=4194304    # 1MB/4MB
+    fi
+    
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "error", "timestamp": true },
-  "dns": { "strategy": "prefer_ipv4", "independent_cache": true, "servers": [{ "address": "https://8.8.4.4/dns-query" }] },
+  "dns": {"servers":[{"address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"address":"https://8.8.4.4/dns-query","detour":"direct-out"}],"strategy":"prefer_ipv4","independent_cache":true,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
@@ -579,8 +585,12 @@ create_config() {
     "ignore_client_bandwidth": false,
     "up_mbps": ${VAR_HY2_BW:-200},
     "down_mbps": ${VAR_HY2_BW:-200},
-    "udp_timeout": "$timeout",
     "udp_fragment": true,
+    "recv_window_conn": $recv_window_conn,
+    "recv_window": $recv_window,
+    "disable_mtu_discovery": false,
+    "udp_timeout": "$timeout",
+    "max_idle_timeout": "$idle_timeout",
     "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
