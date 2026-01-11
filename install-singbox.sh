@@ -756,9 +756,9 @@ display_system_status() {
     local CWND_LBL=$(echo "$ROUTE_DEF" | grep -q "initcwnd" && echo "(已优化)" || echo "(默认)")
     local SBOX_PID=$(pgrep sing-box | head -n1)
     local NI_VAL="离线"; local NI_LBL=""
-    if [ -n "$SBOX_PID" ]; then
-        NI_VAL=$(cat /proc/$SBOX_PID/stat | awk '{print $19}')
-        NI_LBL=$([ "$NI_VAL" -lt 0 ] && echo "(进程优先)" || echo "(默认)")
+    if [ -n "$SBOX_PID" ] && [ -f "/proc/$SBOX_PID/stat" ]; then
+        NI_VAL=$(cat "/proc/$SBOX_PID/stat" | awk '{print $19}')
+        [ "$NI_VAL" -lt 0 ] && NI_LBL="(进程优先)" || { [ "$NI_VAL" -gt 0 ] && NI_LBL="(低优先级)" || NI_LBL="(默认)"; }
     fi
     local current_cca=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
     case "$current_cca" in bbr3) bbr_display="BBRv3 (极致响应)" ;; bbr2) bbr_display="BBRv2 (平衡加速)" ;; bbr) bbr_display="BBRv1 (标准加速)" ;; *) bbr_display="$current_cca (非标准)" ;; esac
