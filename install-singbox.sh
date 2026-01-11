@@ -634,71 +634,48 @@ setup_service() {
     
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
-        local exec_cmd="$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
-
+        local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
         if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
-            local io_prio=2
-            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
-            exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
+            local io_prio=2; [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
+            exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"  
         fi
-        
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
 description="Sing-box Service"
 supervisor="supervise-daemon"
-respawn_delay=20
-respawn_max=5
-respawn_period=90
+respawn_delay=10
+respawn_max=3
+respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
-start() {
-    ebegin "Starting sing-box"
-    start-stop-daemon --start --background --make-pidfile \
-        --pidfile "\$pidfile" --exec /bin/sh -- -c "$exec_cmd"
-    eend \$?
-}
+command="/bin/sh"
+command_args="-c '$exec_cmd'"
 pidfile="/run/\${RC_SVCNAME}.pid"
 rc_ulimit="-n 1000000"
 rc_nice="$cur_nice"
 rc_oom_score_adj="-500"
-retry_timeout="10"
 depend() { need net; after firewall; }
 start_pre() {
     /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1
-    sysctl -w net.ipv6.bindv6only=0 >/dev/null 2>&1 || true
     ( [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd ) &
 }
 start_post() {
     sleep 2
-    if [ -f "\$pidfile" ] && kill -0 \$(cat "\$pidfile" 2>/dev/null) 2>/dev/null; then
+    if pgrep -f "sing-box run" >/dev/null; then
         ( sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd ) &
-        einfo "sing-box 已启动 (PID: \$(cat \$pidfile))"
-    else
-        eerror "启动验证失败"; return 1
     fi
-}
-stop_pre() {
-    [ -f "\$pidfile" ] || return 0
-    local pid=\$(cat "\$pidfile"); kill -TERM \$pid 2>/dev/null || true
-    local wait=0
-    while [ \$wait -lt \${retry_timeout} ]; do
-        kill -0 \$pid 2>/dev/null || break
-        sleep 1; wait=\$((wait + 1))
-    done
 }
 EOF
         chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default >/dev/null 2>&1; rc-service sing-box restart
+        rc-update add sing-box default >/dev/null 2>&1
+        RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1
         sleep 2
-        if rc-service sing-box status >/dev/null 2>&1; then
-            local pid=$(cat /run/sing-box.pid 2>/dev/null || echo "N/A")
-            local nice_val=$(ps -o nice= -p "$pid" 2>/dev/null | xargs || echo "N/A")
-            succ "sing-box 启动成功 | PID: $pid | Nice: $nice_val"
-        else
-            err "sing-box 启动失败"; exit 1
-        fi
-    
+        local real_pid=$(pgrep -f "sing-box run" | head -n1)
+        if [ -n "$real_pid" ]; then
+            local nice_val=$(cat /proc/$real_pid/stat 2>/dev/null | awk '{print $19}')
+            succ "sing-box 启动成功 | PID: $real_pid | Nice: ${nice_val:-N/A}"
+        else { err "sing-box 启动失败"; exit 1; } fi
     else
         local mem_config=""; [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
@@ -717,8 +694,8 @@ EOF
 Description=Sing-box Service
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=90
-StartLimitBurst=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -736,7 +713,7 @@ LimitNOFILE=1000000
 LimitMEMLOCK=infinity
 ${mem_config}CPUQuota=${cpu_quota}%
 Restart=always
-RestartSec=5s
+RestartSec=10s
 TimeoutStopSec=15
 
 [Install]
@@ -750,9 +727,7 @@ EOF
             local pid=$(echo $info | awk '{print $1}') rss=$(echo $info | awk '{printf "%.2f MB", $2/1024}')  
             local mode_tag=$([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")
             succ "sing-box 启动成功 | PID: ${pid:-N/A} | 内存: ${rss:-N/A} | 模式: $mode_tag"
-        else
-            err "sing-box 启动失败，最近日志："; journalctl -u sing-box -n 5 --no-pager; exit 1
-        fi
+        else { err "sing-box 启动失败，最近日志："; journalctl -u sing-box -n 5 --no-pager; exit 1; } fi
     fi
 }
 
