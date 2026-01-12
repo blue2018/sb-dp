@@ -597,7 +597,6 @@ create_config() {
     "down_mbps": ${VAR_HY2_BW:-200},
     "udp_timeout": "$timeout",
     "udp_fragment": true,
-    "tcp_fast_open": true,
     "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
@@ -862,7 +861,7 @@ service_ctrl() {
 }
 
 while true; do
-    echo "======================================================" 
+    echo "========================" 
     echo ""
     echo " Sing-box HY2 管理 (sb)"
     echo ""
