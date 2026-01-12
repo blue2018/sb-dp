@@ -554,9 +554,8 @@ install_singbox() {
 create_config() {
     local PORT_HY2="${1:-}"
     mkdir -p /etc/sing-box
-
     local ds="ipv4_only"
-    [ "$IS_V6_OK" = "true" ] && ds="prefer_ipv4"
+    [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     
     # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
@@ -577,8 +576,7 @@ create_config() {
     fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    local mem=$(probe_memory_total)
-    local timeout="30s"
+    local mem=$(probe_memory_total); local timeout="30s"
     # 动态判定：内存越小，回收越快
     [ "$mem" -le 64 ] && timeout="20s"
     [ "$mem" -gt 64 ] && [ "$mem" -le 128 ] && timeout="30s"
@@ -692,7 +690,8 @@ ${io_config}
 OOMScoreAdjust=-500
 LimitNOFILE=1000000
 LimitMEMLOCK=infinity
-${mem_config}CPUQuota=${cpu_quota}%
+${mem_config}
+CPUQuota=${cpu_quota}%
 Restart=always
 RestartSec=10s
 TimeoutStopSec=15
@@ -801,6 +800,7 @@ TLS_DOMAIN_POOL=($(printf "'%s' " "${TLS_DOMAIN_POOL[@]}"))
 RAW_SALA='$FINAL_SALA'
 RAW_IP4='${RAW_IP4:-}'
 RAW_IP6='${RAW_IP6:-}'
+IS_V6_OK='${IS_V6_OK:-false}'
 EOF
 
     # 导出函数
@@ -819,12 +819,14 @@ detect_os; set +e
 
 # 自动从配置提取端口并放行
 apply_firewall() {
-    local port=$(jq -r '.inbounds[0].listen_port // .inbounds[0].port // empty' /etc/sing-box/config.json 2>/dev/null)
+    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
     [ -z "$port" ] && return
-    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1 || true
-    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1 || true
+    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
+    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
     elif command -v iptables >/dev/null 2>&1; then
-        iptables -C INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
+        iptables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+        command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
     fi
 }
 
