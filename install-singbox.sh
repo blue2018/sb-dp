@@ -695,12 +695,12 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload && systemctl enable sing-box --now >/dev/null 2>&1 || true
     fi
-    sleep 2; local pid=""; 
+    sleep 2; local pid="" rss="N/A" ni="N/A"
     [ "$OS" = "alpine" ] && pid=$(pgrep -f "sing-box run" | head -n1) || pid=$(systemctl show -p MainPID --value sing-box 2>/dev/null | grep -E -v '^0$|^$' || echo "")
-    if [ -n "$pid" ]; then
-        local rss=$(ps -q "$pid" -o rss= 2>/dev/null | awk '{printf "%.2f MB", $1/1024}')
-        local ni=$(cat /proc/"$pid"/stat 2>/dev/null | awk '{print $19}' || echo "N/A")
-        succ "sing-box 启动成功 | PID: $pid | 内存: ${rss:-N/A} | Nice: $ni | 模式: $([[ "${INITCWND_DONE:-false}" == "true" ]] && echo "内核" || echo "应用层")"
+    if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+        rss=$(awk '/VmRSS/ {printf "%.2f MB", $2/1024}' /proc/"$pid"/status 2>/dev/null || echo "N/A")
+        ni=$(awk '{print $19}' /proc/"$pid"/stat 2>/dev/null || echo "0")
+        succ "sing-box 启动成功 | PID: $pid | 内存: $rss | Nice: $ni | 模式: $([[ "${INITCWND_DONE:-false}" == "true" ]] && echo "内核" || echo "应用层")"
     else err "sing-box 启动失败，最近日志："; [ "$OS" = "alpine" ] && { logread | tail -n 5 2>/dev/null || tail -n 5 /var/log/messages 2>/dev/null; } || journalctl -u sing-box -n 5 --no-pager 2>/dev/null; exit 1; fi
 }
 
