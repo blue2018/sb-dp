@@ -158,8 +158,8 @@ get_network_info() {
     RAW_IP4=$(tr -d '[:space:]' < "$t4" 2>/dev/null | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || echo "")
     RAW_IP6=$(tr -d '[:space:]' < "$t6" 2>/dev/null | grep -E '([a-fA-F0-9:]+:+)+[a-fA-F0-9]+' || echo "")
     rm -f "$t4" "$t6"; [ -n "$RAW_IP6" ] && IS_V6_OK="true" || IS_V6_OK="false"
-    [ -n "$RAW_IP4" ] && succ "IPv4: $RAW_IP4 [✔]" || warn "IPv4: 不可用"
-    [ "$IS_V6_OK" = "true" ] && succ "IPv6: $RAW_IP6 [✔]" || warn "IPv6: 不可用"
+    [ -n "$RAW_IP4" ] && succ "IPv4: $RAW_IP4 [✔ ]" || warn "IPv4: 不可用"
+    [ "$IS_V6_OK" = "true" ] && succ "IPv6: $RAW_IP6 [✔ ]" || warn "IPv6: 不可用"  
 }
 
 # === 网络延迟探测模块 ===
@@ -491,7 +491,7 @@ SYSCTL
 install_singbox() {
     local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub"
     [ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
-
+    # 1. 获取版本号 (增加多源获取)
     info "获取 Sing-Box 最新版本信息..."
     local RJ=$(curl -sL --connect-timeout 5 --max-time 15 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null)
     [ -n "$RJ" ] && LATEST_TAG=$(echo "$RJ" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9.]+"' | head -n1 | cut -d'"' -f4)
@@ -506,6 +506,7 @@ install_singbox() {
         err "获取版本失败，请检查网络"; exit 1
     }
 
+    # 2. 版本展示与更新判断
     local REMOTE_VER="${LATEST_TAG#v}"
     if [[ "$MODE" == "update" ]]; then
         echo -e "---------------------------------"
@@ -516,14 +517,17 @@ install_singbox() {
         info "发现新版本，开始下载更新..."
     fi
 
+    # 3. 多源并行/循环下载逻辑
     local FILE="sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"
     local URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}"
     local TD=$(mktemp -d); local TF="$TD/sb.tar.gz"; local dl_ok=false
-    local LINKS=("https://mirror.ghproxy.com/$URL" "https://ghproxy.com/$URL" "$URL" "https://sing-box.org/releases/$FILE")
+    # 优化的备用源列表
+    local LINKS=("$URL" "https://sing-box.org/releases/$FILE" "https://testingcf.jsdelivr.net/gh/SagerNet/sing-box@v${REMOTE_VER}/$FILE" "https://mirror.ghproxy.com/$URL")
 
     for LINK in "${LINKS[@]}"; do
         info "正在下载: $(echo $LINK | cut -d'/' -f3)..."
-        if curl -fL --connect-timeout 8 --max-time 60 "$LINK" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 1000000 ]; then
+        # -k 解决 SSL key too weak 问题，确保镜像站可用
+        if curl -fkL --connect-timeout 8 --max-time 120 "$LINK" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 1000000 ]; then
             dl_ok=true; break
         fi
         warn "源失效，切换备用源..."
@@ -534,9 +538,9 @@ install_singbox() {
         err "下载失败，安装中断"; exit 1
     }
 
+    # 4. 解压安装逻辑块
     tar -xf "$TF" -C "$TD" --strip-components=1
     pgrep sing-box >/dev/null && systemctl stop sing-box 2>/dev/null
-    
     [ -f "$TD/sing-box" ] && { 
         install -m 755 "$TD/sing-box" /usr/bin/sing-box; rm -rf "$TD"
         succ "内核安装成功: v$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')"
