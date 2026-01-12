@@ -583,7 +583,6 @@ create_config() {
     "udp_timeout": "$timeout",
     "udp_fragment": true,
     "tcp_fast_open": true,
-    "tcp_multi_path": false,
     "disable_tcp_keep_alive": true,
     "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
