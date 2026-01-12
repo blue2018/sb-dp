@@ -554,9 +554,11 @@ install_singbox() {
 create_config() {
     local PORT_HY2="${1:-}"
     mkdir -p /etc/sing-box
+
+    info "测试锚点 1"
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-    
+    info "测试锚点 2"
     # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
@@ -603,6 +605,7 @@ create_config() {
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
+    info "测试锚点 3"
 }
 
 # ==========================================
