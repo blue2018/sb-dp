@@ -466,7 +466,6 @@ net.netfilter.nf_conntrack_max = $ct_max
 net.netfilter.nf_conntrack_udp_timeout = $ct_udp_to
 net.netfilter.nf_conntrack_udp_timeout_stream = $ct_stream_to
 SYSCTL
-
     # 兼容地加载 sysctl（优先 sysctl --system，其次回退）
     if command -v sysctl >/dev/null 2>&1 && sysctl --system >/dev/null 2>&1; then :
     else sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true; fi
@@ -652,12 +651,6 @@ start_post() { sleep 2; pgrep -f "sing-box run" >/dev/null && (sleep 3; [ -f "$S
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1 || true
-        sleep 2
-        local real_pid=$(pgrep -f "sing-box run" | head -n1)
-        if [ -n "$real_pid" ]; then
-            local nice_val=$(cat /proc/$real_pid/stat 2>/dev/null | awk '{print $19}')
-            succ "sing-box 启动成功 | PID: $real_pid | Nice: ${nice_val:-N/A}"
-        else { err "sing-box 启动失败"; exit 1; } fi
     else
         local mem_config=""; [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
@@ -701,14 +694,14 @@ TimeoutStopSec=15
 WantedBy=multi-user.target
 EOF
         systemctl daemon-reload && systemctl enable sing-box --now >/dev/null 2>&1 || true
-        sleep 2
-        if systemctl is-active --quiet sing-box; then
-            local pid=$(systemctl show -p MainPID --value sing-box 2>/dev/null); local rss="N/A"
-            [ -n "$pid" ] && [ "$pid" -ne 0 ] && rss=$(ps -q "$pid" -o rss= 2>/dev/null | awk '{printf "%.2f MB", $1/1024}') || rss="N/A"
-            local mode_tag=$([[ "${INITCWND_DONE:-false}" == "true" ]] && echo "内核" || echo "应用层")
-            succ "sing-box 启动成功 | PID: ${pid:-N/A} | 内存: $rss | 模式: $mode_tag"
-        else err "sing-box 启动失败，最近日志："; journalctl -u sing-box -n 5 --no-pager 2>/dev/null || true; exit 1; fi
     fi
+    sleep 2; local pid=""; 
+    [ "$OS" = "alpine" ] && pid=$(pgrep -f "sing-box run" | head -n1) || pid=$(systemctl show -p MainPID --value sing-box 2>/dev/null | grep -E -v '^0$|^$' || echo "")
+    if [ -n "$pid" ]; then
+        local rss=$(ps -q "$pid" -o rss= 2>/dev/null | awk '{printf "%.2f MB", $1/1024}')
+        local ni=$(cat /proc/"$pid"/stat 2>/dev/null | awk '{print $19}' || echo "N/A")
+        succ "sing-box 启动成功 | PID: $pid | 内存: ${rss:-N/A} | Nice: $ni | 模式: $([[ "${INITCWND_DONE:-false}" == "true" ]] && echo "内核" || echo "应用层")"
+    else err "sing-box 启动失败，最近日志："; [ "$OS" = "alpine" ] && { logread | tail -n 5 2>/dev/null || tail -n 5 /var/log/messages 2>/dev/null; } || journalctl -u sing-box -n 5 --no-pager 2>/dev/null; exit 1; fi
 }
 
 # ==========================================
