@@ -692,8 +692,7 @@ ${io_config}
 OOMScoreAdjust=-500
 LimitNOFILE=1000000
 LimitMEMLOCK=infinity
-${mem_config}
-CPUQuota=${cpu_quota}%
+${mem_config}CPUQuota=${cpu_quota}%
 Restart=always
 RestartSec=10s
 TimeoutStopSec=15
