@@ -539,6 +539,7 @@ install_singbox() {
 create_config() {
     local PORT_HY2="${1:-}"
     mkdir -p /etc/sing-box
+
     local ds="ipv4_only"
     [ "$IS_V6_OK" = "true" ] && ds="prefer_ipv4"
     
@@ -562,60 +563,30 @@ create_config() {
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
     local mem=$(probe_memory_total)
-    local timeout="20s" idle_timeout="30s" recv_window_conn=1048576 recv_window=4194304
-    if [ "$mem" -ge 450 ]; then
-        timeout="60s"; idle_timeout="90s"; recv_window_conn=12582912; recv_window=50331648
-    elif [ "$mem" -ge 200 ]; then
-        timeout="50s"; idle_timeout="75s"; recv_window_conn=6291456; recv_window=25165824
-    elif [ "$mem" -ge 100 ]; then
-        timeout="40s"; idle_timeout="60s"; recv_window_conn=3145728; recv_window=12582912
-    fi
+    local timeout="30s"
+    # 动态判定：内存越小，回收越快
+    [ "$mem" -ge 450 ] && timeout="60s" || { [ "$mem" -ge 200 ] && timeout="50s"; } || { [ "$mem" -ge 100 ] && timeout="40s"; }
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
-    "log": { "level": "error", "timestamp": true },
-"dns": {
-  "servers": [
-    { "address": "https://1.1.1.1/dns-query", "detour": "direct-out" },
-    { "address": "https://8.8.4.4/dns-query", "detour": "direct-out" }
-  ],
-  "strategy": "$ds",
-  "independent_cache": true,
-  "disable_cache": false,
-  "disable_expire": false
-},
-"inbounds": [{
-  "type": "hysteria2",
-  "tag": "hy2-in",
-  "listen": "::",
-  "listen_port": $PORT_HY2,
-  "users": [{ "password": "$PSK" }],
-  "ignore_client_bandwidth": false,
-  "up_mbps": ${VAR_HY2_BW:-200},
-  "down_mbps": ${VAR_HY2_BW:-200},
-  "udp_timeout": "$timeout",
-  "udp_fragment": true,
-
-  "transport": {
-    "type": "udp",
-    "recv_window_conn": $recv_window_conn,
-    "recv_window": $recv_window,
-    "disable_mtu_discovery": false,
-    "max_idle_timeout": "$idle_timeout"
-  },
-
-  "tls": {
-    "enabled": true,
-    "alpn": ["h3"],
-    "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-    "key_path": "/etc/sing-box/certs/privkey.pem"
-  },
-  "obfs": { "type": "salamander", "password": "$SALA_PASS" },
-  "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
-}],
-"outbounds": [
-  { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }
-]
+  "log": { "level": "error", "timestamp": true },
+  "dns": {"servers":[{"address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"address":"https://8.8.4.4/dns-query","detour":"direct-out"}],"strategy":"$ds","independent_cache":true,"disable_cache":false,"disable_expire":false},
+  "inbounds": [{
+    "type": "hysteria2",
+    "tag": "hy2-in",
+    "listen": "::",
+    "listen_port": $PORT_HY2,
+    "users": [ { "password": "$PSK" } ],
+    "ignore_client_bandwidth": false,
+    "up_mbps": ${VAR_HY2_BW:-200},
+    "down_mbps": ${VAR_HY2_BW:-200},
+    "udp_timeout": "$timeout",
+    "udp_fragment": true,
+    "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
+    "obfs": {"type": "salamander", "password": "$SALA_PASS"},
+    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+  }],
+  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
