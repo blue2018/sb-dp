@@ -659,7 +659,7 @@ EOF
             succ "sing-box 启动成功 | PID: $real_pid | Nice: ${nice_val:-N/A}"
         else { err "sing-box 启动失败"; exit 1; } fi
     else
-        local mem_config=""; [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
+        local mem_config=""; [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
         local io_config=""
         if [ "$mem_total" -ge 200 ]; then
@@ -683,7 +683,7 @@ User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
-ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
+ExecStartPre=-/bin/bash ${SBOX_CORE:-/etc/sing-box/core_script.sh} --apply-cwnd
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
 Nice=$cur_nice
@@ -691,7 +691,8 @@ ${io_config}
 OOMScoreAdjust=-500
 LimitNOFILE=1000000
 LimitMEMLOCK=infinity
-${mem_config}CPUQuota=${cpu_quota}%
+${mem_config}
+CPUQuota=${cpu_quota}%
 Restart=always
 RestartSec=10s
 TimeoutStopSec=15
