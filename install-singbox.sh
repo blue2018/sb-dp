@@ -668,6 +668,7 @@ EOF
         else io_config="-IOSchedulingClass=best-effort"$'\n'"-IOSchedulingPriority=4"; fi
         local cpu_quota=$((CPU_N * 100))
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
+        
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
@@ -698,7 +699,6 @@ TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF
-
         systemctl daemon-reload && systemctl enable sing-box --now >/dev/null 2>&1 || true
         sleep 2
         if systemctl is-active --quiet sing-box; then
