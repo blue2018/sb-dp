@@ -650,8 +650,7 @@ start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>
 start_post() { sleep 2; pgrep -f "sing-box run" >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
 EOF
         chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default >/dev/null 2>&1
-        RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1
+        rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1 || true
         sleep 2
         local real_pid=$(pgrep -f "sing-box run" | head -n1)
         if [ -n "$real_pid" ]; then
@@ -664,9 +663,9 @@ EOF
         local io_config=""
         if [ "$mem_total" -ge 200 ]; then
             [ "$io_class" = "realtime" ] && [ "$mem_total" -ge 450 ] && \
-                io_config="IOSchedulingClass=realtime"$'\n'"IOSchedulingPriority=0" || \
-                io_config="IOSchedulingClass=best-effort"$'\n'"IOSchedulingPriority=2"
-        else { io_config="IOSchedulingClass=best-effort"$'\n'"IOSchedulingPriority=4"; } fi
+                io_config="-IOSchedulingClass=realtime"$'\n'"-IOSchedulingPriority=0" || \
+                io_config="-IOSchedulingClass=best-effort"$'\n'"-IOSchedulingPriority=2"
+        else io_config="-IOSchedulingClass=best-effort"$'\n'"-IOSchedulingPriority=4"; fi
         local cpu_quota=$((CPU_N * 100))
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         cat > /etc/systemd/system/sing-box.service <<EOF
