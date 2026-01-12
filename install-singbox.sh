@@ -149,28 +149,17 @@ generate_cert() {
 
 #获取公网IP
 get_network_info() {
-    set +e; info "获取网络信息…"
-    local v4_raw="" v6_raw="" v4_ok="\033[31m✗\033[0m" v6_ok="\033[31m✗\033[0m" a line addr
-
-    ip -4 addr show 2>/dev/null | awk '$1=="inet"{print $2}' | while read -r a; do
-        [[ ! "${a%/*}" =~ ^(127\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.) ]] && v4_raw="${a%/*}" && break; done
-    [ -z "$v4_raw" ] && v4_raw=$(curl -4sL --max-time 3 api.ipify.org 2>/dev/null || curl -4sL --max-time 3 ifconfig.me 2>/dev/null)
-
-    ip -6 addr show 2>/dev/null | awk '/inet6 /{print $2"|"$0}' | while read -r line; do
-        addr="${line%%/*}"; [[ "$line" =~ temporary|mngtmpaddr ]] && continue
-        [[ "$addr" =~ ^([0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}$ ]] && v6_raw="$addr" && break; done
-    [ -z "$v6_raw" ] && v6_raw=$(curl -6sL --max-time 3 api6.ipify.org 2>/dev/null || curl -6sL --max-time 3 ifconfig.co 2>/dev/null)
-
-    export RAW_IP4=$(printf '%s\n' "$v4_raw" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
-    export RAW_IP6=$(printf '%s\n' "$v6_raw" | grep -Eo '([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}' | head -n1)
-    [[ -z "$RAW_IP4" && -z "$RAW_IP6" ]] && { err "未检测到公网IP，退出脚本安装"; exit 1; }
-
-    ping -4 -c1 -W1 1.1.1.1 >/dev/null 2>&1 && v4_ok="\033[32m✓\033[0m"
-    ping6 -c1 -W1 2606:4700:4700::1111 >/dev/null 2>&1 && { v6_ok="\033[32m✓\033[0m"; export IS_V6_OK=true; } || export IS_V6_OK=false
-
-    [ -n "$RAW_IP4" ] && info "IPv4 地址: \033[32m$RAW_IP4\033[0m [$v4_ok]" || info "IPv4 地址: \033[33m未检测到\033[0m"
-    [ -n "$RAW_IP6" ] && info "IPv6 地址: \033[32m$RAW_IP6\033[0m [$v6_ok]" || info "IPv6 地址: \033[33m未检测到\033[0m"
-    set -e
+    info "获取网络信息..."; local t4="/tmp/.v4" t6="/tmp/.v6"
+    rm -f "$t4" "$t6"
+    _f() { local p=$1; { curl $p -sSfL --connect-timeout 2 --max-time 3 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}'; } || curl $p -sSfL --connect-timeout 2 --max-time 3 "https://api.ipify.org" || curl $p -sSfL --connect-timeout 2 --max-time 3 "https://ifconfig.me"; }
+    _f -4 > "$t4" 2>/dev/null & local p4=$!
+    _f -6 > "$t6" 2>/dev/null & local p6=$!
+    wait $p4 $p6 2>/dev/null
+    RAW_IP4=$(tr -d '[:space:]' < "$t4" 2>/dev/null | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || echo "")
+    RAW_IP6=$(tr -d '[:space:]' < "$t6" 2>/dev/null | grep -E '([a-fA-F0-9:]+:+)+[a-fA-F0-9]+' || echo "")
+    rm -f "$t4" "$t6"; [ -n "$RAW_IP6" ] && IS_V6_OK="true" || IS_V6_OK="false"
+    [ -n "$RAW_IP4" ] && succ "IPv4 检测成功: $RAW_IP4" || warn "IPv4 不可用"
+    [ "$IS_V6_OK" = "true" ] && succ "IPv6 检测成功: $RAW_IP6" || warn "IPv6 不可用"
 }
 
 # === 网络延迟探测模块 ===
