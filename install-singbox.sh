@@ -861,10 +861,8 @@ service_ctrl() {
 }
 
 while true; do
-    echo "========================" 
-    echo ""
+    echo "=========================" 
     echo " Sing-box HY2 管理 (sb)"
-    echo ""
     echo "------------------------------------------------------"
     echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "------------------------------------------------------"
