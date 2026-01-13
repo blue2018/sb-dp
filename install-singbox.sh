@@ -43,23 +43,14 @@ copy_to_clipboard() {
 
 #侦测系统类型
 detect_os() {
-    if [ -f /etc/os-release ]; then . /etc/os-release; \
-    OS_DISPLAY="${PRETTY_NAME:-$ID}"; ID="${ID:-}"; ID_LIKE="${ID_LIKE:-}"; else \
-    OS_DISPLAY="Unknown Linux"; ID="unknown"; ID_LIKE=""; fi
-
-    local COMBINED="${ID} ${ID_LIKE}"
-    case "$COMBINED" in
-        *[Aa][Ll][Pp][Ii][Nn][Ee]*) OS="alpine" ;;
-        *[Dd][Ee][Bb][Ii][Aa][Nn]*|*[Uu][Bb][Uu][Nn][Tt][Uu]*) OS="debian" ;;
-        *[Cc][Ee][Nn][Tt][Oo][Ss]*|*[Rr][Hh][Ee][Ll]*|*[Ff][Ee][Dd][Oo][Rr][Aa]*|*[Rr][Oo][Cc][Kk][Yy]*|*[Aa][Ll][Mm][Aa][Ll][Ii][Nn][Uu][Xx]*) OS="redhat" ;;
-        *) OS="unknown" ;;
-    esac
-
-    case "$(uname -m)" in
-        x86_64) SBOX_ARCH="amd64" ;; aarch64) SBOX_ARCH="arm64" ;;
-        armv7l) SBOX_ARCH="armv7" ;; i386|i686) SBOX_ARCH="386" ;;
-        *) err "不支持的架构: $(uname -m)"; exit 1 ;;
-    esac
+    if [ -f /etc/os-release ]; then . /etc/os-release; OS_DISPLAY="${PRETTY_NAME:-$ID}"; ID="${ID:-}"; ID_LIKE="${ID_LIKE:-}"; else OS_DISPLAY="Unknown Linux"; ID="unknown"; ID_LIKE=""; fi
+    # 增强判定逻辑
+    if [ -f /etc/alpine-release ]; then OS="alpine"; elif [ -f /etc/debian_version ]; then OS="debian"; elif [ -f /etc/redhat-release ]; then OS="redhat"; else
+        local COMBINED="${ID} ${ID_LIKE}"; case "$COMBINED" in *[Aa][Ll][Pp][Ii][Nn][Ee]*) OS="alpine" ;; *[Dd][Ee][Bb][Ii][Aa][Nn]*|*[Uu][Bb][Uu][Nn][Tt][Uu]*) OS="debian" ;; *[Cc][Ee][Nn][Tt][Oo][Ss]*|*[Rr][Hh][Ee][Ll]*|*[Ff][Ee][Dd][Oo][Rr][Aa]*) OS="redhat" ;; *) OS="unknown" ;; esac
+    fi
+    # 环境修复与架构匹配
+    [ "$OS" = "alpine" ] && { [ -x /sbin/syslogd ] && [ ! -f /var/run/syslogd.pid ] && syslogd >/dev/null 2>&1 || true; }
+    case "$(uname -m)" in x86_64) SBOX_ARCH="amd64" ;; aarch64) SBOX_ARCH="arm64" ;; armv7l) SBOX_ARCH="armv7" ;; i386|i686) SBOX_ARCH="386" ;; *) err "不支持的架构: $(uname -m)"; exit 1 ;; esac
 }
 
 # 依赖安装 (容错增强版)
@@ -710,14 +701,14 @@ EOF
     fi
     
     sleep 2; local pid=""
-    [ "$OS" = "alpine" ] && pid=$(pgrep -f "sing-box run" | head -n1) || pid=$(systemctl show -p MainPID --value sing-box 2>/dev/null | grep -E -v '^0$|^$' || echo "")
+    [ "$OS" = "alpine" ] && pid=$(pgrep -f "sing-box run" || pgrep sing-box | head -n1) || pid=$(systemctl show -p MainPID --value sing-box 2>/dev/null | grep -E -v '^0$|^$' || echo "")
     if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
         local ma_mb=$(( ${ma:-0} / 1024 ))
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "${INITCWND_DONE:-false}" == "true" ]] && echo "内核" || echo "应用层")"
     else 
         err "sing-box 启动失败，最近日志："
-        [ "$OS" = "alpine" ] && { logread | tail -n 5 2>/dev/null || tail -n 5 /var/log/messages 2>/dev/null; } || journalctl -u sing-box -n 5 --no-pager 2>/dev/null
+        [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 5 || tail -n 5 /var/log/messages 2>/dev/null || echo "无法获取系统日志"; } || { journalctl -u sing-box -n 5 --no-pager 2>/dev/null || echo "无法获取服务日志"; }
         exit 1
     fi
 }
