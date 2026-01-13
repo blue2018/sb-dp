@@ -417,7 +417,6 @@ optimize_system() {
         SBOX_OPTIMIZE_LEVEL="64M 生存版"
     fi
 
-    
     # 3. RTT 驱动与安全钳位
     safe_rtt "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
