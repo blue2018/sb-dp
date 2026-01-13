@@ -500,7 +500,7 @@ SYSCTL
 # ==========================================
 # 安装/更新 Sing-box 内核
 # ==========================================
-Install_singbox() {
+install_singbox() {
     local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub"
     [ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
     
@@ -946,7 +946,7 @@ optimize_system
 install_singbox "install"
 generate_cert
 create_config "$USER_PORT"
-create_sb_tool
+create_sb_tool  
 setup_service
 get_env_data
 echo -e "\n\033[1;34m==========================================\033[0m"
