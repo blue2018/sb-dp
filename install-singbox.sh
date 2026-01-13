@@ -43,12 +43,9 @@ copy_to_clipboard() {
 
 #侦测系统类型
 detect_os() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        OS_DISPLAY="${PRETTY_NAME:-$ID}"; ID="${ID:-}"; ID_LIKE="${ID_LIKE:-}"
-    else
-        OS_DISPLAY="Unknown Linux"; ID="unknown"; ID_LIKE=""
-    fi
+    if [ -f /etc/os-release ]; then . /etc/os-release; \
+    OS_DISPLAY="${PRETTY_NAME:-$ID}"; ID="${ID:-}"; ID_LIKE="${ID_LIKE:-}"; else \
+    OS_DISPLAY="Unknown Linux"; ID="unknown"; ID_LIKE=""; fi
 
     local COMBINED="${ID} ${ID_LIKE}"
     case "$COMBINED" in
