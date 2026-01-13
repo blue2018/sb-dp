@@ -526,7 +526,7 @@ Install_singbox() {
     local URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}"
     local TD=$(mktemp -d); local TF="$TD/sb.tar.gz"; local dl_ok=false
     # 精选 2026 年依然高度可用的镜像站
-    local LINKS=("$URL" "https://"{ghproxy.net,kkgh.tk,gh.ddlc.top,gh-proxy.com}"/$URL")
+    local LINKS=("$URL" "https://ghproxy.net/$URL" "https://kkgh.tk/$URL" "https://gh.ddlc.top/$URL" "https://gh-proxy.com/$URL")
 
     info "正在筛选最优下载节点..."
     local best_link=""
