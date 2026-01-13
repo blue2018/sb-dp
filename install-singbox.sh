@@ -5,11 +5,11 @@ set -euo pipefail
 # 基础变量声明与环境准备
 # ==========================================
 # === 系统与环境参数初始化 ===
-SBOX_ARCH="";            OS_DISPLAY="";      SBOX_CORE="/etc/sing-box/core_script.sh"
-SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";    SBOX_MEM_MAX="55M";       SBOX_OPTIMIZE_LEVEL="未检测"
-SBOX_MEM_HIGH="42M";     CPU_CORE="1";       INITCWND_DONE="false";    VAR_DEF_MEM=""
-VAR_UDP_RMEM="";         VAR_UDP_WMEM="";    VAR_SYSTEMD_NICE=""
-VAR_SYSTEMD_IOSCHED="";  VAR_HY2_BW="200";   RAW_SALA=""
+SBOX_ARCH="";            OS_DISPLAY="";        SBOX_CORE="/etc/sing-box/core_script.sh"
+SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";      SBOX_MEM_MAX="55M";       SBOX_OPTIMIZE_LEVEL="未检测"
+SBOX_MEM_HIGH="42M";     CPU_CORE="1";         INITCWND_DONE="false";    VAR_DEF_MEM=""
+VAR_UDP_RMEM="";         VAR_UDP_WMEM="";      VAR_SYSTEMD_NICE="";      VAR_HY2_BW="200";    RAW_SALA=""
+VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";  BUSY_POLL_VAL="0";        VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
 # TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
@@ -273,6 +273,27 @@ setup_swap() {
     fi
 }
 
+# 计算 RTT 安全钳位
+safe_rtt() {
+    local RTT_AVG="$1" max_udp_pages="$2" udp_mem_global_min="$3" udp_mem_global_pressure="$4" udp_mem_global_max="$5"
+    rtt_scale_min=$((RTT_AVG * 128)); rtt_scale_pressure=$((RTT_AVG * 256)); rtt_scale_max=$((RTT_AVG * 512))
+    local quic_min quic_press quic_max quic_extra_msg
+    
+    if [ "$RTT_AVG" -ge 150 ]; then quic_min=262144; quic_press=524288; quic_max=1048576; quic_extra_msg=" (QUIC长距模式)"; \
+    else quic_min=131072; quic_press=262144; quic_max=524288; quic_extra_msg=" (QUIC竞速模式)"; fi
+    SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL}${quic_extra_msg}"
+    # QUIC 最小值保护
+    [ "$quic_min" -gt "$rtt_scale_min" ] && rtt_scale_min=$quic_min
+    [ "$quic_press" -gt "$rtt_scale_pressure" ] && rtt_scale_pressure=$quic_press
+    [ "$quic_max" -gt "$rtt_scale_max" ] && rtt_scale_max=$quic_max
+    # 内存总量保护（40% 上限）
+    [ "$rtt_scale_max" -gt "$max_udp_pages" ] && { rtt_scale_max=$max_udp_pages; rtt_scale_pressure=$((max_udp_pages * 3 / 4)); rtt_scale_min=$((max_udp_pages / 2)); }
+    # 内存档位保护（新增：确保不超出内存档位限制）
+    rtt_scale_max=$(( rtt_scale_max < udp_mem_global_max ? rtt_scale_max : udp_mem_global_max ))
+    rtt_scale_pressure=$(( rtt_scale_pressure < udp_mem_global_pressure ? rtt_scale_pressure : udp_mem_global_pressure ))
+    rtt_scale_min=$(( rtt_scale_min < udp_mem_global_min ? rtt_scale_min : udp_mem_global_min ))
+}
+
 # sing-box 用户态运行时调度人格（Go/QUIC/缓冲区自适应）
 apply_userspace_adaptive_profile() {
     local real_c="$CPU_CORE"
@@ -346,11 +367,11 @@ optimize_system() {
     local max_udp_mb=$((mem_total * 40 / 100))
     local max_udp_pages=$((max_udp_mb * 256))
     local real_c="$CPU_CORE"
-    local swappiness_val=10 busy_poll_val=0 quic_extra_msg="" VAR_BACKLOG=2000
     local ct_max=16384 ct_udp_to=30 ct_stream_to=30
     local g_procs g_wnd g_buf net_bgt net_usc
     local udp_mem_global_min udp_mem_global_pressure udp_mem_global_max
-
+    local swappiness_val="${SWAPPINESS_VAL:-10}" busy_poll_val="${BUSY_POLL_VAL:-0}" VAR_BACKLOG="${VAR_BACKLOG:-5000}"
+    
     setup_swap "$mem_total"
     info "系统画像: 可用内存=${mem_total}MB | 平均延迟=${RTT_AVG}ms"
 
@@ -399,29 +420,10 @@ optimize_system() {
         SBOX_OPTIMIZE_LEVEL="64M 生存版"
     fi
 
-    # 3. RTT 驱动与安全钳位
-    local rtt_scale_min=$((RTT_AVG * 128)); local rtt_scale_pressure=$((RTT_AVG * 256)); local rtt_scale_max=$((RTT_AVG * 512))
-    local quic_min; local quic_press; local quic_max
     
-    if [ "$RTT_AVG" -ge 150 ]; then
-        quic_min=262144; quic_press=524288; quic_max=1048576; quic_extra_msg=" (QUIC长距模式)"
-    else
-        quic_min=131072; quic_press=262144; quic_max=524288; quic_extra_msg=" (QUIC竞速模式)"
-    fi
-    SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL}${quic_extra_msg}"
-    # QUIC 最小值保护
-    [ "$quic_min" -gt "$rtt_scale_min" ] && rtt_scale_min=$quic_min
-    [ "$quic_press" -gt "$rtt_scale_pressure" ] && rtt_scale_pressure=$quic_press
-    [ "$quic_max" -gt "$rtt_scale_max" ] && rtt_scale_max=$quic_max
-    # 内存总量保护（40% 上限）
-    if [ "$rtt_scale_max" -gt "$max_udp_pages" ]; then
-        rtt_scale_max=$max_udp_pages; rtt_scale_pressure=$((max_udp_pages * 3 / 4)); rtt_scale_min=$((max_udp_pages / 2))
-    fi
-    # 内存档位保护（新增：确保不超出内存档位限制）
-    rtt_scale_max=$(( rtt_scale_max < udp_mem_global_max ? rtt_scale_max : udp_mem_global_max ))
-    rtt_scale_pressure=$(( rtt_scale_pressure < udp_mem_global_pressure ? rtt_scale_pressure : udp_mem_global_pressure ))
-    rtt_scale_min=$(( rtt_scale_min < udp_mem_global_min ? rtt_scale_min : udp_mem_global_min ))
-    local udp_mem_scale="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
+    # 3. RTT 驱动与安全钳位
+    safe_rtt "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
+    UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
     
     SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
     SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"
@@ -482,7 +484,7 @@ net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_max_orphans = $((mem_total * 1024))
 
 # === 6. UDP 协议栈优化 (Hysteria2 传输核心) ===
-net.ipv4.udp_mem = $udp_mem_scale        # 全局 UDP 内存页配额 (根据 RTT 动态计算)
+net.ipv4.udp_mem = $UDP_MEM_SCALE        # 全局 UDP 内存页配额 (根据 RTT 动态计算)
 net.ipv4.udp_rmem_min = 16384            # 最小接收缓冲区保护
 net.ipv4.udp_wmem_min = 16384            # 最小发送缓冲区保护
 net.ipv4.udp_early_demux = 1             # UDP 早期路由优化
@@ -806,9 +808,13 @@ SBOX_OPTIMIZE_LEVEL='$SBOX_OPTIMIZE_LEVEL'
 INITCWND_DONE='${INITCWND_DONE:-false}'
 VAR_SYSTEMD_NICE='${VAR_SYSTEMD_NICE:--5}'
 VAR_SYSTEMD_IOSCHED='$VAR_SYSTEMD_IOSCHED'
+SWAPPINESS_VAL='${SWAPPINESS_VAL:-10}'
+BUSY_POLL_VAL='${BUSY_POLL_VAL:-0}'
+VAR_BACKLOG='${VAR_BACKLOG:-5000}'
 VAR_DEF_MEM='${VAR_DEF_MEM:-212992}'
 VAR_UDP_RMEM='${VAR_UDP_RMEM:-4194304}'
 VAR_UDP_WMEM='${VAR_UDP_WMEM:-4194304}'
+UDP_MEM_SCALE='${UDP_MEM_SCALE:-}'
 OS_DISPLAY='$OS_DISPLAY'
 TLS_DOMAIN='$TLS_DOMAIN'
 RAW_SNI='${RAW_SNI:-$TLS_DOMAIN}'
@@ -824,7 +830,7 @@ EOF
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
 create_config setup_service install_singbox info err warn succ optimize_system \
 apply_userspace_adaptive_profile apply_nic_core_boost \
-setup_swap check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
+setup_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
 
     for f in "${funcs[@]}"; do
         if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
