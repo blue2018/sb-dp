@@ -287,8 +287,21 @@ apply_nic_core_boost() {
     [ -z "$IFACE" ] && return 0
     local CPU_N="$CPU_CORE" bgt="$1" usc="$2"
     
-    sysctl -w net.core.netdev_budget=$bgt \
-               net.core.netdev_budget_usecs=$usc >/dev/null 2>&1 || true
+    sysctl -w net.core.netdev_budget=$bgt net.core.netdev_budget_usecs=$usc >/dev/null 2>&1 || true
+
+    # ===  网卡队列长度优化 (txqueuelen) ===
+    if [ -n "$IFACE" ] && [ -d "/sys/class/net/$IFACE" ]; then
+        ip link set dev "$IFACE" txqueuelen 10000 2>/dev/null || true
+        if command -v ethtool >/dev/null 2>&1; then
+            ethtool -K "$IFACE" gro on gso on tso on lro off >/dev/null 2>&1 || true
+            ethtool -K "$IFACE" tx-udp-segmentation on 2>/dev/null || true
+            ethtool -K "$IFACE" rx-udp-gro-forwarding on 2>/dev/null || true
+            ethtool -C "$IFACE" adaptive-rx on adaptive-tx on 2>/dev/null || true
+            [ "$CPU_CORE" -ge 2 ] && us=50 || us=20
+            ethtool -C "$IFACE" rx-usecs $us tx-usecs $us 2>/dev/null || true
+            info "网卡硬件加速已启用 (GSO/GRO/UDP-Offload)"
+        fi
+    fi
     
     # === 多核 RPS 分发 (仅多核启用) ===
     if [ "$CPU_N" -ge 2 ] && [ -d "/sys/class/net/$IFACE/queues" ]; then
@@ -472,25 +485,6 @@ SYSCTL
     # 兼容地加载 sysctl（优先 sysctl --system，其次回退）
     if command -v sysctl >/dev/null 2>&1 && sysctl --system >/dev/null 2>&1; then :
     else sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true; fi
-
-    # 网卡队列长度优化 (txqueuelen) 
-    local DEFAULT_IFACE
-    DEFAULT_IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
-    if [ -n "$DEFAULT_IFACE" ] && [ -d "/sys/class/net/$DEFAULT_IFACE" ]; then
-        ip link set dev "$DEFAULT_IFACE" txqueuelen 10000 2>/dev/null || true
-        if command -v ethtool >/dev/null 2>&1; then
-            ethtool -K "$DEFAULT_IFACE" gro on gso on tso on lro off >/dev/null 2>&1 || true
-            ethtool -K "$DEFAULT_IFACE" tx-udp-segmentation on 2>/dev/null || true
-            ethtool -K "$DEFAULT_IFACE" rx-udp-gro-forwarding on 2>/dev/null || true
-            ethtool -C "$DEFAULT_IFACE" adaptive-rx on adaptive-tx on 2>/dev/null || true
-            if [ "$CPU_CORE" -ge 2 ]; then
-                ethtool -C "$DEFAULT_IFACE" rx-usecs 50 tx-usecs 50 2>/dev/null || true
-            else
-                ethtool -C "$DEFAULT_IFACE" rx-usecs 20 tx-usecs 20 2>/dev/null || true
-            fi
-            info "网卡硬件加速已启用 (GSO/GRO/UDP-Offload)"
-        fi
-    fi
 
     apply_initcwnd_optimization "false"
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf"
