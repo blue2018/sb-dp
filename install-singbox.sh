@@ -472,9 +472,9 @@ optimize_system() {
         VAR_UDP_RMEM="10485760"; VAR_UDP_WMEM="10485760"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"
         VAR_HY2_BW="130"; VAR_DEF_MEM="3145728"
-        VAR_BACKLOG=8000; swappiness_val=100; busy_poll_val=0
-        g_procs=1; g_wnd=8; g_buf=524288
-        [ "$real_c" -ge 2 ] && { net_bgt=1200; net_usc=3000; } || { net_bgt=1500; net_usc=3000; }
+        VAR_BACKLOG=5000; swappiness_val=100; busy_poll_val=0
+        g_procs=1; g_wnd=6; g_buf=524288
+        [ "$real_c" -ge 2 ] && { net_bgt=1000; net_usc=3500; } || { net_bgt=1300; net_usc=3500; }
         udp_mem_global_min=24576; udp_mem_global_pressure=49152; udp_mem_global_max=98304
         SBOX_OPTIMIZE_LEVEL="64M 激进版"
     fi
