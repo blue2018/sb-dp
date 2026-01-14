@@ -591,7 +591,7 @@ create_config() {
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"address":"https://8.8.4.4/dns-query","detour":"direct-out"}],"strategy":"$ds","independent_cache":true,"disable_cache":false,"disable_expire":false},
+  "dns": {"servers":[{"address":"https://8.8.4.4/dns-query","detour":"direct-out"},{"address":"https://1.1.1.1/dns-query","detour":"direct-out"}],"strategy":"$ds","independent_cache":true,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
@@ -889,7 +889,7 @@ while true; do
     read -r -p "请选择 [0-6]: " opt
     opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
     if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-6]$ ]]; then
-        echo -e "\033[1;31m输入有误 [\$opt]，请重新输入\033[0m"; sleep 1.5; continue
+        echo -e "\033[1;31m输入有误 [\$opt]，请重新输入\033[0m"; sleep 1; continue
     fi
     case "\$opt" in
         1) source "\$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
