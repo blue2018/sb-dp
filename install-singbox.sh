@@ -241,120 +241,256 @@ apply_initcwnd_optimization() {
 }
 
 # 创建 ZRAM + Swap 混合方案
+# 创建 ZRAM + Swap 混合方案（Alpine 兼容增强版）
 setup_swap() {
     local mem_total="$1"
+    
     # === 阶段1: ZRAM 优先策略 ===
     # 适用条件：内存 < 600MB 且内核支持 ZRAM
-    if [ "$mem_total" -lt 600 ] && [ -e /sys/class/zram-control ] || modprobe zram 2>/dev/null; then
-        # 检查是否已存在 ZRAM 设备
-        if [ -b /dev/zram0 ] && swapon -s | grep -q zram0; then
-            info "ZRAM 已激活，跳过创建"; return 0
+    if [ "$mem_total" -lt 600 ]; then
+        
+        # 【Alpine/LXC 环境预检】
+        if [ "$OS" = "alpine" ]; then
+            # 检测 sysfs 是否可写（LXC容器中通常是只读）
+            if ! touch /sys/block/.test_write 2>/dev/null; then
+                rm -f /sys/block/.test_write 2>/dev/null
+                warn "检测到受限容器环境（sysfs 只读），ZRAM 不可用"
+                # 直接跳转到磁盘swap阶段
+                local swap_total=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+                if [ "$swap_total" -eq 0 ] && [ ! -d /proc/vz ]; then
+                    info "尝试创建磁盘 Swap (512M)..."
+                    {
+                        (dd if=/dev/zero of=/swapfile bs=1M count=512 2>/dev/null || \
+                         fallocate -l 512M /swapfile 2>/dev/null) && \
+                        chmod 600 /swapfile && \
+                        mkswap /swapfile >/dev/null 2>&1 && \
+                        swapon -p 5 /swapfile >/dev/null 2>&1 && \
+                        {
+                            grep -q "/swapfile" /etc/fstab 2>/dev/null || \
+                            echo "/swapfile swap swap defaults,pri=5 0 0" >> /etc/fstab
+                            succ "磁盘 Swap 已激活 (512M)"
+                        }
+                    } || warn "Swap 创建失败（磁盘空间不足或权限受限）"
+                fi
+                return 0
+            fi
+            rm -f /sys/block/.test_write 2>/dev/null
+            
+            # 检测 zram 模块
+            if ! lsmod 2>/dev/null | grep -q zram; then
+                if ! modprobe zram 2>/dev/null; then
+                    warn "Alpine 环境 ZRAM 模块不可用（内核未编译支持）"
+                    return 0
+                fi
+            fi
+        fi
+        
+        # 【通用环境检测】
+        if ! { [ -e /sys/class/zram-control ] || [ -d /sys/block/zram0 ] || modprobe zram 2>/dev/null; }; then
+            info "内核不支持 ZRAM，跳过"
+            return 0
+        fi
+        
+        # 【避免重复创建】
+        if [ -b /dev/zram0 ]; then
+            # 修复：BusyBox 的 swapon 不支持 -s 参数，改用 /proc/swaps
+            if grep -q "^/dev/zram0 " /proc/swaps 2>/dev/null; then
+                info "ZRAM 已激活，跳过创建"
+                return 0
+            fi
         fi
         
         info "启用 ZRAM 压缩内存 (高性能模式)..."
         
-        # 计算 ZRAM 大小策略
-        local zram_size
+        # 【计算 ZRAM 大小策略】
+        local zram_size zram_size_mb
         if [ "$mem_total" -le 64 ]; then
-            zram_size="128M"  # 64M 物理内存 → 128M ZRAM
+            zram_size="128M"; zram_size_mb=128
         elif [ "$mem_total" -le 128 ]; then
-            zram_size="256M"  # 128M 物理内存 → 256M ZRAM
+            zram_size="256M"; zram_size_mb=256
         elif [ "$mem_total" -le 256 ]; then
-            zram_size="384M"  # 256M 物理内存 → 384M ZRAM
+            zram_size="384M"; zram_size_mb=384
         else
-            zram_size="512M"  # 256M-600M → 512M ZRAM
+            zram_size="512M"; zram_size_mb=512
         fi
         
-        # ZRAM 创建流程（容错增强）
+        # 【ZRAM 创建流程（容错增强）】
         {
-            # 1. 设置压缩算法（优先级：lz4 > lzo > lzo-rle > zstd）
-            local comp_algo="lz4"
+            # 1. 设置压缩算法（优先级：lz4 > lzo > lzo-rle > deflate）
+            local comp_algo="lz4" comp_final="lz4"
             if [ -f /sys/block/zram0/comp_algorithm ]; then
-                # 检测可用算法
-                local avail_algos=$(cat /sys/block/zram0/comp_algorithm 2>/dev/null || echo "lzo")
-                if echo "$avail_algos" | grep -qw "lz4"; then comp_algo="lz4"
-                elif echo "$avail_algos" | grep -qw "lzo"; then comp_algo="lzo"
-                elif echo "$avail_algos" | grep -qw "zstd"; then comp_algo="zstd"
-                else comp_algo=$(echo "$avail_algos" | awk '{print $1}'); fi
-                
-                echo "$comp_algo" > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+                if [ -w /sys/block/zram0/comp_algorithm ]; then
+                    local avail_algos=$(cat /sys/block/zram0/comp_algorithm 2>/dev/null || echo "lzo")
+                    
+                    # 智能选择最优算法
+                    if echo "$avail_algos" | grep -qw "lz4"; then
+                        comp_algo="lz4"
+                    elif echo "$avail_algos" | grep -qw "lzo-rle"; then
+                        comp_algo="lzo-rle"
+                    elif echo "$avail_algos" | grep -qw "lzo"; then
+                        comp_algo="lzo"
+                    else
+                        comp_algo=$(echo "$avail_algos" | awk '{print $1}')
+                    fi
+                    
+                    echo "$comp_algo" > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+                    comp_final=$(cat /sys/block/zram0/comp_algorithm 2>/dev/null | grep -o '\[.*\]' | tr -d '[]' || echo "$comp_algo")
+                else
+                    # sysfs 只读时，使用默认算法
+                    comp_final=$(cat /sys/block/zram0/comp_algorithm 2>/dev/null | grep -o '\[.*\]' | tr -d '[]' || echo "lzo")
+                fi
             fi
             
-            # 2. 设置内存限制（防止 ZRAM 本身占用过多内存）
-            if [ -f /sys/block/zram0/mem_limit ]; then
-                local mem_limit_bytes=$((mem_total * 1024 * 1024 / 2))  # 物理内存的 50%
+            # 2. 设置内存限制（可选，某些内核版本不支持）
+            if [ -f /sys/block/zram0/mem_limit ] && [ -w /sys/block/zram0/mem_limit ]; then
+                local mem_limit_bytes=$((mem_total * 1024 * 1024 / 2))
                 echo "$mem_limit_bytes" > /sys/block/zram0/mem_limit 2>/dev/null || true
             fi
             
-            # 3. 设置 ZRAM 大小并初始化
-            echo "$zram_size" > /sys/block/zram0/disksize 2>/dev/null || \
-            echo $((${zram_size%M} * 1024 * 1024)) > /sys/block/zram0/disksize
+            # 3. 设置 ZRAM 大小（兼容多种格式）
+            local zram_size_bytes=$((zram_size_mb * 1024 * 1024))
+            if [ -w /sys/block/zram0/disksize ]; then
+                # 优先尝试字节数
+                if ! echo "$zram_size_bytes" > /sys/block/zram0/disksize 2>/dev/null; then
+                    # 回退到带单位的格式
+                    echo "$zram_size" > /sys/block/zram0/disksize 2>/dev/null || {
+                        # 如果仍然失败，说明权限不足
+                        warn "无法设置 ZRAM 大小（权限不足）"
+                        return 1
+                    }
+                fi
+            else
+                warn "ZRAM disksize 不可写（容器环境限制）"
+                return 1
+            fi
             
             # 4. 格式化并激活
-            mkswap /dev/zram0 >/dev/null 2>&1 && \
-            swapon -p 10 /dev/zram0 >/dev/null 2>&1  # 优先级10，高于磁盘swap的默认优先级-2
-        } && {
-            local comp_final=$(cat /sys/block/zram0/comp_algorithm 2>/dev/null | grep -o '\[.*\]' | tr -d '[]' || echo "$comp_algo")
-            succ "ZRAM 已激活: ${zram_size} (算法: ${comp_final})"
-            # 持久化配置（添加到启动脚本）
-            local zram_init_script="/etc/rc.local"
-            [ "$OS" = "alpine" ] && zram_init_script="/etc/local.d/zram.start"
-            # 生成自启动脚本
-            cat > /tmp/zram_init.sh <<ZRAM_INIT
-#!/bin/sh
-# ZRAM Auto-Init for sing-box
-modprobe zram 2>/dev/null || true
-[ -b /dev/zram0 ] || exit 0
-echo ${comp_final} > /sys/block/zram0/comp_algorithm 2>/dev/null || true
-echo ${zram_size} > /sys/block/zram0/disksize 2>/dev/null || true
-mkswap /dev/zram0 >/dev/null 2>&1
-swapon -p 10 /dev/zram0 >/dev/null 2>&1
-ZRAM_INIT
+            if ! mkswap /dev/zram0 >/dev/null 2>&1; then
+                warn "ZRAM 格式化失败"
+                return 1
+            fi
             
-            # 根据系统类型集成到启动流程
-            if [ "$OS" = "alpine" ]; then
-                mv /tmp/zram_init.sh "$zram_init_script"
-                chmod +x "$zram_init_script"
-            else
+            if ! swapon -p 10 /dev/zram0 >/dev/null 2>&1; then
+                warn "ZRAM 激活失败（可能被安全策略阻止）"
+                return 1
+            fi
+            
+            # 验证激活状态
+            if ! grep -q "^/dev/zram0 " /proc/swaps 2>/dev/null; then
+                warn "ZRAM 激活验证失败"
+                return 1
+            fi
+            
+        } && {
+            # 【成功后的状态显示与持久化】
+            succ "ZRAM 已激活: ${zram_size} (算法: ${comp_final})"
+            
+            # 持久化配置
+            if command -v systemctl >/dev/null 2>&1; then
+                # === Systemd 服务（Debian/Ubuntu/CentOS） ===
                 cat > /etc/systemd/system/zram-swap.service <<SYSTEMD_ZRAM
 [Unit]
-Description=ZRAM Swap for sing-box
+Description=ZRAM Compressed Swap for sing-box
+Documentation=man:zramctl(8)
 After=local-fs.target
-Before=sing-box.service
+Before=sing-box.service swap.target
+
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash /tmp/zram_init.sh
+ExecStartPre=/sbin/modprobe zram
+ExecStart=/bin/sh -c '\
+    [ -w /sys/block/zram0/comp_algorithm ] && echo ${comp_final} > /sys/block/zram0/comp_algorithm 2>/dev/null; \
+    echo ${zram_size_bytes} > /sys/block/zram0/disksize 2>/dev/null || echo ${zram_size} > /sys/block/zram0/disksize; \
+    /sbin/mkswap /dev/zram0 >/dev/null 2>&1; \
+    /sbin/swapon -p 10 /dev/zram0'
 ExecStop=/sbin/swapoff /dev/zram0
+ExecStopPost=/bin/sh -c 'echo 1 > /sys/block/zram0/reset 2>/dev/null || true'
+
 [Install]
 WantedBy=multi-user.target
 SYSTEMD_ZRAM
-                mv /tmp/zram_init.sh /usr/local/bin/zram_init.sh
-                chmod +x /usr/local/bin/zram_init.sh
-                sed -i 's|/tmp/zram_init.sh|/usr/local/bin/zram_init.sh|' /etc/systemd/system/zram-swap.service
                 systemctl daemon-reload >/dev/null 2>&1
                 systemctl enable zram-swap.service >/dev/null 2>&1
+                
+            elif [ "$OS" = "alpine" ]; then
+                # === OpenRC 服务（Alpine） ===
+                cat > /etc/init.d/zram-swap <<OPENRC_ZRAM
+#!/sbin/openrc-run
+description="ZRAM Compressed Swap"
+depend() {
+    before sing-box
+    after localmount
+}
+start() {
+    ebegin "Starting ZRAM swap"
+    modprobe zram 2>/dev/null
+    [ -w /sys/block/zram0/comp_algorithm ] && echo ${comp_final} > /sys/block/zram0/comp_algorithm 2>/dev/null
+    echo ${zram_size_bytes} > /sys/block/zram0/disksize 2>/dev/null || echo ${zram_size} > /sys/block/zram0/disksize
+    mkswap /dev/zram0 >/dev/null 2>&1
+    swapon -p 10 /dev/zram0 >/dev/null 2>&1
+    eend \$?
+}
+stop() {
+    ebegin "Stopping ZRAM swap"
+    swapoff /dev/zram0 2>/dev/null
+    echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+    eend \$?
+}
+OPENRC_ZRAM
+                chmod +x /etc/init.d/zram-swap
+                rc-update add zram-swap default >/dev/null 2>&1
             fi
+            
             return 0  # ZRAM 成功，不再创建磁盘 swap
+            
         } || {
-            warn "ZRAM 创建失败，回退到磁盘 Swap..."
+            # 【详细的失败诊断】
+            local fail_reason="未知原因"
+            if ! [ -w /sys/block/zram0/disksize ] 2>/dev/null; then
+                fail_reason="容器环境限制（sysfs 只读或权限不足）"
+            elif ! command -v mkswap >/dev/null 2>&1; then
+                fail_reason="缺少 mkswap 工具"
+            elif ! grep -q "^zram " /proc/modules 2>/dev/null && ! lsmod 2>/dev/null | grep -q zram; then
+                fail_reason="ZRAM 模块未加载或内核不支持"
+            elif [ ! -b /dev/zram0 ]; then
+                fail_reason="ZRAM 设备节点不存在"
+            fi
+            
+            warn "ZRAM 初始化失败: ${fail_reason}"
+            info "将使用传统磁盘 Swap 作为替代方案..."
         }
     fi
     
     # === 阶段2: 磁盘 Swap 兜底方案 ===
-    # 如果 ZRAM 不可用或创建失败，才使用磁盘 swap
-    [ "$OS" = "alpine" ] || [ "$mem_total" -gt 600 ] && return 0
+    # 条件：Alpine 系统跳过 或 内存 > 600MB 跳过
+    [ "$OS" = "alpine" ] && [ "$mem_total" -ge 600 ] && return 0
+    [ "$mem_total" -gt 600 ] && return 0
     
-    local swap_total
-    swap_total=$(LC_ALL=C free -m 2>/dev/null | awk '/Swap/ {print $2}')
-    : "${swap_total:=0}"
+    # 修复：使用 /proc/meminfo 替代 swapon -s（BusyBox 兼容）
+    local swap_total=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
     
+    # OpenVZ 容器检测
     if [ "$swap_total" -eq 0 ] && [ ! -d /proc/vz ]; then
         info "检测到低内存环境，正在尝试创建 512M 磁盘交换文件..."
-        { (fallocate -l 512M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=512 status=none) && \
-          chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon -p 5 /swapfile >/dev/null 2>&1 && \
-          { grep -q "/swapfile" /etc/fstab || echo "/swapfile swap swap defaults,pri=5 0 0" >> /etc/fstab; succ "磁盘 Swap 已激活"; } } || \
-          { rm -f /swapfile; warn "Swap 创建跳过 (受限或磁盘不足)"; }
+        {
+            # 优先使用 fallocate（更快），失败则用 dd
+            (fallocate -l 512M /swapfile 2>/dev/null || \
+             dd if=/dev/zero of=/swapfile bs=1M count=512 status=none 2>/dev/null) && \
+            chmod 600 /swapfile && \
+            mkswap /swapfile >/dev/null 2>&1 && \
+            swapon -p 5 /swapfile >/dev/null 2>&1 && \
+            {
+                # 添加到 fstab（避免重复）
+                grep -q "^/swapfile " /etc/fstab 2>/dev/null || \
+                echo "/swapfile swap swap defaults,pri=5 0 0" >> /etc/fstab
+                
+                succ "磁盘 Swap 已激活 (512M, 优先级5)"
+            }
+        } || {
+            rm -f /swapfile
+            warn "Swap 创建跳过（磁盘空间不足、权限受限或文件系统不支持）"
+        }
     fi
 }
 
@@ -609,7 +745,7 @@ LOWMEM
 )
 
 # === 9. ZRAM 专属优化 ===
-$(swapon -s | grep -q zram && cat <<ZRAM_TUNING
+$(grep -q "^/dev/zram0 " /proc/swaps 2>/dev/null && cat <<ZRAM_TUNING
 vm.swappiness = 80                       # ZRAM环境可以提高swap积极性
 vm.page-cluster = 0                      # 禁用预读，ZRAM随机访问快
 vm.vfs_cache_pressure = 500              # 更积极回收dentry/inode缓存
