@@ -219,24 +219,31 @@ probe_memory_total() {
 apply_initcwnd_optimization() {
     local silent="${1:-false}" info gw dev mtu mss opts current_cwnd
     command -v ip >/dev/null || return 0
-    # 1. 先检测当前是否已优化
+    
+    # === 1. 安全获取路由信息（带兜底逻辑）===
     info=$(ip route get 1.1.1.1 2>/dev/null | head -n1)
+    if [ -z "$info" ]; then
+        info=$(ip route show default 2>/dev/null | head -n1)
+    fi
     [ -z "$info" ] && { [[ "$silent" == "false" ]] && warn "未发现可用路由"; return 0; }
     
-    current_cwnd=$(echo "$info" | grep -oE 'initcwnd [0-9]+' | awk '{print $2}')
+    # === 2. 检测当前 initcwnd 值 ===
+    current_cwnd=$(echo "$info" | grep -oE 'initcwnd [0-9]+' | awk '{print $2}' || echo "")
     if [ -n "$current_cwnd" ] && [ "$current_cwnd" -ge 15 ]; then
         INITCWND_DONE="true"
         [[ "$silent" == "false" ]] && succ "InitCWND 已优化 (当前值: $current_cwnd)"
         return 0
     fi
     
-    gw=$(echo "$info" | grep -oE 'via [^ ]+' | awk '{print $2}')
-    dev=$(echo "$info" | grep -oE 'dev [^ ]+' | awk '{print $2}')
-    mtu=$(echo "$info" | grep -oE 'mtu [0-9]+' | awk '{print $2}' || echo 1500)
+    # === 3. 提取路由参数 ===
+    gw=$(echo "$info" | grep -oE 'via [^ ]+' | awk '{print $2}' || echo "")
+    dev=$(echo "$info" | grep -oE 'dev [^ ]+' | awk '{print $2}' || echo "")
+    mtu=$(echo "$info" | grep -oE 'mtu [0-9]+' | awk '{print $2}' || echo "1500")
     mss=$((mtu - 40))
     opts="initcwnd 15 initrwnd 15 advmss $mss"
     
-    # 2. 优先使用 replace (避免 change 失败导致的网络中断)
+    # === 4. 多策略尝试优化（带静默失败）===
+    # 策略 1: replace 完整路由（推荐）
     if [ -n "$gw" ] && [ -n "$dev" ]; then
         if ip route replace default via "$gw" dev "$dev" $opts 2>/dev/null; then
             INITCWND_DONE="true"
@@ -245,13 +252,34 @@ apply_initcwnd_optimization() {
         fi
     fi
     
-    # 3. 仅在必要时使用 change (兜底方案)
-    if ip route change $(ip route show default | head -n1 | sed "s/$/ $opts/") 2>/dev/null; then
+    # 策略 2: change 完整路由
+    if [ -n "$gw" ] && [ -n "$dev" ]; then
+        if ip route change default via "$gw" dev "$dev" $opts 2>/dev/null; then
+            INITCWND_DONE="true"
+            [[ "$silent" == "false" ]] && succ "InitCWND 优化成功 (change 模式)"
+            return 0
+        fi
+    fi
+    
+    # 策略 3: 仅设备模式（无网关环境）
+    if [ -n "$dev" ]; then
+        if ip route replace default dev "$dev" $opts 2>/dev/null; then
+            INITCWND_DONE="true"
+            [[ "$silent" == "false" ]] && succ "InitCWND 优化成功 (dev 模式)"
+            return 0
+        fi
+    fi
+    
+    # 策略 4: 纯参数追加（最后手段）
+    if ip route change default $opts 2>/dev/null; then
         INITCWND_DONE="true"
         [[ "$silent" == "false" ]] && succ "InitCWND 优化成功 (兜底模式)"
-    else
-        [[ "$silent" == "false" ]] && warn "InitCWND 内核锁定,将切换应用层补偿"
+        return 0
     fi
+    
+    # === 5. 所有策略失败 ===
+    [[ "$silent" == "false" ]] && warn "InitCWND 内核锁定，将切换应用层补偿"
+    return 0
 }
 
 # ZRAM/Swap 智能配置
@@ -540,7 +568,7 @@ optimize_system() {
     else warn "内核不支持 BBR，切换至高兼容 Cubic 模式"; fi
 
     if sysctl net.core.default_qdisc 2>/dev/null | grep -q "fq"; then info "FQ 调度器已就绪"; else info "准备激活 FQ 调度器..."; fi
-	info "anchor 1"
+	
     # 5. 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
     local SYSCTL_FILE="/etc/sysctl.d/99-sing-box.conf"
     cat > "$SYSCTL_FILE" <<SYSCTL
@@ -631,12 +659,14 @@ SYSCTL
 	if command -v sysctl >/dev/null 2>&1 && sysctl --system >/dev/null 2>&1; then :
 	else sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true; fi
 
-	info "anchor 2"
+	info "anchor 1"
 
     apply_initcwnd_optimization "false"
-	info "anchor 3"
+	info "anchor 2"
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf" "$real_c" "$mem_total"
+	info "anchor 3"
     apply_nic_core_boost "$net_bgt" "$net_usc"
+	info "anchor 4"
 }
 
 # ==========================================
