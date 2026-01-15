@@ -989,9 +989,9 @@ while true; do
            else info "配置未作变更"; fi
            read -r -p $'\n按回车键返回菜单...' ;;
         3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
-        4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;  
+        4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-		6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
            [[ "\${cf,,}" == "y" ]] && {
                info "正在执行深度卸载..."
                # 停止服务
@@ -1030,7 +1030,7 @@ while true; do
 done
 EOF
 
-    chmod +x "$SB_PATH"
+	chmod +x "$SB_PATH"
     ln -sf "$SB_PATH" "/usr/local/bin/SB" 2>/dev/null || true
 }
 
