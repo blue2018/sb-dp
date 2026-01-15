@@ -316,7 +316,22 @@ safe_rtt() {
 }
 
 # sing-box 用户态运行时调度人格（Go/QUIC/缓冲区自适应）
-apply_userspace_adaptive_profile() {
+apply_userspace_adaptive_profile() {  
+        
+        
+          
+            
+          
+          重试
+          
+        
+          
+            
+          
+          错误原因
+        
+        
+        
     local g_procs="$1" wnd="$2" buf="$3" real_c="$4" mem_total="$5"
 	export GOGC="${SBOX_GOGC:-100}" GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}" GOMAXPROCS="$g_procs" GODEBUG="madvdontneed=1"
     # === 1. GOMAXPROCS 智能调整 ===
@@ -328,14 +343,14 @@ apply_userspace_adaptive_profile() {
     # === 2. 低内存环境 (100M以下) 专属优化 ===
     if [ "$mem_total" -lt 100 ]; then
         export GODEBUG="madvdontneed=1,asyncpreemptoff=1,scavenge_target=1"
-        export GOGC="200"
+        export GOGC="200" 
         info "Runtime → 激进内存回收模式策略"
     fi
     export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" VAR_HY2_BW="${VAR_HY2_BW:-100}"
     export SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"  
     
     # === 3. 持久化配置 (修复潜在变量引用问题) ===
-    mkdir -p /etc/sing-box  
+    mkdir -p /etc/sing-box
     cat > /etc/sing-box/env <<EOF
 GOMAXPROCS=$GOMAXPROCS
 GOGC=$GOGC
