@@ -984,40 +984,21 @@ while true; do
         3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
-           [[ "\${cf,,}" == "y" ]] && {
-               info "正在执行深度卸载..."
-               # 停止服务
-               systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null || true
-               # ZRAM 清理（精简版）
-               if grep -q "^/dev/zram0 " /proc/swaps 2>/dev/null; then
-                   swapoff /dev/zram0 2>/dev/null
-                   echo 1 > /sys/block/zram0/reset 2>/dev/null || true
-                   info "ZRAM 已清理"
-               fi
-               # 磁盘 Swap 清理
-               if grep -q "^/swapfile " /proc/swaps 2>/dev/null; then
-                   swapoff /swapfile 2>/dev/null
-                   rm -f /swapfile
-                   sed -i '/\/swapfile/d' /etc/fstab 2>/dev/null
-                   info "磁盘 Swap 已清理"
-               fi
-               # 服务清理
-               systemctl disable zram-swap.service sing-box.service 2>/dev/null || true
-               rc-update del zram-swap sing-box 2>/dev/null || true
-               # 文件清理
-               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} \
-                      /etc/systemd/system/{zram-swap,sing-box}.service \
-                      /etc/init.d/{zram-swap,sing-box} \
-                      /etc/sysctl.d/99-sing-box.conf
-               # 系统恢复
-               printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
-               sysctl -p >/dev/null 2>&1 || true
-               systemctl daemon-reload 2>/dev/null || true
-               succ "卸载完成，系统已恢复"
-               exit 0
-           } || info "卸载操作已取消"
-           read -r -p "按回车键返回菜单..." ;;
+        6) read -r -p "确定卸载？(默认N) [Y/N]: " cf
+		   [[ "${cf,,}" == "y" ]] && {
+		       info "正在深度卸载..."
+		       # 停止并卸载服务
+		       systemctl stop sing-box 2>/dev/null || rc-service sing-box stop 2>/dev/null; \
+		       systemctl disable zram-swap sing-box 2>/dev/null; rc-update del zram-swap sing-box 2>/dev/null
+		       # 内存与磁盘 Swap 清理
+		       grep -q "/dev/zram0" /proc/swaps && { swapoff /dev/zram0 2>/dev/null; echo 1 > /sys/block/zram0/reset 2>/dev/null; info "ZRAM 已清理"; }
+		       grep -q "/swapfile" /proc/swaps && { swapoff /swapfile 2>/dev/null; rm -f /swapfile; sed -i '/\/swapfile/d' /etc/fstab; info "磁盘 Swap 已清理"; }
+		       # 文件一键清理
+		       rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{zram-swap,sing-box}.service /etc/init.d/{zram-swap,sing-box} /etc/sysctl.d/99-sing-box.conf
+		       # 系统参数恢复
+		       printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf; \
+		       sysctl -p >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "卸载完成"; exit 0
+		   } || info "已取消"; read -r -p "按回车键返回菜单..." ;;
         0) exit 0 ;;
     esac
 done
