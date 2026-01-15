@@ -362,7 +362,9 @@ safe_rtt() {
 
 # sing-box 用户态运行时调度人格（Go/QUIC/缓冲区自适应）
 apply_userspace_adaptive_profile() {
-    local g_procs="$1" wnd="$2" buf="$3" real_c="$4" mem_total="$5"
+    local g_procs="$1" wnd="$2" buf="$3"
+	local real_c="${4:-$CPU_CORE}"
+    local mem_total="${5:-$(probe_memory_total)}"
 	export GOGC="$SBOX_GOGC" GOMEMLIMIT="$SBOX_GOLIMIT" GOMAXPROCS="$g_procs" GODEBUG="madvdontneed=1"
     # === 1. GOMAXPROCS 智能调整 ===
     if [ "$real_c" -eq 1 ] && [ "$mem_total" -lt 100 ]; then
