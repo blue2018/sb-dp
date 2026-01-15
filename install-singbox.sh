@@ -554,11 +554,6 @@ net.ipv4.tcp_wmem = 4096 65536 $VAR_UDP_WMEM
 net.ipv4.tcp_frto = 2                    # 针对丢包环境的重传判断优化
 net.ipv4.tcp_ecn = 1
 net.ipv4.tcp_ecn_fallback = 1
-$(if [[ "$tcp_cca" == "bbr3" ]]; then cat <<BBR3_OPTS
-net.ipv4.tcp_ecn = 2                     # 强制 ECN (BBRv3 核心)
-sysctl.net.ipv4.tcp_reflect_tos = 1      # TOS 反射优化
-BBR3_OPTS
-fi)
 
 # === 5. 连接复用与超时管理 ===
 net.ipv4.tcp_mtu_probing = 1             # 自动探测 MTU 解决 UDP 黑洞
