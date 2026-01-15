@@ -245,7 +245,7 @@ apply_initcwnd_optimization() {
 # ZRAM/Swap 智能配置
 setup_zrm_swap() {
     local mt="$1" zs z_bytes st algo="lz4"
-    [ -z "$mt" ] || [ "$mt" -ge 600 ] && return 0
+    [ -z "$mt" ] || [ "$mt" -ge 600 ] && return 0  
     grep -q "zram0" /proc/swaps && { info "ZRAM 已就绪"; return 0; }
 	
     if ! modprobe zram 2>/dev/null; then [ "$OS" = "alpine" ] && apk add linux-virt-modules >/dev/null 2>&1 && modprobe zram 2>/dev/null; fi
@@ -280,9 +280,9 @@ EOF
             else warn "ZRAM 初始化失败"; fi
         fi
     fi
-	
+	# 磁盘 Swap 兜底 (仅在 ZRAM 失败且非 Alpine 时)
     [ "$OS" = "alpine" ] && { info "Alpine 跳过磁盘 Swap"; return 0; }
-    st=$(grep "SwapTotal" /proc/meminfo | awk '{print $2}')
+	local st=$(grep "SwapTotal" /proc/meminfo | awk '{print $2}')
     if [ "${st:-0}" -eq 0 ] && [ ! -d /proc/vz ]; then
         info "创建磁盘 Swap (512M)..."
         if (fallocate -l 512M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=512 2>/dev/null) && chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon -p 5 /swapfile 2>/dev/null; then
