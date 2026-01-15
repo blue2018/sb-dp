@@ -994,18 +994,18 @@ while true; do
 		6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
 		    if [ "${cf:-n}" = "y" ] || [ "${cf:-n}" = "Y" ]; then
 		        info "正在执行深度卸载..."
-		        # 停止并禁用服务
+		        # 1. 停止并禁用所有服务 (兼容 systemd & OpenRC)
 		        systemctl stop sing-box 2>/dev/null; rc-service sing-box stop 2>/dev/null; \
 		        systemctl disable zram-swap.service sing-box.service 2>/dev/null; rc-update del zram-swap sing-box 2>/dev/null
-		        # 清理 ZRAM 与 磁盘 Swap
+		        # 2. 清理 ZRAM 与 磁盘 Swap
 		        grep -q "/dev/zram0" /proc/swaps && { swapoff /dev/zram0 2>/dev/null; echo 1 > /sys/block/zram0/reset 2>/dev/null; info "ZRAM 已清理"; }
-		        grep -q "/swapfile" /proc/swaps && { swapoff /swapfile 2>/dev/null; rm -f /swapfile; sed -i '/\/swapfile/d' /etc/fstab; info "磁盘 Swap 已清理"; }
-		        # 清理文件与配置
+		        grep -q "/swapfile" /proc/swaps && { swapoff /swapfile 2>/dev/null; rm -f /swapfile; sed -i '/\/swapfile/d' /etc/fstab 2>/dev/null; info "磁盘 Swap 已清理"; }
+		        # 3. 文件一键清理
 		        rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{zram-swap,sing-box}.service /etc/init.d/{zram-swap,sing-box} /etc/sysctl.d/99-sing-box.conf
-		        # 恢复系统参数
+		        # 4. 恢复系统参数并退出
 		        printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf; \
 		        sysctl -p >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "卸载完成"; exit 0
-		    else info "卸载操作已取消"; fi; read -r -p "按回车键返回菜单..." ;;
+		    else info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; fi ;;
         0) exit 0 ;;
     esac
 done
