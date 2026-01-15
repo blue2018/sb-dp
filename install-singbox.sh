@@ -326,7 +326,7 @@ safe_rtt() {
 # sing-box 用户态运行时调度人格（Go/QUIC/缓冲区自适应）
 apply_userspace_adaptive_profile() {
     local g_procs="$1" wnd="$2" buf="$3" real_c="$4" mem_total="$5"
-	export GOGC="$SBOX_GOGC" GOMEMLIMIT="$SBOX_GOLIMIT" GOMAXPROCS="$g_procs" GODEBUG="madvdontneed=1"
+	export GOGC="${SBOX_GOGC:-100}" GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}" GOMAXPROCS="$g_procs" GODEBUG="madvdontneed=1"
     # === 1. GOMAXPROCS 智能调整 ===
     if [ "$real_c" -eq 1 ]; then
         export GOMAXPROCS=2      # 单核强行设置 2 个 P (Processor) 能让 GC 协程不完全阻塞业务协程
