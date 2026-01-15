@@ -540,7 +540,7 @@ optimize_system() {
     else warn "内核不支持 BBR，切换至高兼容 Cubic 模式"; fi
 
     if sysctl net.core.default_qdisc 2>/dev/null | grep -q "fq"; then info "FQ 调度器已就绪"; else info "准备激活 FQ 调度器..."; fi
-
+	info "anchor 1"
     # 5. 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
     local SYSCTL_FILE="/etc/sysctl.d/99-sing-box.conf"
     cat > "$SYSCTL_FILE" <<SYSCTL
@@ -631,7 +631,10 @@ SYSCTL
 	if command -v sysctl >/dev/null 2>&1 && sysctl --system >/dev/null 2>&1; then :
 	else sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true; fi
 
+	info "anchor 2"
+
     apply_initcwnd_optimization "false"
+	info "anchor 3"
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf" "$real_c" "$mem_total"
     apply_nic_core_boost "$net_bgt" "$net_usc"
 }
