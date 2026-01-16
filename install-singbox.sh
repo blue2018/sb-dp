@@ -720,7 +720,8 @@ create_config() {
         warp_outbound=',{
             "type": "wireguard",
             "tag": "warp-out",
-            "endpoint": "engage.cloudflareclient.com:2408",
+            "server": "engage.cloudflareclient.com",
+            "server_port": 2408,
             "local_address": ["'"$WARP_V4_ADDR"'", "'$WARP_V6_ADDR'"],
             "private_key": "'"$WARP_PRIV_KEY"'",
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
@@ -806,6 +807,7 @@ respawn_max=3
 respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
+export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 command="/bin/sh"
 command_args="-c \"$exec_cmd\""
 pidfile="/run/\${RC_SVCNAME}.pid"
@@ -843,6 +845,7 @@ Type=simple
 User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
+Environment=ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
@@ -1037,10 +1040,11 @@ EOF
 set -uo pipefail
 SBOX_CORE="/etc/sing-box/core_script.sh"
 if [ ! -f "\$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
-[[ \$# -gt 0 ]] && { /bin/bash "\$SBOX_CORE" "\$@"; exit 0; }
+[[ \$# -gt 0 ]] && { export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true; /bin/bash "\$SBOX_CORE" "\$@"; exit 0; }
 source "\$SBOX_CORE" --detect-only
 
 service_ctrl() {
+    export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
     [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "\$1" && return
     systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "\$1" sing-box
 }
