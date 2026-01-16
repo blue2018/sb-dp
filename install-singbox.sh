@@ -809,13 +809,16 @@ respawn_period=60
 export GOTRACEBACK=none
 export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 command="/bin/sh"
-command_args="-c \"$exec_cmd\""
+command_args="-c \"export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true; $exec_cmd\""
 pidfile="/run/\${RC_SVCNAME}.pid"
 rc_ulimit="-n 1000000"
 rc_nice="$cur_nice"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
-start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
+start_pre() { 
+    ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1
+    ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & 
+}
 start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
 EOF
         chmod +x /etc/init.d/sing-box
@@ -846,9 +849,9 @@ User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
 Environment=ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
-ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
+ExecStartPre=/usr/bin/env ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
-ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
+ExecStart=$taskset_bin -c $core_range /usr/bin/env ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
 Nice=$cur_nice
 ${io_config}
