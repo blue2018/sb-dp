@@ -141,17 +141,19 @@ generate_cert() {
 # WARP 注册
 setup_warp_lightweight() {
     info "正在集成轻量化 WARP 出口 (WireGuard 模式)..."
-    local TD=$(mktemp -d)
-    local arch_suffix="amd64"; [ "$SBOX_ARCH" = "arm64" ] && arch_suffix="arm64"
+    local TD=$(mktemp -d); local arch_suffix="amd64"; [ "$SBOX_ARCH" = "arm64" ] && arch_suffix="arm64"
     local W_URL=$(curl -sL --connect-timeout 10 "https://api.github.com/repos/ViRb3/wgcf/releases/latest" | grep "browser_download_url" | grep "linux_${arch_suffix}" | cut -d'"' -f4)
-    
     [ -z "$W_URL" ] && W_URL="https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_linux_${arch_suffix}"
+	
     info "获取 wgcf 组件..."
     curl -fsSL "$W_URL" -o "$TD/wgcf" || curl -fsSL "https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_${arch_suffix}" -o "$TD/wgcf"
-    [ ! -f "$TD/wgcf" ] && { err "下载 wgcf 失败，请检查网络"; rm -rf "$TD"; return 1; }
-	
+    [ ! -f "$TD/wgcf" ] && { err "wgcf 下载失败"; rm -rf "$TD"; return 1; }
     chmod +x "$TD/wgcf"
-    (cd "$TD" && yes | ./wgcf register && ./wgcf generate) >/dev/null 2>&1
+
+    info "正在向 Cloudflare 注册账号..."
+    (cd "$TD" && ./wgcf register --accept-tos && ./wgcf generate) >/dev/null 2>&1 || \
+    (sleep 2 && cd "$TD" && ./wgcf register --accept-tos && ./wgcf generate) >/dev/null 2>&1
+    
     if [ -f "$TD/wgcf-profile.conf" ]; then
         WARP_PRIV_KEY=$(grep 'PrivateKey' "$TD/wgcf-profile.conf" | cut -d' ' -f3)
         WARP_V4_ADDR=$(grep 'Address' "$TD/wgcf-profile.conf" | head -n1 | cut -d' ' -f3 | cut -d',' -f1)
