@@ -717,23 +717,20 @@ create_config() {
 	local warp_outbound=""
 	local warp_rule=""
 	if [[ "${USE_WARP:-false}" == "true" ]]; then
-	    warp_outbound=',
-	    {
-	      "type": "wireguard",
-	      "tag": "warp-out",
-	      "local_address": [
-	        "'"$WARP_V4_ADDR"'",
-	        "'"$WARP_V6_ADDR"'"
-	      ],
-	      "private_key": "'"$WARP_PRIV_KEY"'",
-	      "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-	      "endpoint": {
-	        "address": "engage.cloudflareclient.com",
-	        "port": 2408
-	      },
-	      "mtu": 1280
-	    }'
-	    
+	        warp_outbound=',
+		    {
+		      "type": "wireguard",
+		      "tag": "warp-out",
+		      "local_address": [
+		        "'"$WARP_V4_ADDR"'",
+		        "'"$WARP_V6_ADDR"'"
+		      ],
+		      "private_key": "'"$WARP_PRIV_KEY"'",
+		      "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+		      "server": "engage.cloudflareclient.com",
+		      "server_port": 2408,
+		      "mtu": 1280
+		    }'
 	    warp_rule='
 	      {
 	        "domain_suffix": [
