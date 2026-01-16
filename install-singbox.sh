@@ -720,8 +720,7 @@ create_config() {
 	    warp_outbound=',{
 	        "type": "wireguard",
 	        "tag": "warp-out",
-	        "server": "engage.cloudflareclient.com",
-	        "server_port": 2408,
+	        "endpoint": "engage.cloudflareclient.com:2408",
 	        "local_address": ["'"$WARP_V4_ADDR"'", "'"$WARP_V6_ADDR"'"],
 	        "private_key": "'"$WARP_PRIV_KEY"'",
 	        "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
