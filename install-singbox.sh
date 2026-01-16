@@ -714,23 +714,37 @@ create_config() {
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
 	# 4. WARP JSON 片段生成（Sing-box 1.12.0+ endpoint 对象格式）
+	local warp_endpoint=""
 	local warp_outbound=""
 	local warp_rule=""
+	
 	if [[ "${USE_WARP:-false}" == "true" ]]; then
-	        warp_outbound=',
-		    {
-		      "type": "wireguard",
-		      "tag": "warp-out",
-		      "local_address": [
-		        "'"$WARP_V4_ADDR"'",
-		        "'"$WARP_V6_ADDR"'"
-		      ],
-		      "private_key": "'"$WARP_PRIV_KEY"'",
-		      "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-		      "server": "engage.cloudflareclient.com",
-		      "server_port": 2408,
-		      "mtu": 1280
-		    }'
+	
+	    # WireGuard Endpoint（新架构）
+	    warp_endpoint='
+	    {
+	      "type": "wireguard",
+	      "tag": "warp-ep",
+	      "local_address": [
+	        "'"$WARP_V4_ADDR"'",
+	        "'"$WARP_V6_ADDR"'"
+	      ],
+	      "private_key": "'"$WARP_PRIV_KEY"'",
+	      "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+	      "server": "engage.cloudflareclient.com",
+	      "server_port": 2408,
+	      "mtu": 1280
+	    }'
+	
+	    # 通过 detour 使用 endpoint 的 outbound
+	    warp_outbound=',
+	    {
+	      "type": "direct",
+	      "tag": "warp-out",
+	      "detour": "warp-ep"
+	    }'
+	
+	    # 路由规则保持不变
 	    warp_rule='
 	      {
 	        "domain_suffix": [
@@ -741,7 +755,7 @@ create_config() {
 	        "outbound": "warp-out"
 	      },'
 	fi
-
+	
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 450 ] && timeout="60s"
     [ "$mem_total" -lt 450 ] && [ "$mem_total" -ge 200 ] && timeout="50s"
@@ -751,6 +765,9 @@ create_config() {
 {
   "log": { "level": "fatal", "timestamp": true },
   "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
+  ${warp_endpoint:+
+  "endpoints":[${warp_endpoint}],
+  }
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
@@ -778,7 +795,7 @@ create_config() {
   }
 }
 EOF
-    chmod 600 "/etc/sing-box/config.json"
+chmod 600 "/etc/sing-box/config.json"
 }
 
 # ==========================================
