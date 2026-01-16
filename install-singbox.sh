@@ -291,25 +291,34 @@ EOF
     fi
 }
 
-# 计算 RTT 安全钳位
+# 动态 RTT 内存钳位 (激进融合纯计算版)
 safe_rtt() {
-    local RTT_AVG="$1" max_udp_pages="$2" udp_mem_global_min="$3" udp_mem_global_pressure="$4" udp_mem_global_max="$5"
+    local RTT_AVG="$1" max_udp_pages="$2" udp_mem_global_min="$3" udp_mem_global_pressure="$4" udp_mem_global_max="$5"    
+    # 1. 基础 BDP 计算
     rtt_scale_min=$((RTT_AVG * 256)); rtt_scale_pressure=$((RTT_AVG * 512)); rtt_scale_max=$((RTT_AVG * 1024))
-    local quic_min quic_press quic_max quic_extra_msg
-    
-    if [ "$RTT_AVG" -ge 150 ]; then quic_min=262144; quic_press=524288; quic_max=1048576; quic_extra_msg=" (QUIC长距模式)"; \
-    else quic_min=131072; quic_press=262144; quic_max=524288; quic_extra_msg=" (QUIC竞速模式)"; fi
-    SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL}${quic_extra_msg}"
-    # QUIC 最小值保护
-    [ "$quic_min" -gt "$rtt_scale_min" ] && rtt_scale_min=$quic_min
-    [ "$quic_press" -gt "$rtt_scale_pressure" ] && rtt_scale_pressure=$quic_press
-    [ "$quic_max" -gt "$rtt_scale_max" ] && rtt_scale_max=$quic_max
-    # 内存总量保护（40% 上限）
-    [ "$rtt_scale_max" -gt "$max_udp_pages" ] && { rtt_scale_max=$max_udp_pages; rtt_scale_pressure=$((max_udp_pages * 3 / 4)); rtt_scale_min=$((max_udp_pages / 2)); }
-    # 实际可用内存二次校验
-    local avail_mem_pages=$(awk '/MemAvailable/{print int($2/4)}' /proc/meminfo 2>/dev/null || echo "$max_udp_pages")
-    [ "$rtt_scale_max" -gt "$avail_mem_pages" ] && rtt_scale_max=$avail_mem_pages
-    # 内存档位保护（新增：确保不超出内存档位限制）
+    local q_min q_press q_max q_msg
+    # 2. 根据延迟切换 QUIC 模式
+    [ "$RTT_AVG" -ge 150 ] && { q_min=262144; q_press=524288; q_max=1048576; q_msg=" (QUIC长距模式)"; } \
+                           || { q_min=131072; q_press=262144; q_max=524288; q_msg=" (QUIC竞速模式)"; }
+    SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL:-}${q_msg}"
+    # 3. QUIC 最小值保护（确保缓冲区下限）
+    [ "$q_min" -gt "$rtt_scale_min" ] && rtt_scale_min=$q_min
+    [ "$q_press" -gt "$rtt_scale_pressure" ] && rtt_scale_pressure=$q_press
+    [ "$q_max" -gt "$rtt_scale_max" ] && rtt_scale_max=$q_max
+    # 4. 核心：激进内存保护逻辑 (当超过物理内存 40%-80% 限制时执行钳位)
+    if [ "$rtt_scale_max" -gt "$max_udp_pages" ]; then
+        rtt_scale_max=$max_udp_pages
+        rtt_scale_pressure=$((max_udp_pages * 95 / 100))
+        rtt_scale_min=$((max_udp_pages * 80 / 100))
+    fi
+    # 5. 实际可用内存二次校验（防宕机保护线：预留 10% 呼吸空间）
+    local avail=$(awk '/MemAvailable/{print int($2/4)}' /proc/meminfo 2>/dev/null || echo "$max_udp_pages")
+    if [ "$rtt_scale_max" -gt "$avail" ]; then
+        rtt_scale_max=$((avail * 90 / 100))
+        rtt_scale_pressure=$((rtt_scale_max * 95 / 100))
+        rtt_scale_min=$((rtt_scale_max * 80 / 100))
+    fi
+    # 6. 档位保护：确保最终值不超出系统定义的全局硬上限
     rtt_scale_max=$(( rtt_scale_max < udp_mem_global_max ? rtt_scale_max : udp_mem_global_max ))
     rtt_scale_pressure=$(( rtt_scale_pressure < udp_mem_global_pressure ? rtt_scale_pressure : udp_mem_global_pressure ))
     rtt_scale_min=$(( rtt_scale_min < udp_mem_global_min ? rtt_scale_min : udp_mem_global_min ))
@@ -424,8 +433,8 @@ optimize_system() {
         VAR_BACKLOG=32768; swappiness_val=10; busy_poll_val=50
         g_procs=$real_c; g_wnd=24; g_buf=4194304
         [ "$real_c" -ge 2 ] && { net_bgt=3000; net_usc=2000; } || { net_bgt=2500; net_usc=5000; }
-        udp_mem_global_min=131072; udp_mem_global_pressure=262144; udp_mem_global_max=524288
-        max_udp_mb=$((mem_total * 55 / 100)); ct_max=65535; ct_stream_to=60
+        udp_mem_global_min=131072; udp_mem_global_pressure=262144; udp_mem_global_max=$((mem_total * 256 * 2))
+        max_udp_mb=$((mem_total * 80 / 100)); ct_max=65535; ct_stream_to=60
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
         SBOX_GOLIMIT="$((mem_total * 80 / 100))MiB"; SBOX_GOGC="150"
@@ -436,14 +445,14 @@ optimize_system() {
         g_procs=$real_c; g_wnd=16; g_buf=2097152
         [ "$real_c" -ge 2 ] && { net_bgt=1500; net_usc=2500; } || { net_bgt=2000; net_usc=4500; }
         udp_mem_global_min=65536; udp_mem_global_pressure=131072; udp_mem_global_max=262144
-        max_udp_mb=$((mem_total * 48 / 100)); ct_max=32768; ct_stream_to=45
+        max_udp_mb=$((mem_total * 70 / 100)); ct_max=32768; ct_stream_to=45
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
         SBOX_GOLIMIT="$((mem_total * 78 / 100))MiB"; SBOX_GOGC="120"
         VAR_UDP_RMEM="8388608"; VAR_UDP_WMEM="8388608"
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"
         VAR_HY2_BW="200"; VAR_DEF_MEM="4194304"
-        max_udp_mb=$((mem_total * 40 / 100)); VAR_BACKLOG=8000; swappiness_val=60; busy_poll_val=0
+        max_udp_mb=$((mem_total * 60 / 100)); VAR_BACKLOG=8000; swappiness_val=60; busy_poll_val=0
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c; g_wnd=10; g_buf=1048576
         [ "$real_c" -ge 2 ] && { net_bgt=1000; net_usc=3000; } || { net_bgt=1500; net_usc=4000; }
         udp_mem_global_min=32768; udp_mem_global_pressure=65536; udp_mem_global_max=131072
@@ -454,15 +463,21 @@ optimize_system() {
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"
         VAR_HY2_BW="130"; VAR_DEF_MEM="3145728"
         VAR_BACKLOG=5000; swappiness_val=100; busy_poll_val=0
-        max_udp_mb=$((mem_total * 35 / 100)); g_procs=1; g_wnd=6; g_buf=524288
+        max_udp_mb=$((mem_total * 45 / 100)); g_procs=1; g_wnd=6; g_buf=524288
         [ "$real_c" -ge 2 ] && { net_bgt=1000; net_usc=3500; } || { net_bgt=1300; net_usc=3500; }
-        udp_mem_global_min=24576; udp_mem_global_pressure=49152; udp_mem_global_max=98304
+        udp_mem_global_min=24576; udp_mem_global_pressure=49152; udp_mem_global_max=65536
         SBOX_OPTIMIZE_LEVEL="64M 激进版"
     fi
 
     # 3. RTT 驱动与安全钳位
 	local max_udp_pages=$((max_udp_mb * 256))
     safe_rtt "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
+	local calc_udp_bytes=$(( rtt_scale_max * 4096 ))
+    # 如果算出的需求比预设大，则覆盖预设，上限 64MB
+    if [ "$calc_udp_bytes" -gt "$VAR_UDP_RMEM" ]; then
+        VAR_UDP_RMEM=$(( calc_udp_bytes > 67108864 ? 67108864 : calc_udp_bytes ))
+        VAR_UDP_WMEM=$VAR_UDP_RMEM
+    fi
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
     
     SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
