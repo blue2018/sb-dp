@@ -717,20 +717,24 @@ create_config() {
     local warp_outbound=""
     local warp_rule=""
     if [[ "${USE_WARP:-false}" == "true" ]]; then
-        # 生成 Outbound 片段
         warp_outbound=',{
             "type": "wireguard",
             "tag": "warp-out",
-            "server": "engage.cloudflareclient.com",
-            "server_port": 2408,
+            "endpoint": "engage.cloudflareclient.com:2408",
             "local_address": ["'"$WARP_V4_ADDR"'", "'$WARP_V6_ADDR'"],
             "private_key": "'"$WARP_PRIV_KEY"'",
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
             "reserved": [0, 0, 0],
             "mtu": 1280
         }'
-        # 生成 Route Rule 片段 (针对常用解锁域名)
-        warp_rule='{ "domain_suffix": ["google.com", "googlevideo.com", "youtube.com", "openai.com", "chatgpt.com", "claude.ai", "amazon.com", "amazon.co.jp", "netflix.com", "netflix.net", "nflxvideo.net"], "outbound": "warp-out" },'
+        warp_rule='{
+            "domain_suffix": [
+                "google.com", "googlevideo.com", "youtube.com", "openai.com", "chatgpt.com",
+                "claude.ai", "amazon.com", "amazon.co.jp", "netflix.com", "netflix.net",
+                "nflxvideo.net"
+            ],
+            "outbound": "warp-out"
+        },'
     fi
 
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
