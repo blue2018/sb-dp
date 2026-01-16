@@ -811,6 +811,7 @@ respawn_max=3
 respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
+export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 command="/bin/sh"
 command_args="-c \"$exec_cmd\""
 pidfile="/run/\${RC_SVCNAME}.pid"
@@ -852,6 +853,7 @@ ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
+Environment=ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 Nice=$cur_nice
 ${io_config}
 LimitNOFILE=1000000
