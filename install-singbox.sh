@@ -138,6 +138,31 @@ generate_cert() {
     } || { err "证书生成失败"; exit 1; }
 }
 
+# WARP 注册
+setup_warp_lightweight() {
+    info "正在集成轻量化 WARP 出口 (WireGuard 模式)..."
+    local TD=$(mktemp -d)
+    # 自动识别架构下载 wgcf
+    local arch_suffix="amd64"; [ "$SBOX_ARCH" = "arm64" ] && arch_suffix="arm64"
+    curl -fsSL "https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_2.2.22_linux_${arch_suffix}" -o "$TD/wgcf"
+    chmod +x "$TD/wgcf"
+    # 注册并生成配置
+    (cd "$TD" && yes | ./wgcf register && ./wgcf generate) >/dev/null 2>&1
+    
+    if [ -f "$TD/wgcf-profile.conf" ]; then
+        # 提取关键参数
+        WARP_PRIV_KEY=$(grep 'PrivateKey' "$TD/wgcf-profile.conf" | cut -d' ' -f3)
+        WARP_V4_ADDR=$(grep 'Address' "$TD/wgcf-profile.conf" | head -n1 | cut -d' ' -f3 | cut -d',' -f1)
+        WARP_V6_ADDR=$(grep 'Address' "$TD/wgcf-profile.conf" | head -n1 | cut -d' ' -f3 | cut -d',' -f2)
+        USE_WARP="true"
+        succ "WARP 账号申请成功"
+    else
+        err "WARP 注册失败，将回退至纯直连模式"
+        USE_WARP="false"
+    fi
+    rm -rf "$TD"
+}
+
 #获取公网IP
 get_network_info() {
     info "获取网络信息..."
@@ -684,11 +709,31 @@ create_config() {
     fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
+	# 4. WARP JSON 片段生成
+    local warp_outbound=""
+    local warp_rule=""
+    if [[ "${USE_WARP:-false}" == "true" ]]; then
+        # 生成 Outbound 片段
+        warp_outbound=',{
+            "type": "wireguard",
+            "tag": "warp-out",
+            "server": "engage.cloudflareclient.com",
+            "server_port": 2408,
+            "local_address": ["'"$WARP_V4_ADDR"'", "'$WARP_V6_ADDR'"],
+            "private_key": "'"$WARP_PRIV_KEY"'",
+            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+            "reserved": [0, 0, 0],
+            "mtu": 1280
+        }'
+        # 生成 Route Rule 片段 (针对常用解锁域名)
+        warp_rule='{ "domain_suffix": ["google.com", "googlevideo.com", "openai.com", "chatgpt.com", "claude.ai", "netflix.com", "netflix.net", "nflxvideo.net"], "outbound": "warp-out" },'
+    fi
+
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 450 ] && timeout="60s"
     [ "$mem_total" -lt 450 ] && [ "$mem_total" -ge 200 ] && timeout="50s"
     [ "$mem_total" -lt 200 ] && [ "$mem_total" -ge 100 ] && timeout="40s"
-    # 4. 写入 Sing-box 配置文件
+    # 5. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -708,7 +753,16 @@ create_config() {
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
+  "outbounds": [
+    { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }${warp_outbound}
+  ],
+  "route": {
+    "rules": [
+      ${warp_rule}
+      { "protocol": "dns", "outbound": "direct-out" }
+    ],
+    "final": "direct-out"
+  }
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
@@ -910,6 +964,10 @@ RAW_SALA='$FINAL_SALA'
 RAW_IP4='${RAW_IP4:-}'
 RAW_IP6='${RAW_IP6:-}'
 IS_V6_OK='${IS_V6_OK:-false}'
+USE_WARP='${USE_WARP:-false}'
+WARP_PRIV_KEY='${WARP_PRIV_KEY:-}'
+WARP_V4_ADDR='${WARP_V4_ADDR:-}'
+WARP_V6_ADDR='${WARP_V6_ADDR:-}'
 EOF
 
     # 导出函数
@@ -917,7 +975,7 @@ EOF
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
 create_config setup_service install_singbox info err warn succ optimize_system \
 apply_userspace_adaptive_profile apply_nic_core_boost \
-setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
+setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert setup_warp_lightweight cleanup_temp backup_config restore_config load_env_vars)
 
     for f in "${funcs[@]}"; do
         if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
@@ -1041,6 +1099,9 @@ echo -e "-----------------------------------------------"
 USER_PORT=$(prompt_for_port)
 optimize_system
 install_singbox "install"
+echo -e "-----------------------------------------------"
+read -r -p "是否集成轻量化 WARP 出口 (解决验证码/解锁)? [Y/N]: " warp_yn
+[[ "$warp_yn" =~ ^[Yy]$ ]] && { setup_warp_lightweight; SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} + WARP"; } || USE_WARP="false"
 generate_cert
 create_config "$USER_PORT"
 create_sb_tool
