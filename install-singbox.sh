@@ -691,6 +691,7 @@ install_singbox() {
 create_config() {
     local PORT_HY2="${1:-}"
     mkdir -p /etc/sing-box
+    # 针对 v1.12+ 的 DNS 策略调整
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     
@@ -713,39 +714,41 @@ create_config() {
     fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-	# 4. WARP JSON 片段生成
-	if [[ "${USE_WARP:-false}" == "true" ]]; then
-	    warp_outbound=',{
-	        "type": "wireguard",
-	        "tag": "warp-out",
-	        "server": "engage.cloudflareclient.com",
-	        "server_port": 2408,
-	        "local_address": ["'"$WARP_V4_ADDR"'", "'"$WARP_V6_ADDR"'"],
-	        "private_key": "'"$WARP_PRIV_KEY"'",
-	        "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-	        "reserved": [0, 0, 0],
-	        "mtu": 1280
-	    }'
-	    warp_rule='{
-	        "domain_suffix": [
-	            "google.com", "googlevideo.com", "youtube.com", "openai.com", "chatgpt.com",
-	            "claude.ai", "amazon.com", "amazon.co.jp", "netflix.com", "netflix.net"
-	        ],
-	        "outbound": "warp-out"
-	    },'
-	fi
-	
+    # 4. WARP JSON 片段生成 (修复 v1.12+ 兼容性: 使用 endpoint 替代 server/server_port)
+    local warp_outbound=""
+    local warp_rule=""
+    if [[ "${USE_WARP:-false}" == "true" ]]; then
+        warp_outbound=',{
+            "type": "wireguard",
+            "tag": "warp-out",
+            "endpoint": ["engage.cloudflareclient.com:2408"],
+            "local_address": ["'"$WARP_V4_ADDR"'", "'"$WARP_V6_ADDR"'"],
+            "private_key": "'"$WARP_PRIV_KEY"'",
+            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+            "reserved": [0, 0, 0],
+            "mtu": 1280
+        }'
+        warp_rule='{
+            "domain_suffix": [
+                "google.com", "googlevideo.com", "youtube.com", "openai.com", "chatgpt.com",
+                "claude.ai", "amazon.com", "amazon.co.jp", "netflix.com", "netflix.net"
+            ],
+            "outbound": "warp-out"
+        },'
+    fi
+    
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 450 ] && timeout="60s"
     [ "$mem_total" -lt 450 ] && [ "$mem_total" -ge 200 ] && timeout="50s"
     [ "$mem_total" -lt 200 ] && [ "$mem_total" -ge 100 ] && timeout="40s"
-    # 5. 写入 Sing-box 配置文件
+    
+    # 5. 写入 Sing-box 配置文件 (修复 Route 和 DNS 警告)
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "fatal", "timestamp": true },
+  "log": { "level": "info", "timestamp": true },
   "dns": {
     "servers": [
-      {"tag": "dns-remote", "address": "8.8.4.4", "detour": "direct-out"},
+      {"tag": "dns-remote", "address": "8.8.8.8", "detour": "direct-out"},
       {"tag": "dns-backup", "address": "1.1.1.1", "detour": "direct-out"}
     ],
     "strategy": "$ds",
@@ -767,14 +770,15 @@ create_config() {
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
   "outbounds": [
-    { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }${warp_outbound}
+    { "type": "direct", "tag": "direct-out" }${warp_outbound}
   ],
   "route": {
     "rules": [
       ${warp_rule}
       { "protocol": "dns", "outbound": "direct-out" }
     ],
-    "final": "direct-out"
+    "final": "direct-out",
+    "auto_detect_interface": true
   }
 }
 EOF
