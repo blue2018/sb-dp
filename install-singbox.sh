@@ -480,8 +480,8 @@ optimize_system() {
     fi
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
     
-    SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
     SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"
+	SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
     info "优化策略: $SBOX_OPTIMIZE_LEVEL"
     info "UDP 内存池: ${rtt_scale_min}页/${rtt_scale_pressure}页/${rtt_scale_max}页 ($(( rtt_scale_max * 4 / 1024 ))MB上限)"
 
