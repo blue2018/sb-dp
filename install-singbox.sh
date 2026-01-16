@@ -755,6 +755,11 @@ create_config() {
 	        "outbound": "warp-out"
 	      },'
 	fi
+	if [[ "${USE_WARP:-false}" == "true" && -n "${warp_endpoint:-}" ]]; then
+	    endpoints_json="\"endpoints\": [${warp_endpoint}],"
+	else
+	    endpoints_json=""
+	fi
 	
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 450 ] && timeout="60s"
@@ -765,9 +770,7 @@ create_config() {
 {
   "log": { "level": "fatal", "timestamp": true },
   "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
-  ${warp_endpoint:+
-  "endpoints":[${warp_endpoint}],
-  }
+  ${endpoints_json}
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
