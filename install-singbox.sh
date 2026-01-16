@@ -708,55 +708,42 @@ create_config() {
     local SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
     # ==========================================
-    # WARP 方案 4.0：采用 v1.12 官方推荐的 Endpoint 结构
+    # WARP 方案 5.0：修正 peers 内部字段名
     # ==========================================
-    local warp_endpoint=""
+    local warp_outbound=""
     local warp_rule=""
     if [[ "${USE_WARP:-false}" == "true" ]]; then
-        # 注意：这里是顶层的 endpoints 数组，不是 outbounds
-        warp_endpoint=',
-  "endpoints": [
-    {
-      "type": "wireguard",
-      "tag": "warp-proxy",
-      "address": ["'"$WARP_V4_ADDR"'", "'"$WARP_V6_ADDR"'"],
-      "private_key": "'"$WARP_PRIV_KEY"'",
-      "peers": [
-        {
-          "address": "engage.cloudflareclient.com",
-          "port": 2408,
-          "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-          "allowed_ips": ["0.0.0.0/0", "::/0"],
-          "reserved": [0, 0, 0]
-        }
-      ],
-      "mtu": 1280
-    }
-  ]'
-        # 路由规则：将指定域名导向这个 endpoint 绑定的伪 outbound
+        warp_outbound=',{
+            "type": "wireguard",
+            "tag": "warp-out",
+            "local_address": ["'"$WARP_V4_ADDR"'", "'"$WARP_V6_ADDR"'"],
+            "private_key": "'"$WARP_PRIV_KEY"'",
+            "peers": [
+                {
+                    "server": "engage.cloudflareclient.com",
+                    "server_port": 2408,
+                    "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                    "reserved": [0, 0, 0]
+                }
+            ],
+            "mtu": 1280
+        }'
         warp_rule='{
-            "domain": [
+            "domain_suffix": [
                 "google.com", "googlevideo.com", "youtube.com", "openai.com", "chatgpt.com",
                 "claude.ai", "amazon.com", "amazon.co.jp", "netflix.com", "netflix.net"
             ],
             "outbound": "warp-out"
         },'
-        
-        # 定义一个“影子出口”用于关联 Endpoint
-        warp_shadow_outbound=',{
-            "type": "direct",
-            "tag": "warp-out",
-            "detour": "warp-proxy"
-        }'
     fi
-
+    
+    # 写入配置：注意移除了外层的 server/server_port，改放在 peers 内部
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "warn", "timestamp": true },
   "dns": {
     "servers": [
-      { "tag": "dns-remote", "address": "8.8.8.8" },
-      { "tag": "dns-backup", "address": "1.1.1.1" }
+      { "tag": "dns-remote", "address": "8.8.8.8" }
     ],
     "strategy": "$ds"
   },
@@ -775,7 +762,7 @@ create_config() {
     "obfs": {"type": "salamander", "password": "$SALA_PASS"}
   }],
   "outbounds": [
-    { "type": "direct", "tag": "direct-out" }${warp_shadow_outbound}
+    { "type": "direct", "tag": "direct-out" }${warp_outbound}
   ],
   "route": {
     "rules": [
@@ -783,12 +770,11 @@ create_config() {
       { "protocol": "dns", "outbound": "direct-out" }
     ],
     "final": "direct-out"
-  }${warp_endpoint}
+  }
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
 }
-
 # ==========================================
 # 服务配置 
 # ==========================================
