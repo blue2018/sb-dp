@@ -720,13 +720,18 @@ create_config() {
 	    warp_outbound=',{
 	        "type": "wireguard",
 	        "tag": "warp-out",
-	        "server": "engage.cloudflareclient.com",
-	        "server_port": 2408,
+	        "system_interface": false,
+	        "interface_name": "warp0",
 	        "local_address": ["'"$WARP_V4_ADDR"'", "'"$WARP_V6_ADDR"'"],
 	        "private_key": "'"$WARP_PRIV_KEY"'",
-	        "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-	        "reserved": [0, 0, 0],
-	        "mtu": 1280
+	        "peers": [{
+	            "server": "engage.cloudflareclient.com",
+	            "server_port": 2408,
+	            "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+	            "allowed_ips": ["0.0.0.0/0", "::/0"]
+	        }],
+	        "mtu": 1280,
+	        "reserved": [0, 0, 0]
 	    }'
 	    warp_rule='{
 	        "domain_suffix": [
