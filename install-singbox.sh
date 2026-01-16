@@ -692,7 +692,6 @@ create_config() {
     local PORT_HY2="${1:-}"
     mkdir -p /etc/sing-box
     
-    # 针对 v1.12+ 的 DNS 策略调整
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     
@@ -712,23 +711,29 @@ create_config() {
     fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # WARP: 必须使用旧版 server/server_port，因为你的二进制不支持 endpoint
+    # ==========================================
+    # WARP: 采用 v1.12+ 强校验后的新格式
+    # ==========================================
     local warp_outbound=""
     local warp_rule=""
     if [[ "${USE_WARP:-false}" == "true" ]]; then
         warp_outbound=',{
             "type": "wireguard",
             "tag": "warp-out",
-            "server": "engage.cloudflareclient.com",
-            "server_port": 2408,
             "local_address": ["'"$WARP_V4_ADDR"'", "'"$WARP_V6_ADDR"'"],
             "private_key": "'"$WARP_PRIV_KEY"'",
-            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "reserved": [0, 0, 0],
+            "peers": [
+                {
+                    "address": "engage.cloudflareclient.com",
+                    "port": 2408,
+                    "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                    "reserved": [0, 0, 0]
+                }
+            ],
             "mtu": 1280
         }'
         warp_rule='{
-            "domain_suffix": [
+            "domain": [
                 "google.com", "googlevideo.com", "youtube.com", "openai.com", "chatgpt.com",
                 "claude.ai", "amazon.com", "amazon.co.jp", "netflix.com", "netflix.net"
             ],
@@ -736,22 +741,18 @@ create_config() {
         },'
     fi
     
-    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    [ "$mem_total" -ge 450 ] && timeout="60s"
-    [ "$mem_total" -lt 450 ] && [ "$mem_total" -ge 200 ] && timeout="50s"
-    [ "$mem_total" -lt 200 ] && [ "$mem_total" -ge 100 ] && timeout="40s"
-    
-    # 写入配置 (优化 DNS 结构以减少警告)
+    # ==========================================
+    # 写入配置 (全面适配 v1.12+ DNS/Route 隔离架构)
+    # ==========================================
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "warn", "timestamp": true },
   "dns": {
     "servers": [
-      {"tag": "dns-remote", "address": "8.8.8.8", "detour": "direct-out"},
-      {"tag": "dns-backup", "address": "1.1.1.1", "detour": "direct-out"}
+      { "tag": "dns-remote", "address": "8.8.8.8" },
+      { "tag": "dns-backup", "address": "1.1.1.1" }
     ],
-    "strategy": "$ds",
-    "independent_cache": false
+    "strategy": "$ds"
   },
   "inbounds": [{
     "type": "hysteria2",
@@ -759,14 +760,13 @@ create_config() {
     "listen": "::",
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
-    "ignore_client_bandwidth": false,
-    "up_mbps": ${VAR_HY2_BW:-200},
-    "down_mbps": ${VAR_HY2_BW:-200},
-    "udp_timeout": "$timeout",
-    "udp_fragment": true,
-    "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
-    "obfs": {"type": "salamander", "password": "$SALA_PASS"},
-    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+    "tls": {
+        "enabled": true, 
+        "alpn": ["h3"], 
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
+        "key_path": "/etc/sing-box/certs/privkey.pem"
+    },
+    "obfs": {"type": "salamander", "password": "$SALA_PASS"}
   }],
   "outbounds": [
     { "type": "direct", "tag": "direct-out" }${warp_outbound}
@@ -777,8 +777,7 @@ create_config() {
       { "protocol": "dns", "outbound": "direct-out" }
     ],
     "final": "direct-out",
-    "auto_detect_interface": true,
-    "default_domain_resolver": "dns-remote"
+    "auto_detect_interface": true
   }
 }
 EOF
@@ -796,36 +795,15 @@ setup_service() {
     local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"
     local mem_total=$(probe_memory_total)
     [ "$CPU_N" -le 1 ] && core_range="0" || core_range="0-$((CPU_N - 1))"
-    
     info "配置服务 (核心: $CPU_N | 绑定: $core_range | 权重: $cur_nice)..."
-
-    # ==========================================
-    # 核心修改：创建启动替身脚本 (Wrapper)
-    # 无论 Systemd 还是 OpenRC，都调用这个脚本启动
-    # ==========================================
-    local STARTER="/usr/bin/sing-box-starter"
-    cat > "$STARTER" <<EOF
-#!/bin/sh
-# 强制注入环境变量，解决 v1.12+ 的 WireGuard 兼容性问题
-export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
-export GOTRACEBACK=none
-
-# 执行真正的 sing-box
-exec /usr/bin/sing-box "\$@"
-EOF
-    chmod +x "$STARTER"
-
-    # 构建运行命令 (注意：现在调用 STARTER)
-    local exec_cmd=""
+    
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
-        exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range $STARTER run -c /etc/sing-box/config.json"
-        
+        local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
         if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
             local io_prio=2; [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
             exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
         fi
-
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
@@ -834,8 +812,9 @@ supervisor="supervise-daemon"
 respawn_delay=10
 respawn_max=3
 respawn_period=60
+[ -f /etc/sing-box/env ] && . /etc/sing-box/env
+export GOTRACEBACK=none
 command="/bin/sh"
-# 注意：这里直接把整个复杂命令传进去
 command_args="-c \"$exec_cmd\""
 pidfile="/run/\${RC_SVCNAME}.pid"
 rc_ulimit="-n 1000000"
@@ -848,21 +827,17 @@ EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1 || true
     else
-        # Systemd 部分
         local mem_config=""
         [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
         local io_config=""
         if [ "$mem_total" -ge 200 ]; then
-            if [ "$io_class" = "realtime" ] && [ "$mem_total" -ge 450 ]; then
-                 io_config="-IOSchedulingClass=realtime"$'\n'"-IOSchedulingPriority=0"
-            else
-                 io_config="-IOSchedulingClass=best-effort"$'\n'"-IOSchedulingPriority=2"
-            fi
+            [ "$io_class" = "realtime" ] && [ "$mem_total" -ge 450 ] && \
+                io_config="-IOSchedulingClass=realtime"$'\n'"-IOSchedulingPriority=0" || \
+                io_config="-IOSchedulingClass=best-effort"$'\n'"-IOSchedulingPriority=2"
         else io_config="-IOSchedulingClass=best-effort"$'\n'"-IOSchedulingPriority=4"; fi
         local cpu_quota=$((CPU_N * 100))
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100        
-        
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
@@ -874,10 +849,11 @@ StartLimitBurst=3
 [Service]
 Type=simple
 User=root
-# 使用 starter 脚本
+EnvironmentFile=-/etc/sing-box/env
+Environment=GOTRACEBACK=none
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
-ExecStart=$taskset_bin -c $core_range $STARTER run -c /etc/sing-box/config.json
+ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
 Nice=$cur_nice
 ${io_config}
@@ -902,8 +878,7 @@ EOF
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null); local ma_mb=$(( ${ma:-0} / 1024 ))
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
     else 
-        err "sing-box 启动失败，最近日志："
-        [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 5 || tail -n 5 /var/log/messages 2>/dev/null || echo "无法获取系统日志"; } || { journalctl -u sing-box -n 5 --no-pager 2>/dev/null || echo "无法获取服务日志"; }
+        err "sing-box 启动失败，最近日志："; [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 5 || tail -n 5 /var/log/messages 2>/dev/null || echo "无法获取系统日志"; } || { journalctl -u sing-box -n 5 --no-pager 2>/dev/null || echo "无法获取服务日志"; }
         echo -e "\033[1;33m[配置自检]\033[0m"; /usr/bin/sing-box check -c /etc/sing-box/config.json || true; exit 1
     fi
 }
