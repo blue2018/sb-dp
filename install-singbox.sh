@@ -142,15 +142,17 @@ generate_cert() {
 setup_warp_lightweight() {
     info "正在集成轻量化 WARP 出口 (WireGuard 模式)..."
     local TD=$(mktemp -d)
-    # 自动识别架构下载 wgcf
     local arch_suffix="amd64"; [ "$SBOX_ARCH" = "arm64" ] && arch_suffix="arm64"
-    curl -fsSL "https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_2.2.22_linux_${arch_suffix}" -o "$TD/wgcf"
-    chmod +x "$TD/wgcf"
-    # 注册并生成配置
-    (cd "$TD" && yes | ./wgcf register && ./wgcf generate) >/dev/null 2>&1
+    local W_URL=$(curl -sL --connect-timeout 10 "https://api.github.com/repos/ViRb3/wgcf/releases/latest" | grep "browser_download_url" | grep "linux_${arch_suffix}" | cut -d'"' -f4)
     
+    [ -z "$W_URL" ] && W_URL="https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_linux_${arch_suffix}"
+    info "获取 wgcf 组件..."
+    curl -fsSL "$W_URL" -o "$TD/wgcf" || curl -fsSL "https://github.com/ViRb3/wgcf/releases/download/v2.2.22/wgcf_2.2.22_linux_${arch_suffix}" -o "$TD/wgcf"
+    [ ! -f "$TD/wgcf" ] && { err "下载 wgcf 失败，请检查网络"; rm -rf "$TD"; return 1; }
+	
+    chmod +x "$TD/wgcf"
+    (cd "$TD" && yes | ./wgcf register && ./wgcf generate) >/dev/null 2>&1
     if [ -f "$TD/wgcf-profile.conf" ]; then
-        # 提取关键参数
         WARP_PRIV_KEY=$(grep 'PrivateKey' "$TD/wgcf-profile.conf" | cut -d' ' -f3)
         WARP_V4_ADDR=$(grep 'Address' "$TD/wgcf-profile.conf" | head -n1 | cut -d' ' -f3 | cut -d',' -f1)
         WARP_V6_ADDR=$(grep 'Address' "$TD/wgcf-profile.conf" | head -n1 | cut -d' ' -f3 | cut -d',' -f2)
@@ -163,7 +165,7 @@ setup_warp_lightweight() {
     rm -rf "$TD"
 }
 
-#获取公网IP
+# 获取公网IP
 get_network_info() {
     info "获取网络信息..."
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"
