@@ -358,7 +358,7 @@ apply_userspace_adaptive_profile() {
     export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd"
     export SINGBOX_UDP_RECVBUF="$buf"
     export SINGBOX_UDP_SENDBUF="$buf" 
-    export VAR_HY2_BW="${VAR_HY2_BW:-100}"
+    export VAR_HY2_BW="${VAR_HY2_BW:-200}"
     
     mkdir -p /etc/sing-box
     cat > /etc/sing-box/env <<EOF
