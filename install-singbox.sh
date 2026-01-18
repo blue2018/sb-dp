@@ -421,64 +421,64 @@ optimize_system() {
     if [ "$mem_total" -ge 450 ]; then
         VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 70 / 100))
         SBOX_GOLIMIT="$((mem_total * 80 / 100))MiB"; SBOX_GOGC="200"
-		SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
+		SBOX_MEM_HIGH="$((mem_total * 86 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
         g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
-        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 65 / 100))
-        SBOX_GOLIMIT="$((mem_total * 75 / 100))MiB"; SBOX_GOGC="150"
+        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 65 / 100))  
+        SBOX_GOLIMIT="$((mem_total * 76 / 100))MiB"; SBOX_GOGC="150"
 		SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
         g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
-    elif [ "$mem_total" -ge 100 ]; then
-        VAR_HY2_BW="200"; max_udp_mb=$((mem_total * 60 / 100))
-        SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="120"
-		SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
+    elif [ "$mem_total" -ge 90 ]; then
+        VAR_HY2_BW="220"; max_udp_mb=$((mem_total * 63 / 100))
+        SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="120"
+		SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         swappiness_val=60; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
-        SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
+        SBOX_OPTIMIZE_LEVEL="90M 紧凑版"
     else
-        VAR_HY2_BW="150"; max_udp_mb=$((mem_total * 55 / 100))
+        VAR_HY2_BW="180"; max_udp_mb=$((mem_total * 55 / 100))
         SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="100"
 		SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304  
         g_procs=1; swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
-        SBOX_OPTIMIZE_LEVEL="64M 激进版"
+        SBOX_OPTIMIZE_LEVEL="64M 激进版"  
     fi
 
 	# 阶段二：[重点] dyn_buf 跳板与带宽灵魂联动
-    # 1. 计算带宽所需 BDP 保底 (字节)
-    local bdp_min=$(( VAR_HY2_BW * 1024 * 1024 / 8 / 5 * 2 )) # 约 0.2s 冗余
+    # 1. 计算带宽所需 BDP 保底 (系数3以应对国际链路抖动)
+    local bdp_min=$(( VAR_HY2_BW * 1024 * 1024 / 8 / 5 * 3 )) # 约 0.3s 冗余
     # 2. 设置跳板变量 dyn_buf (综合物理能力与带宽需求)
     dyn_buf=$(( mem_total * 1024 * 1024 / 8 )) 
-    [ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min # 需求优先
+    [ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min
+	[ "$mem_total" -ge 90 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432   # 强制给 90M+ 机器分配至少 32MB 核心缓冲，确保高延迟下吞吐不掉速
     local phys_limit=$(( max_udp_mb * 1024 * 1024 ))
     [ "$dyn_buf" -gt "$phys_limit" ] && dyn_buf=$phys_limit   # 限制 dyn_buf 不超过当前档位定义的 max_udp_mb (转换为字节)
-    [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864   # 单进程/协议栈缓冲区 64MB 封顶，足以支撑在 200ms 高延迟下跑满 2.5Gbps 的理论带宽
-    # 3. 联动导出：所有内核网络参数基于 dyn_buf 伸缩
-    VAR_UDP_RMEM="$dyn_buf"
-    VAR_UDP_WMEM="$dyn_buf"
+    [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864   # 64MB 封顶，足以支撑在 200ms 高延迟下跑满 2.5Gbps 的理论带宽
+    # 3. 所有内核网络参数基于 dyn_buf 伸缩
+    VAR_UDP_RMEM="$dyn_buf"; VAR_UDP_WMEM="$dyn_buf"
     VAR_DEF_MEM=$(( dyn_buf / 4 ))
-    VAR_BACKLOG=$(( VAR_HY2_BW * 30 )) 
+    VAR_BACKLOG=$(( VAR_HY2_BW * 50 ))   #队列从30提到50，抗突发丢包
     [ "$VAR_BACKLOG" -lt 8192 ] && VAR_BACKLOG=8192
     # 4. 联动导出：Sing-box 应用层参数
-    g_wnd=$(( VAR_HY2_BW / 7 )) # [冲刺版] 激进窗口，应对 80ms+ 延迟（原为 /10）
-    [ "$g_wnd" -lt 16 ] && g_wnd=16 # 调高起步窗口
-    g_buf=$(( dyn_buf / 4 ))   # [冲刺版] 应用层 buffer 设为跳板的 1/4（原为 /8）
+    g_wnd=$(( VAR_HY2_BW / 6 ))      # 激进窗口，应对 80ms+ 延迟（原为 /10）
+    [ "$g_wnd" -lt 24 ] && g_wnd=24  # 调高起步窗口
+    g_buf=$(( dyn_buf / 4 ))         # 应用层 buffer 设为跳板的 1/4（原为 /8）
     # 5. 确定系统全局 UDP 限制 (作为 safe_rtt 的参照系)
     udp_mem_global_min=$(( dyn_buf / 4096 ))
     udp_mem_global_pressure=$(( dyn_buf * 2 / 4096 ))
     udp_mem_global_max=$(( mem_total * 1024 * 1024 * 75 / 100 / 4096 )) # 物理红线 75%
     # 6. 根据带宽目标设定基础预算：每 100M 带宽分配约 1000 的预算
-    local base_budget=$(( VAR_HY2_BW * 10 ))
-    [ "$base_budget" -lt 1500 ] && base_budget=1500 # 提高单核起步预算
-    [ "$base_budget" -gt 5000 ] && base_budget=5000
+    local base_budget=$(( VAR_HY2_BW * 15 / 10 * 10 ))  # 基础权重增加50%
+    [ "$base_budget" -lt 2000 ] && base_budget=2000
+    [ "$base_budget" -gt 6000 ] && base_budget=6000
     # 多核：单次少吃多餐，靠多核并行 / 单核：必须一次多处理点，减少中断切换的开销
     [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || \
-    { net_bgt=$(( base_budget * 20 / 10 )); net_usc=5000; } # [冲刺版] 允许单核更长时间霸占 CPU 处理网络包
+    { net_bgt=$(( base_budget * 20 / 10 )); net_usc=6000; } # 允许单核更长时间霸占 CPU 处理网络包
 	
     # 阶段三：路况仲裁与持久化
     local max_udp_pages=$(( max_udp_mb * 256 ))
@@ -486,7 +486,7 @@ optimize_system() {
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
     SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"
     SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
-    info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽引擎: ${VAR_HY2_BW}Mbps"
+    info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW}Mbps"
     info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 ))MB"
 	
     # 阶段四： BBR 探测与内核锐化 (递进式锁定最强算法)
@@ -688,7 +688,7 @@ create_config() {
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
     local mem_total=$(probe_memory_total); : ${mem_total:=64}
-	local timeout=$( [ "$mem_total" -ge 450 ] && echo "60s" || { [ "$mem_total" -ge 200 ] && echo "50s" || { [ "$mem_total" -ge 100 ] && echo "40s" || echo "30s"; }; } )
+	local timeout=$( [ "$mem_total" -ge 450 ] && echo "60s" || { [ "$mem_total" -ge 200 ] && echo "50s" || { [ "$mem_total" -ge 90 ] && echo "40s" || echo "30s"; }; } )
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
