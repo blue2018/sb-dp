@@ -457,7 +457,7 @@ optimize_system() {
     [ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min # 需求优先
     local phys_limit=$(( max_udp_mb * 1024 * 1024 ))
     [ "$dyn_buf" -gt "$phys_limit" ] && dyn_buf=$phys_limit   # 限制 dyn_buf 不超过当前档位定义的 max_udp_mb (转换为字节)
-	[ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864   # 单进程/协议栈缓冲区 64MB 封顶，足以支撑在 200ms 高延迟下跑满 2.5Gbps 的理论带宽
+    [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864   # 单进程/协议栈缓冲区 64MB 封顶，足以支撑在 200ms 高延迟下跑满 2.5Gbps 的理论带宽
     # 3. 联动导出：所有内核网络参数基于 dyn_buf 伸缩
     VAR_UDP_RMEM="$dyn_buf"
     VAR_UDP_WMEM="$dyn_buf"
@@ -465,20 +465,20 @@ optimize_system() {
     VAR_BACKLOG=$(( VAR_HY2_BW * 30 )) 
     [ "$VAR_BACKLOG" -lt 8192 ] && VAR_BACKLOG=8192
     # 4. 联动导出：Sing-box 应用层参数
-    g_wnd=$(( VAR_HY2_BW / 10 )) # 带宽联动窗口，例如 150M 带宽对应 15 窗口
-    [ "$g_wnd" -lt 12 ] && g_wnd=12
-    g_buf=$(( dyn_buf / 8 ))   # 应用层 buffer 设为跳板的 1/8
+    g_wnd=$(( VAR_HY2_BW / 7 )) # [冲刺版] 激进窗口，应对 80ms+ 延迟（原为 /10）
+    [ "$g_wnd" -lt 16 ] && g_wnd=16 # 调高起步窗口
+    g_buf=$(( dyn_buf / 4 ))   # [冲刺版] 应用层 buffer 设为跳板的 1/4（原为 /8）
     # 5. 确定系统全局 UDP 限制 (作为 safe_rtt 的参照系)
     udp_mem_global_min=$(( dyn_buf / 4096 ))
     udp_mem_global_pressure=$(( dyn_buf * 2 / 4096 ))
     udp_mem_global_max=$(( mem_total * 1024 * 1024 * 75 / 100 / 4096 )) # 物理红线 75%
-	# 6. 根据带宽目标设定基础预算：每 100M 带宽分配约 1000 的预算
+    # 6. 根据带宽目标设定基础预算：每 100M 带宽分配约 1000 的预算
     local base_budget=$(( VAR_HY2_BW * 10 ))
-    [ "$base_budget" -lt 1000 ] && base_budget=1000
-    [ "$base_budget" -gt 4000 ] && base_budget=4000
-	# 多核：单次少吃多餐，靠多核并行 / 单核：必须一次多处理点，减少中断切换的开销
-	[ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || \
-    { net_bgt=$(( base_budget * 15 / 10 )); net_usc=4000; }
+    [ "$base_budget" -lt 1500 ] && base_budget=1500 # 提高单核起步预算
+    [ "$base_budget" -gt 5000 ] && base_budget=5000
+    # 多核：单次少吃多餐，靠多核并行 / 单核：必须一次多处理点，减少中断切换的开销
+    [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || \
+    { net_bgt=$(( base_budget * 20 / 10 )); net_usc=5000; } # [冲刺版] 允许单核更长时间霸占 CPU 处理网络包
 	
     # 阶段三：路况仲裁与持久化
     local max_udp_pages=$(( max_udp_mb * 256 ))
