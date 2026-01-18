@@ -428,36 +428,32 @@ optimize_system() {
     # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
         VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 75 / 100))
-        SBOX_GOLIMIT="$((mem_total * 78 / 100))MiB"; SBOX_GOGC="200"
+        SBOX_GOLIMIT="$((mem_total * 80 / 100))MiB"; SBOX_GOGC="200"
 		SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
         g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
-        [ "$real_c" -ge 2 ] && { net_bgt=3000; net_usc=2000; } || { net_bgt=2500; net_usc=5000; }
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
-        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 65 / 100))
+        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 70 / 100))
         SBOX_GOLIMIT="$((mem_total * 75 / 100))MiB"; SBOX_GOGC="150"
 		SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
         g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
-        [ "$real_c" -ge 2 ] && { net_bgt=1500; net_usc=2500; } || { net_bgt=2000; net_usc=4500; }
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
-        VAR_HY2_BW="200"; max_udp_mb=$((mem_total * 60 / 100))
+        VAR_HY2_BW="200"; max_udp_mb=$((mem_total * 65 / 100))
         SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="120"
 		SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         swappiness_val=60; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
-        [ "$real_c" -ge 2 ] && { net_bgt=1000; net_usc=3000; } || { net_bgt=1500; net_usc=4000; }
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
-        VAR_HY2_BW="150"; max_udp_mb=$((mem_total * 55 / 100))
+        VAR_HY2_BW="150"; max_udp_mb=$((mem_total * 60 / 100))
         SBOX_GOLIMIT="$((mem_total * 65 / 100))MiB"; SBOX_GOGC="100"
 		SBOX_MEM_HIGH="$((mem_total * 75 / 100))M"; SBOX_MEM_MAX="$((mem_total * 85 / 100))M"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         g_procs=1; swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
-        [ "$real_c" -ge 2 ] && { net_bgt=1000; net_usc=3500; } || { net_bgt=1300; net_usc=3500; }
         SBOX_OPTIMIZE_LEVEL="64M 激进版"
     fi
 
@@ -484,6 +480,12 @@ optimize_system() {
     udp_mem_global_min=$(( dyn_buf / 4096 ))
     udp_mem_global_pressure=$(( dyn_buf * 2 / 4096 ))
     udp_mem_global_max=$(( mem_total * 1024 * 1024 * 75 / 100 / 4096 )) # 物理红线 75%
+	# 6. 根据带宽目标设定基础预算：每 100M 带宽分配约 1000 的预算
+    local base_budget=$(( VAR_HY2_BW * 10 ))
+    [ "$base_budget" -lt 1000 ] && base_budget=1000
+    [ "$base_budget" -gt 4000 ] && base_budget=4000
+    [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || \   # 多核：单次少吃多餐，靠多核并行
+    { net_bgt=$(( base_budget * 15 / 10 )); net_usc=4000; }   # 单核：必须一次多处理点，减少中断切换的开销
 
     # 阶段三：路况仲裁与持久化
     local max_udp_pages=$(( max_udp_mb * 256 ))
