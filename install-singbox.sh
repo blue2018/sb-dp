@@ -421,21 +421,21 @@ optimize_system() {
     if [ "$mem_total" -ge 450 ]; then
         VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 70 / 100))
         SBOX_GOLIMIT="$((mem_total * 80 / 100))MiB"; SBOX_GOGC="200"
-		SBOX_MEM_HIGH="$((mem_total * 86 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
+        SBOX_MEM_HIGH="$((mem_total * 86 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
         g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
-        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 65 / 100))  
+        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 65 / 100))
         SBOX_GOLIMIT="$((mem_total * 76 / 100))MiB"; SBOX_GOGC="150"
-		SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
+        SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
         g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
         VAR_HY2_BW="220"; max_udp_mb=$((mem_total * 60 / 100))
         SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="120"
-		SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
+        SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         swappiness_val=60; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
@@ -443,13 +443,13 @@ optimize_system() {
     else
         VAR_HY2_BW="180"; max_udp_mb=$((mem_total * 55 / 100))
         SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="100"
-		SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
-        VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304  
+        SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
+        VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         g_procs=1; swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
-        SBOX_OPTIMIZE_LEVEL="64M 激进版"  
+        SBOX_OPTIMIZE_LEVEL="64M 激进版"
     fi
 
-	# 阶段二：[重点] dyn_buf 跳板与带宽灵魂联动
+    # 阶段二：[重点] dyn_buf 跳板与带宽灵魂联动
     # 1. 计算带宽所需 BDP 保底 (系数3以应对国际链路抖动)
     local bdp_min=$(( VAR_HY2_BW * 1024 * 1024 / 8 / 5 * 3 )) # 约 0.3s 冗余
     # 2. 设置跳板变量 dyn_buf (综合物理能力与带宽需求)
