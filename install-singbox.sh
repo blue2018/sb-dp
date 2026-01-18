@@ -354,7 +354,7 @@ EOF
     chmod 644 /etc/sing-box/env
     # === 4. CPU 亲和力优化 (绑定当前脚本到所有可用核心) ===
     [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1 && taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1
-    info "Runtime → CPU:$GOMAXPROCS核 | QUIC窗口:$wnd | Buffer:$((buf/1024))KB"
+    info "Runtime → GOMAXPROCS:$GOMAXPROCS核 | QUIC窗口:$wnd | Buffer:$((buf/1024))KB"
 }
 
 # 网卡核心负载加速（RPS/XPS/批处理密度）
