@@ -455,11 +455,13 @@ optimize_system() {
     # 2. 设置跳板变量 dyn_buf (综合物理能力与带宽需求)
     dyn_buf=$(( mem_total * 1024 * 1024 / 8 )) 
     [ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min
-    [ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432   # 强制给 100M+ 机器分配至少 32MB 核心缓冲，确保高延迟下吞吐不掉速
-    local phys_limit=$(( max_udp_mb * 1024 * 1024 ))
-    [ "$dyn_buf" -gt "$phys_limit" ] && dyn_buf=$phys_limit   # 限制 dyn_buf 不超过当前档位定义的 max_udp_mb (转换为字节)
-    [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864   # 64MB 封顶，足以支撑在 200ms 高延迟下跑满 2.5Gbps 的理论带宽
-    
+	# 强制给 100M+ 机器分配至少 32MB 核心缓冲，确保高延迟下吞吐不掉速
+    [ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
+    # 限制 dyn_buf 不超过当前档位定义的 max_udp_mb / 64MB 封顶，足以支撑在 200ms 高延迟下跑满 2.5Gbps 的理论带宽
+	local phys_limit=$(( max_udp_mb * 1024 * 1024 ))
+    [ "$dyn_buf" -gt "$phys_limit" ] && dyn_buf=$phys_limit
+    [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864
+	
     # 3. 所有内核网络参数基于 dyn_buf 伸缩
     VAR_UDP_RMEM="$dyn_buf"; VAR_UDP_WMEM="$dyn_buf"
     VAR_DEF_MEM=$(( dyn_buf / 4 ))
