@@ -744,15 +744,8 @@ create_config() {
     # 写入配置 (优化 DNS 结构以减少警告)
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "warn", "timestamp": true },
-  "dns": {
-    "servers": [
-      {"tag": "dns-remote", "address": "8.8.8.8", "detour": "direct-out"},
-      {"tag": "dns-backup", "address": "1.1.1.1", "detour": "direct-out"}
-    ],
-    "strategy": "$ds",
-    "independent_cache": false
-  },
+  "log": { "level": "fatal", "timestamp": true },
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
@@ -769,16 +762,14 @@ create_config() {
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
   "outbounds": [
-    { "type": "direct", "tag": "direct-out" }${warp_outbound}
+    { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }${warp_outbound}
   ],
   "route": {
     "rules": [
       ${warp_rule}
       { "protocol": "dns", "outbound": "direct-out" }
     ],
-    "final": "direct-out",
-    "auto_detect_interface": true,
-    "default_domain_resolver": "dns-remote"
+    "final": "direct-out"
   }
 }
 EOF
