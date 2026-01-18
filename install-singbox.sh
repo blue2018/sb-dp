@@ -498,8 +498,6 @@ optimize_system() {
     local max_udp_pages=$(( max_udp_mb * 256 ))
     safe_rtt "$dyn_buf" "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
-    SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"
-    SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW}Mbps"
     info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 ))MB"
 	
