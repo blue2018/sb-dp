@@ -508,6 +508,8 @@ optimize_system() {
 # === 一、 基础转发与内存管理 (含 ZRAM 与 OOM 策略) ===
 net.ipv4.ip_forward = 1                    # 开启 IPv4 转发
 net.ipv6.conf.all.forwarding = 1           # 开启 IPv6 转发
+net.ipv6.conf.all.accept_ra = 2            # 强制接受 RA (解决转发模式下 IPv6 掉线)
+net.ipv6.conf.default.accept_ra = 2        # 默认接受 RA
 vm.swappiness = $swappiness_val            # 交换分区权重 (根据内存动态调整)
 vm.min_free_kbytes = $min_free_val         # 强制预留水位 (防高并发内核卡死)
 vm.dirty_ratio = 10                        # 内存脏数据占比上限
