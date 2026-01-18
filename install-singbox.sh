@@ -329,21 +329,16 @@ safe_rtt() {
 # sing-box 用户态运行时调度人格（Go/QUIC/缓冲区自适应）
 apply_userspace_adaptive_profile() {
     local g_procs="$1" wnd="$2" buf="$3" real_c="$4" mem_total="$5"
-	export GOGC="${SBOX_GOGC:-100}" GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}" GOMAXPROCS="$g_procs" GODEBUG="madvdontneed=1"
-    # === 1. GOMAXPROCS 智能调整 ===
-    if [ "$real_c" -eq 1 ]; then
-        export GOMAXPROCS=2      # 单核强行设置 2 个 P (Processor) 能让 GC 协程不完全阻塞业务协程
-        [ "$mem_total" -lt 100 ] && info "极低内存环境: 启用并发 GC 优化"
-    fi    
-
-    # === 2. 低内存环境 (100M以下) 专属优化 ===
-    if [ "$mem_total" -lt 100 ]; then
-        export GODEBUG="madvdontneed=1,asyncpreemptoff=1,scavenge_target=1"
-        info "Runtime → 激进内存回收模式策略"
-    fi
-    export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" VAR_HY2_BW="${VAR_HY2_BW:-100}"
+    # === 1. P 处理器调度 (针对单核小鸡的特殊优化) ===
+    # 如果是单核，强行给 2 个 P 能够让网络 IO 和内存回收并行，不至于卡死
+    [ "$real_c" -eq 1 ] && export GOMAXPROCS=2 || export GOMAXPROCS="$g_procs"
+    # === 2. 内存回收策略分级 (64M-/75M+ 差异化处理) ===
+    [ "$mem_total" -lt 75 ] && \
+    { export GODEBUG="madvdontneed=1,scavenge_target=1"; info "Runtime → 激进回收模式 (64M-)"; } || \
+    { export GODEBUG="madvdontneed=1,asyncpreemptoff=1"; info "Runtime → 性能优先模式 (75M+)"; }
+	export GOGC="${SBOX_GOGC:-100}" GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}"
+    export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" VAR_HY2_BW="${VAR_HY2_BW:-200}"
     export SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"  
-    
     # === 3. 持久化配置 (修复潜在变量引用问题) ===
     mkdir -p /etc/sing-box
     cat > /etc/sing-box/env <<EOF
@@ -357,11 +352,8 @@ SINGBOX_UDP_SENDBUF=$buf
 VAR_HY2_BW=${VAR_HY2_BW}
 EOF
     chmod 644 /etc/sing-box/env
-    
-    # === 4. CPU 亲和力优化 ===
-    if [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1; then
-        taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1 || true
-    fi
+    # === 4. CPU 亲和力优化 (绑定当前脚本到所有可用核心) ===
+    [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1 && taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1
     info "Runtime → CPU:$GOMAXPROCS核 | QUIC窗口:$wnd | Buffer:$((buf/1024))KB"
 }
 
@@ -695,9 +687,9 @@ create_config() {
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    [ "$mem_total" -ge 450 ] && timeout="60s"
-    [ "$mem_total" -lt 450 ] && [ "$mem_total" -ge 200 ] && timeout="50s"
-    [ "$mem_total" -lt 200 ] && [ "$mem_total" -ge 100 ] && timeout="40s"
+    [ "$mem_total" -ge 100 ] && timeout="40s"
+	[ "$mem_total" -ge 200 ] && timeout="50s"
+	[ "$mem_total" -ge 450 ] && timeout="60s"
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
