@@ -432,8 +432,8 @@ optimize_system() {
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
         g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
-    elif [ "$mem_total" -ge 90 ]; then
-        VAR_HY2_BW="220"; max_udp_mb=$((mem_total * 63 / 100))
+    elif [ "$mem_total" -ge 100 ]; then
+        VAR_HY2_BW="220"; max_udp_mb=$((mem_total * 60 / 100))
         SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="120"
 		SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
@@ -455,7 +455,7 @@ optimize_system() {
     # 2. 设置跳板变量 dyn_buf (综合物理能力与带宽需求)
     dyn_buf=$(( mem_total * 1024 * 1024 / 8 )) 
     [ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min
-	[ "$mem_total" -ge 90 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432   # 强制给 90M+ 机器分配至少 32MB 核心缓冲，确保高延迟下吞吐不掉速
+	[ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432   # 强制给 100M+ 机器分配至少 32MB 核心缓冲，确保高延迟下吞吐不掉速
     local phys_limit=$(( max_udp_mb * 1024 * 1024 ))
     [ "$dyn_buf" -gt "$phys_limit" ] && dyn_buf=$phys_limit   # 限制 dyn_buf 不超过当前档位定义的 max_udp_mb (转换为字节)
     [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864   # 64MB 封顶，足以支撑在 200ms 高延迟下跑满 2.5Gbps 的理论带宽
@@ -465,9 +465,9 @@ optimize_system() {
     VAR_BACKLOG=$(( VAR_HY2_BW * 50 ))   #队列从30提到50，抗突发丢包
     [ "$VAR_BACKLOG" -lt 8192 ] && VAR_BACKLOG=8192
     # 4. 联动导出：Sing-box 应用层参数
-    g_wnd=$(( VAR_HY2_BW / 6 ))      # 激进窗口，应对 80ms+ 延迟（原为 /10）
-    [ "$g_wnd" -lt 24 ] && g_wnd=24  # 调高起步窗口
-    g_buf=$(( dyn_buf / 4 ))         # 应用层 buffer 设为跳板的 1/4（原为 /8）
+    g_wnd=$(( VAR_HY2_BW / 8 ))      # 激进窗口，应对 80ms+ 延迟（原为 /10）
+    [ "$g_wnd" -lt 15 ] && g_wnd=15  # 调高起步窗口（原为 12）
+    g_buf=$(( dyn_buf / 6 ))         # 应用层 buffer 设为跳板的 1/6（原为 /8）
     # 5. 确定系统全局 UDP 限制 (作为 safe_rtt 的参照系)
     udp_mem_global_min=$(( dyn_buf / 4096 ))
     udp_mem_global_pressure=$(( dyn_buf * 2 / 4096 ))
@@ -682,7 +682,7 @@ create_config() {
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
     local mem_total=$(probe_memory_total); : ${mem_total:=64}
-	local timeout=$( [ "$mem_total" -ge 450 ] && echo "60s" || { [ "$mem_total" -ge 200 ] && echo "50s" || { [ "$mem_total" -ge 90 ] && echo "40s" || echo "30s"; }; } )
+	local timeout=$( [ "$mem_total" -ge 450 ] && echo "60s" || { [ "$mem_total" -ge 200 ] && echo "50s" || { [ "$mem_total" -ge 100 ] && echo "40s" || echo "30s"; }; } )
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
