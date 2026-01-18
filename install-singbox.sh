@@ -479,6 +479,10 @@ optimize_system() {
     # 多核：单次少吃多餐，靠多核并行 / 单核：必须一次多处理点，减少中断切换的开销
     [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || \
     { net_bgt=$(( base_budget * 20 / 10 )); net_usc=6000; } # 允许单核更长时间霸占 CPU 处理网络包
+	# 7. 内存保命机制：动态预留内核紧急水位 (vm.min_free_kbytes)
+    local min_free_val=$(( mem_total * 1024 * 4 / 100 ))  # 对于小内存，预留约 4% 的物理内存，确保网络中断有地方放数据包
+	[ "$min_free_val" -lt 3072 ] && min_free_val=3072     # 96M机型保底留 3MB
+	[ "$min_free_val" -gt 65536 ] && min_free_val=65536   # 大机器 64MB 封顶
 	
     # 阶段三：路况仲裁与持久化
     local max_udp_pages=$(( max_udp_mb * 256 ))
@@ -501,89 +505,79 @@ optimize_system() {
     # 阶段五： 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
     local SYSCTL_FILE="/etc/sysctl.d/99-sing-box.conf"
     cat > "$SYSCTL_FILE" <<SYSCTL
-# === 1. 基础转发与内存管理 ===
-net.ipv4.ip_forward = 1
-net.ipv6.conf.all.forwarding = 1
-vm.swappiness = $swappiness_val            # 交换分区权重
-vm.dirty_ratio = 10                        # 新增：降低脏页比例，释放更多内存给网络
-vm.dirty_background_ratio = 5
-
-# === 2. 网络设备层优化 (网卡与 CPU 交互层) ===
-net.core.netdev_max_backlog = $VAR_BACKLOG # 动态队列深度防止爆发丢包
-net.core.dev_weight = 64                   # CPU 单次处理收包权重
-net.core.busy_read = $busy_poll_val        # 繁忙轮询 (降低数据包在内核态的等待时间)
-net.core.busy_poll = $busy_poll_val
-
-# === 3. 核心 Socket 缓冲区 (全局缓冲区限制) ===
-net.core.rmem_default = $VAR_DEF_MEM       # 默认读缓存 (字节: 约 $((VAR_DEF_MEM / 1024)) KB)
-net.core.wmem_default = $VAR_DEF_MEM       # 默认写缓存 (字节: 约 $((VAR_DEF_MEM / 1024)) KB)
-net.core.rmem_max = $VAR_UDP_RMEM          # 最大读缓存
-net.core.wmem_max = $VAR_UDP_WMEM          # 最大写缓存
-net.core.optmem_max = 2097152              # 每个 Socket 辅助内存上限 (2MB)
-
-# === 4. TCP 协议栈深度调优 (BBR 锐化相关) ===
-net.core.default_qdisc = fq                # BBR 必须配合 FQ 队列调度
-net.ipv4.tcp_congestion_control = $tcp_cca # 拥塞控制算法
-net.ipv4.tcp_no_metrics_save = 1           # 实时探测，不记忆旧 RTT 指标
-net.ipv4.tcp_fastopen = 3                  # 开启 TCP Fast Open (减少三次握手消耗)
-net.ipv4.tcp_slow_start_after_idle = $([ "$RTT_AVG" -ge 150 ] && echo "1" || echo "0")  # 基于延迟动态决定闲置后是否进入慢启动 (保持高吞吐)
-net.ipv4.tcp_notsent_lowat = 16384         # 限制待发送数据长度，降低缓冲膨胀延迟
-net.ipv4.tcp_limit_output_bytes = $([ "$mem_total" -ge 200 ] && echo "262144" || echo "131072") # 限制单个 TCP 连接占用发送队列的大小
-net.ipv4.tcp_rmem = 4096 87380 $tcp_rmem_max   # 确定 TCP 专属上限保护 (防止 TCP 抢占过多 UDP 预留内存)
-net.ipv4.tcp_wmem = 4096 65536 $tcp_rmem_max
-net.ipv4.tcp_frto = 2                      # 针对丢包环境的重传判断优化
-net.ipv4.tcp_ecn = 1
-net.ipv4.tcp_ecn_fallback = 1
-$(if [[ "$tcp_cca" == "bbr3" ]]; then cat <<BBR3_OPTS
-net.ipv4.tcp_ecn = 2                       # 强制 ECN (BBRv3 核心)
-sysctl.net.ipv4.tcp_reflect_tos = 1        # TOS 反射优化
-BBR3_OPTS
-fi)
-
-# === 5. 连接复用与超时管理 ===
-net.ipv4.tcp_mtu_probing = 1               # 自动探测 MTU 解决 UDP 黑洞
-net.ipv4.ip_no_pmtu_disc = 0               # 启用 MTU 探测 (自动寻找最优包大小，防止 Hy2 丢包)
-net.ipv4.tcp_fin_timeout = 20
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_max_orphans = $((mem_total * 1024))
-
-# === 6. UDP 协议栈优化 (Hysteria2 传输核心) ===
-net.ipv4.udp_mem = $UDP_MEM_SCALE          # 全局 UDP 内存页配额 (根据 RTT 动态计算)
-net.ipv4.udp_rmem_min = 32768              # 最小接收缓冲区保护
-net.ipv4.udp_wmem_min = 32768              # 最小发送缓冲区保护
-net.ipv4.udp_early_demux = 1               # UDP 早期路由优化
-net.core.somaxconn = 8192                  # 监听队列深度
-net.ipv4.udp_gro_enabled = 1               # UDP GRO 聚合减少中断
-net.ipv4.udp_l4_early_demux = 1            # UDP 四层早期分流
-net.core.netdev_tstamp_prequeue = 0        # 禁用时间戳预处理降低延迟
-
-# === 7. Conntrack 连接跟踪自适应优化 ===
-net.netfilter.nf_conntrack_max = $ct_max
-net.netfilter.nf_conntrack_udp_timeout = $ct_udp_to
-net.netfilter.nf_conntrack_udp_timeout_stream = $ct_stream_to
-
-# === 8. 低内存专属优化 (64M-100M) ===
-$([ "$mem_total" -lt 100 ] && cat <<LOWMEM
-net.ipv4.tcp_sack = 0                      # 禁用 SACK 减少内存占用
-net.ipv4.tcp_dsack = 0                     # 禁用 D-SACK
-net.ipv4.tcp_fack = 0                      # 禁用前向确认
-net.ipv4.tcp_timestamps = 0                # 禁用时间戳节省 12 字节/包
-net.ipv4.tcp_window_scaling = 1            # 保持窗口缩放
-net.ipv4.tcp_adv_win_scale = 1             # 应用窗口缩放系数
-net.ipv4.tcp_moderate_rcvbuf = 0           # 禁用接收缓冲自动调整
-net.ipv4.tcp_max_syn_backlog = 2048        # SYN队列限制
-vm.min_free_kbytes = 2048                  # 保留最小空闲内存
+# === 一、 基础转发与内存管理 (含 ZRAM 与 OOM 策略) ===
+net.ipv4.ip_forward = 1                    # 开启 IPv4 转发
+net.ipv6.conf.all.forwarding = 1           # 开启 IPv6 转发
+vm.swappiness = $swappiness_val            # 交换分区权重 (根据内存动态调整)
+vm.min_free_kbytes = $min_free_val         # 强制预留水位 (防高并发内核卡死)
+vm.dirty_ratio = 10                        # 内存脏数据占比上限
+vm.dirty_background_ratio = 5              # 脏数据后台写入阈值
 vm.overcommit_memory = 1                   # 允许内存超额分配
-vm.panic_on_oom = 0                        # OOM时不panic
-LOWMEM
+vm.panic_on_oom = 0                        # 内存溢出时不崩溃系统
+$(grep -q "^/dev/zram0 " /proc/swaps 2>/dev/null && cat <<ZRAM_TUNING
+vm.page-cluster = 0                        # ZRAM环境下禁用预读 (提升随机读写)
+vm.vfs_cache_pressure = 500                # 积极回收文件缓存 (为网络腾内存)
+ZRAM_TUNING
 )
 
-# === 9. ZRAM 专属优化 ===
-$(grep -q "^/dev/zram0 " /proc/swaps 2>/dev/null && cat <<ZRAM_TUNING
-vm.swappiness = 80                         # ZRAM环境可以提高swap积极性
-vm.page-cluster = 0                        # 禁用预读，ZRAM随机访问快
-vm.vfs_cache_pressure = 500                # 更积极回收dentry/inode缓存
-ZRAM_TUNING
+# === 二、 网络设备层与 CPU 调度 (核心网卡加速) ===
+net.core.netdev_max_backlog = $VAR_BACKLOG # 接收队列深度 (防突发丢包)
+net.core.dev_weight = 64                   # CPU 单次收包权重
+net.core.busy_read = $busy_poll_val        # 繁忙轮询 (降低收包延迟)
+net.core.busy_poll = $busy_poll_val        # 繁忙轮询 (针对UDP优化)
+net.core.somaxconn = 8192                  # 监听队列上限
+net.core.default_qdisc = fq                # BBR必备调度规则
+net.core.netdev_budget = $net_bgt          # 调度预算 (单次轮询处理包数)
+net.core.netdev_budget_usecs = $net_usc    # 调度时长 (单次轮询微秒上限)
+net.core.netdev_tstamp_prequeue = 0        # 禁用时间戳预处理 (降延迟)
+
+# === 三、 协议栈缓冲与自适应加速 (TCP/UDP/BBR/MTU) ===
+# --- 全局缓冲区限制 ---
+net.core.rmem_default = $VAR_DEF_MEM       # 默认读缓存
+net.core.wmem_default = $VAR_DEF_MEM       # 默认写缓存
+net.core.rmem_max = $VAR_UDP_RMEM          # 最大读缓存 (支撑高带宽)
+net.core.wmem_max = $VAR_UDP_WMEM          # 最大写缓存 (支撑高带宽)
+net.core.optmem_max = 2097152              # Socket辅助内存上限
+net.ipv4.udp_mem = $UDP_MEM_SCALE          # UDP 全局内存配额 (动态调节)
+net.ipv4.tcp_rmem = 4096 87380 $tcp_rmem_max   # TCP 读缓存动态范围
+net.ipv4.tcp_wmem = 4096 65536 $tcp_rmem_max   # TCP 写缓存动态范围
+
+# --- 协议栈深度调优 (Hy2 传输核心) ---
+net.ipv4.tcp_congestion_control = $tcp_cca # 拥塞算法 (BBR/Cubic)
+net.ipv4.tcp_no_metrics_save = 1           # 实时探测不记忆旧值
+net.ipv4.tcp_fastopen = 3                  # 开启 TCP 快开 (降首包延迟)
+net.ipv4.tcp_notsent_lowat = 16384         # 限制发送队列 (防延迟抖动)
+net.ipv4.tcp_mtu_probing = 1               # MTU自动探测 (防UDP黑洞)
+net.ipv4.ip_no_pmtu_disc = 0               # 启用路径MTU探测 (寻找最优包大小)
+net.ipv4.tcp_frto = 2                      # 丢包环境重传判断优化
+net.ipv4.tcp_slow_start_after_idle = $([ "$RTT_AVG" -ge 150 ] && echo "1" || echo "0") # 闲置后慢启动开关
+net.ipv4.tcp_limit_output_bytes = $([ "$mem_total" -ge 200 ] && echo "262144" || echo "131072") # 限制TCP连接占用发送队列
+net.ipv4.udp_gro_enabled = 1               # UDP 分段聚合 (降CPU负载)
+net.ipv4.udp_early_demux = 1               # UDP 早期路由优化
+net.ipv4.udp_l4_early_demux = 1            # UDP 四层早期分流
+
+# --- BBRv3 / ECN 联动 ---
+net.ipv4.tcp_ecn = 1                       # 开启显式拥塞通知
+net.ipv4.tcp_ecn_fallback = 1              # ECN 不兼容时自动回退
+$(if [[ "$tcp_cca" == "bbr3" ]]; then echo "net.ipv4.tcp_ecn = 2"; echo "net.ipv4.tcp_reflect_tos = 1"; fi)
+
+# === 四、 连接跟踪与超时管理 (及低内存保护) ===
+net.netfilter.nf_conntrack_max = $ct_max   # 连接跟踪上限
+net.netfilter.nf_conntrack_udp_timeout = $ct_udp_to         # 缩短无效连接回收
+net.netfilter.nf_conntrack_udp_timeout_stream = $ct_stream_to # 优化流连接回收
+net.ipv4.tcp_fin_timeout = 20              # 孤儿连接回收时间
+net.ipv4.tcp_tw_reuse = 1                  # 端口重用
+net.ipv4.tcp_max_orphans = $((mem_total * 1024)) # 最大孤儿连接数限制
+
+$([ "$mem_total" -lt 100 ] && cat <<LOWMEM
+# --- 针对 96M 小鸡的极低内存保护策略 ---
+net.ipv4.tcp_sack = 0                      # 禁用SACK (省内存)
+net.ipv4.tcp_dsack = 0                     # 禁用D-SACK
+net.ipv4.tcp_fack = 0                      # 禁用前向确认
+net.ipv4.tcp_timestamps = 0                # 禁用时间戳 (省包头开销)
+net.ipv4.tcp_moderate_rcvbuf = 0           # 锁定手动缓冲区 (防内核抢占)
+net.ipv4.tcp_max_syn_backlog = 2048        # 缩减握手队列
+LOWMEM
 )
 SYSCTL
     # 加载配置（优先 sysctl --system，其次回退）
