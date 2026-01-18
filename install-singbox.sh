@@ -452,6 +452,7 @@ optimize_system() {
 	# 阶段二：[重点] dyn_buf 跳板与带宽灵魂联动
     local calc_mem=$mem_total
     [ "$calc_mem" -gt 10000 ] && calc_mem=$(( calc_mem / 1024 )) # 如果大于10000，说明是KB，转为MB
+	info "calc_mem1=${calc_mem}MB"
     # 1. 计算带宽所需 BDP 保底 (系数3以应对国际链路抖动)
     local bdp_min=$(( VAR_HY2_BW * 1024 * 1024 / 8 / 5 * 3 )) # 约 0.3s 冗余
     
@@ -489,6 +490,7 @@ optimize_system() {
     
     # 7. 内存保命机制：动态预留内核紧急水位 (vm.min_free_kbytes)
     local min_free_val=$(( calc_mem * 1024 * 4 / 100 ))  # 100M内存，预留约 4% 的物理内存，确保网络中断有地方放数据包
+	info "calc_mem2=${calc_mem}MB"
     if [ "$calc_mem" -le 128 ]; then
         [ "$min_free_val" -lt 3072 ] && min_free_val=3072     # 最小不低于 3MB
         [ "$min_free_val" -gt 4608 ] && min_free_val=4096     # 极小内存严禁超过 4.5MB，否则应用没空间运行
