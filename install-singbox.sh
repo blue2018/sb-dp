@@ -574,7 +574,7 @@ $(if [[ "$tcp_cca" == "bbr3" ]]; then echo "net.ipv4.tcp_ecn = 2"; echo "net.ipv
 
 # === 四、 连接跟踪与超时管理 (及低内存保护) ===
 net.netfilter.nf_conntrack_max = $ct_max   # 连接跟踪上限
-net.netfilter.nf_conntrack_udp_timeout = $ct_udp_to         # 缩短无效连接回收
+net.netfilter.nf_conntrack_udp_timeout = $ct_udp_to           # 缩短无效连接回收
 net.netfilter.nf_conntrack_udp_timeout_stream = $ct_stream_to # 优化流连接回收
 net.ipv4.tcp_fin_timeout = 20              # 孤儿连接回收时间
 net.ipv4.tcp_tw_reuse = 1                  # 端口重用
