@@ -450,28 +450,35 @@ optimize_system() {
     fi
 
 	# 阶段二：[重点] dyn_buf 跳板与带宽灵魂联动
+    local calc_mem=$mem_total
+    [ "$calc_mem" -gt 10000 ] && calc_mem=$(( calc_mem / 1024 )) # 如果大于10000，说明是KB，转为MB
     # 1. 计算带宽所需 BDP 保底 (系数3以应对国际链路抖动)
     local bdp_min=$(( VAR_HY2_BW * 1024 * 1024 / 8 / 5 * 3 )) # 约 0.3s 冗余
+    
     # 2. 设置跳板变量 dyn_buf (综合物理能力与带宽需求)
-    dyn_buf=$(( mem_total * 1024 * 1024 / 8 )) 
+    dyn_buf=$(( calc_mem * 1024 * 1024 / 8 )) 
     [ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min
-	[ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432   # 强制给 100M+ 机器分配至少 32MB 核心缓冲，确保高延迟下吞吐不掉速
+    [ "$calc_mem" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432   # 强制给 100M+ 机器分配至少 32MB 核心缓冲，确保高延迟下吞吐不掉速
     local phys_limit=$(( max_udp_mb * 1024 * 1024 ))
     [ "$dyn_buf" -gt "$phys_limit" ] && dyn_buf=$phys_limit   # 限制 dyn_buf 不超过当前档位定义的 max_udp_mb (转换为字节)
     [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864   # 64MB 封顶，足以支撑在 200ms 高延迟下跑满 2.5Gbps 的理论带宽
+    
     # 3. 所有内核网络参数基于 dyn_buf 伸缩
     VAR_UDP_RMEM="$dyn_buf"; VAR_UDP_WMEM="$dyn_buf"
     VAR_DEF_MEM=$(( dyn_buf / 4 ))
     VAR_BACKLOG=$(( VAR_HY2_BW * 50 ))   #队列从30提到50，抗突发丢包
     [ "$VAR_BACKLOG" -lt 8192 ] && VAR_BACKLOG=8192
+    
     # 4. 联动导出：Sing-box 应用层参数
     g_wnd=$(( VAR_HY2_BW / 8 ))      # 激进窗口，应对 80ms+ 延迟（原为 /10）
     [ "$g_wnd" -lt 15 ] && g_wnd=15  # 调高起步窗口（原为 12）
     g_buf=$(( dyn_buf / 6 ))         # 应用层 buffer 设为跳板的 1/6（原为 /8）
+    
     # 5. 确定系统全局 UDP 限制 (作为 safe_rtt 的参照系)
     udp_mem_global_min=$(( dyn_buf / 4096 ))
     udp_mem_global_pressure=$(( dyn_buf * 2 / 4096 ))
-    udp_mem_global_max=$(( mem_total * 1024 * 1024 * 75 / 100 / 4096 )) # 物理红线 75%
+    udp_mem_global_max=$(( calc_mem * 1024 * 1024 * 75 / 100 / 4096 )) # 物理红线 75%
+    
     # 6. 根据带宽目标设定基础预算：每 100M 带宽分配约 1000 的预算
     local base_budget=$(( VAR_HY2_BW * 15 / 10 * 10 ))  # 基础权重增加50%
     [ "$base_budget" -lt 2000 ] && base_budget=2000
@@ -479,10 +486,18 @@ optimize_system() {
     # 多核：单次少吃多餐，靠多核并行 / 单核：必须一次多处理点，减少中断切换的开销
     [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || \
     { net_bgt=$(( base_budget * 20 / 10 )); net_usc=6000; } # 允许单核更长时间霸占 CPU 处理网络包
-	# 7. 内存保命机制：动态预留内核紧急水位 (vm.min_free_kbytes)
-    local min_free_val=$(( mem_total * 1024 * 4 / 100 ))  # 100M内存，预留约 4% 的物理内存，确保网络中断有地方放数据包
-	[ "$min_free_val" -lt 2560 ] && min_free_val=2560     # 64M机型保底留 3MB
-	[ "$min_free_val" -gt 65536 ] && min_free_val=65536   # 大机器 64MB 封顶
+    
+    # 7. 内存保命机制：动态预留内核紧急水位 (vm.min_free_kbytes)
+    local min_free_val=$(( calc_mem * 1024 * 4 / 100 ))  # 100M内存，预留约 4% 的物理内存，确保网络中断有地方放数据包
+    
+    # [修正判断] 针对 96M/128M 等极小机型进行硬上限拦截，防止算出 45056 等异常值
+    if [ "$calc_mem" -le 128 ]; then
+        [ "$min_free_val" -lt 3072 ] && min_free_val=3072     # 最小不低于 3MB
+        [ "$min_free_val" -gt 4608 ] && min_free_val=4096     # 极小内存严禁超过 4.5MB，否则应用没空间运行
+    else
+        [ "$min_free_val" -lt 3072 ] && min_free_val=3072     # 常规机型保底 3MB
+        [ "$min_free_val" -gt 65536 ] && min_free_val=65536   # 大机器 64MB 封顶
+    fi
 	
     # 阶段三：路况仲裁与持久化
     local max_udp_pages=$(( max_udp_mb * 256 ))
