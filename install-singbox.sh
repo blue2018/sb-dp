@@ -293,32 +293,34 @@ EOF
 
 # 动态 RTT 内存钳位 (激进融合纯计算版)
 safe_rtt() {
-    local RTT_AVG="$1" max_udp_pages="$2" udp_mem_global_min="$3" udp_mem_global_pressure="$4" udp_mem_global_max="$5"    
-    # 1. 基础 BDP 计算
-    rtt_scale_min=$((RTT_AVG * 256)); rtt_scale_pressure=$((RTT_AVG * 512)); rtt_scale_max=$((RTT_AVG * 1024))
-    local q_min q_press q_max q_msg
-    # 2. 根据延迟切换 QUIC 模式
-    [ "$RTT_AVG" -ge 150 ] && { q_min=262144; q_press=524288; q_max=1048576; q_msg=" (QUIC长距模式)"; } \
-                           || { q_min=131072; q_press=262144; q_max=524288; q_msg=" (QUIC竞速模式)"; }
+    local dyn_buf="$1" RTT_AVG="$2" max_udp_pages="$3" udp_mem_global_min="$4" udp_mem_global_pressure="$5" udp_mem_global_max="$6"
+    # [核心融合] 引入 dyn_buf 跳板页数 (由 optimize_system 提前算出并传导)
+    local dyn_pages=$(( dyn_buf / 4096 ))
+    # 1. 计算探测 BDP：延迟 * 1024 因子 (作为扩张参考)
+    local probe_pages=$(( RTT_AVG * 1024 ))
+    # 2. 仲裁逻辑：探测值与 dyn_buf 保底值取最大者
+    # 如果 RTT 探测太低，由 dyn_buf 保底；如果 RTT 极高，则允许向上扩张
+    rtt_scale_max=$probe_pages
+    [ "$rtt_scale_max" -lt "$dyn_pages" ] && rtt_scale_max=$dyn_pages
+    # 3. 延迟补偿：根据 RTT 自动补全梯度
+    local q_msg=""
+    if [ "$RTT_AVG" -ge 150 ]; then
+        rtt_scale_max=$(( rtt_scale_max * 15 / 10 )) # 长距增加 50% 缓冲冗余
+        q_msg=" (QUIC远航模式)"
+    else
+        q_msg=" (QUIC竞速模式)"
+    fi
     SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL:-}${q_msg}"
-    # 3. QUIC 最小值保护（确保缓冲区下限）
-    [ "$q_min" -gt "$rtt_scale_min" ] && rtt_scale_min=$q_min
-    [ "$q_press" -gt "$rtt_scale_pressure" ] && rtt_scale_pressure=$q_press
-    [ "$q_max" -gt "$rtt_scale_max" ] && rtt_scale_max=$q_max
-    # 4. 核心：激进内存保护逻辑 (当超过物理内存 40%-80% 限制时执行钳位)
+    # 4. 生成三级梯度 (比例锁定：1.0 : 0.9 : 0.75)，相比手动填数，这种比例生成能让内核在内存回收时更加平滑
+    rtt_scale_pressure=$(( rtt_scale_max * 90 / 100 ))
+    rtt_scale_min=$(( rtt_scale_max * 75 / 100 ))
+    # 5. 激进内存保护 (当超过该档位设定的最大页数时钳位)
     if [ "$rtt_scale_max" -gt "$max_udp_pages" ]; then
         rtt_scale_max=$max_udp_pages
-        rtt_scale_pressure=$((max_udp_pages * 95 / 100))
-        rtt_scale_min=$((max_udp_pages * 80 / 100))
+        rtt_scale_pressure=$(( max_udp_pages * 95 / 100 ))
+        rtt_scale_min=$(( max_udp_pages * 80 / 100 ))
     fi
-    # 5. 实际可用内存二次校验（防宕机保护线：预留 10% 呼吸空间）
-    local avail=$(awk '/MemAvailable/{print int($2/4)}' /proc/meminfo 2>/dev/null || echo "$max_udp_pages")
-    if [ "$rtt_scale_max" -gt "$avail" ]; then
-        rtt_scale_max=$((avail * 90 / 100))
-        rtt_scale_pressure=$((rtt_scale_max * 95 / 100))
-        rtt_scale_min=$((rtt_scale_max * 80 / 100))
-    fi
-    # 6. 档位保护：确保最终值不超出系统定义的全局硬上限
+    # 6. 系统全局硬上限最终防护
     rtt_scale_max=$(( rtt_scale_max < udp_mem_global_max ? rtt_scale_max : udp_mem_global_max ))
     rtt_scale_pressure=$(( rtt_scale_pressure < udp_mem_global_pressure ? rtt_scale_pressure : udp_mem_global_pressure ))
     rtt_scale_min=$(( rtt_scale_min < udp_mem_global_min ? rtt_scale_min : udp_mem_global_min ))
@@ -363,7 +365,7 @@ EOF
     info "Runtime → CPU:$GOMAXPROCS核 | QUIC窗口:$wnd | Buffer:$((buf/1024))KB"
 }
 
-# NIC/softirq 网卡入口层调度加速（RPS/XPS/批处理密度）
+# 网卡核心负载加速（RPS/XPS/批处理密度）
 apply_nic_core_boost() {
     # 修改: 优化 awk 匹配，确保只抓取默认路由那一行
     local IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
@@ -378,20 +380,20 @@ apply_nic_core_boost() {
     
     local target_qlen=10000
     case "$driver" in
-        virtio_net|veth|"") target_qlen=3000 ;;  # 修改: 增加了空驱动判断，虚拟化环境降低队列
+        virtio_net|veth|"") target_qlen=5000 ;;  # 增加了空驱动判断，虚拟化环境降低队列
         *) target_qlen=10000 ;;
     esac
-    
-    if [ -d "/sys/class/net/$IFACE" ]; then
+
+	if [ -d "/sys/class/net/$IFACE" ]; then
         ip link set dev "$IFACE" txqueuelen "$target_qlen" 2>/dev/null || true
         
         if command -v ethtool >/dev/null 2>&1; then
             ethtool -K "$IFACE" gro on gso on tso on lro off 2>/dev/null || true
-            ethtool -K "$IFACE" tx-udp-segmentation on 2>/dev/null || true
-            ethtool -K "$IFACE" rx-udp-gro-forwarding on 2>/dev/null || true
-            ethtool -C "$IFACE" adaptive-rx on adaptive-tx on 2>/dev/null || true
-            [ "$real_c" -ge 2 ] && us=50 || us=20
-            ethtool -C "$IFACE" rx-usecs "$us" tx-usecs "$us" 2>/dev/null || true
+            local tuned_usc=100
+            [ "$real_c" -ge 2 ] && tuned_usc=150   # 关键优化：大幅提升中断延迟阈值 (20 -> 100+)，这会增加 0.1ms 的延迟，但能救活 CPU，对吞吐量至关重要
+            ethtool -C "$IFACE" rx-usecs "$tuned_usc" tx-usecs "$tuned_usc" 2>/dev/null || true
+            # 尝试增加 Ring Buffer
+            ethtool -G "$IFACE" rx 2048 tx 2048 2>/dev/null || true
         fi
     fi
     
@@ -413,80 +415,86 @@ apply_nic_core_boost() {
 # 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
 # ==========================================
 optimize_system() {
-    # 1. 执行独立探测模块获取环境画像
     local RTT_AVG=$(probe_network_rtt) 
     local mem_total=$(probe_memory_total)
     local real_c="$CPU_CORE" ct_max=16384 ct_udp_to=30 ct_stream_to=30
-    local g_procs g_wnd g_buf net_bgt net_usc
+    local dyn_buf g_procs g_wnd g_buf net_bgt net_usc tcp_rmem_max
     local max_udp_mb udp_mem_global_min udp_mem_global_pressure udp_mem_global_max
-    local swappiness_val="${SWAPPINESS_VAL:-10}" busy_poll_val="${BUSY_POLL_VAL:-0}" VAR_BACKLOG="${VAR_BACKLOG:-5000}"
+    local swappiness_val="${SWAPPINESS_VAL:-10}" busy_poll_val="${BUSY_POLL_VAL:-0}"
     
     setup_zrm_swap "$mem_total"
     info "系统画像: 可用内存=${mem_total}MB | 平均延迟=${RTT_AVG}ms"
 
-    # 2. 差异化档位计算
+    # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
+        VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 75 / 100))
         SBOX_GOLIMIT="$((mem_total * 78 / 100))MiB"; SBOX_GOGC="200"
-        VAR_UDP_RMEM="33554432"; VAR_UDP_WMEM="33554432"
-        VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"
-        VAR_HY2_BW="500"; VAR_DEF_MEM="16777216"
-        VAR_BACKLOG=65536; swappiness_val=10; busy_poll_val=50
-        g_procs=$real_c; g_wnd=24; g_buf=4194304
+		SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
+        VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
+        g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
         [ "$real_c" -ge 2 ] && { net_bgt=3000; net_usc=2000; } || { net_bgt=2500; net_usc=5000; }
-        udp_mem_global_min=131072; udp_mem_global_pressure=262144; udp_mem_global_max=$((mem_total * 256 * 2))
-        max_udp_mb=$((mem_total * 75 / 100)); ct_max=65535; ct_stream_to=60
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
+        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 65 / 100))
         SBOX_GOLIMIT="$((mem_total * 75 / 100))MiB"; SBOX_GOGC="150"
-        VAR_UDP_RMEM="16777216"; VAR_UDP_WMEM="16777216"
-        VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="300"; VAR_DEF_MEM="8388608"
-        VAR_BACKLOG=32768; swappiness_val=10; busy_poll_val=20
-        g_procs=$real_c; g_wnd=16; g_buf=2097152
+		SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
+        VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
+        g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
         [ "$real_c" -ge 2 ] && { net_bgt=1500; net_usc=2500; } || { net_bgt=2000; net_usc=4500; }
-        udp_mem_global_min=65536; udp_mem_global_pressure=131072; udp_mem_global_max=262144
-        max_udp_mb=$((mem_total * 65 / 100)); ct_max=32768; ct_stream_to=45
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
+        VAR_HY2_BW="200"; max_udp_mb=$((mem_total * 60 / 100))
         SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="120"
-        VAR_UDP_RMEM="8388608"; VAR_UDP_WMEM="8388608"
-        VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="200"; VAR_DEF_MEM="4194304"
-        max_udp_mb=$((mem_total * 55 / 100)); VAR_BACKLOG=16384; swappiness_val=60; busy_poll_val=0
-        [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c; g_wnd=10; g_buf=1048576
+		SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
+        VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
+        swappiness_val=60; busy_poll_val=0; ct_max=16384; ct_stream_to=30
+        [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
         [ "$real_c" -ge 2 ] && { net_bgt=1000; net_usc=3000; } || { net_bgt=1500; net_usc=4000; }
-        udp_mem_global_min=32768; udp_mem_global_pressure=65536; udp_mem_global_max=131072
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
+        VAR_HY2_BW="150"; max_udp_mb=$((mem_total * 55 / 100))
         SBOX_GOLIMIT="$((mem_total * 65 / 100))MiB"; SBOX_GOGC="100"
-        VAR_UDP_RMEM="4194304"; VAR_UDP_WMEM="4194304"
-        VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"
-        VAR_HY2_BW="130"; VAR_DEF_MEM="2097152"
-        VAR_BACKLOG=8192; swappiness_val=100; busy_poll_val=0
-        max_udp_mb=$((mem_total * 45 / 100)); g_procs=1; g_wnd=6; g_buf=524288
+		SBOX_MEM_HIGH="$((mem_total * 75 / 100))M"; SBOX_MEM_MAX="$((mem_total * 85 / 100))M"
+        VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
+        g_procs=1; swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         [ "$real_c" -ge 2 ] && { net_bgt=1000; net_usc=3500; } || { net_bgt=1300; net_usc=3500; }
-        udp_mem_global_min=24576; udp_mem_global_pressure=49152; udp_mem_global_max=65536
         SBOX_OPTIMIZE_LEVEL="64M 激进版"
     fi
 
-    # 3. RTT 驱动与安全钳位
-	local max_udp_pages=$((max_udp_mb * 256))
-    safe_rtt "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
-	local calc_udp_bytes=$(( rtt_scale_max * 4096 ))
-    # 如果算出的需求比预设大，则覆盖预设，上限 64MB
-    if [ "$calc_udp_bytes" -gt "$VAR_UDP_RMEM" ]; then
-        VAR_UDP_RMEM=$(( calc_udp_bytes > 67108864 ? 67108864 : calc_udp_bytes ))
-        VAR_UDP_WMEM=$VAR_UDP_RMEM
-    fi
+	# 阶段二：[重点] dyn_buf 跳板与带宽灵魂联动
+    # 1. 计算带宽所需 BDP 保底 (字节)
+    local bdp_min=$(( VAR_HY2_BW * 1024 * 1024 / 8 / 5 * 2 )) # 约 0.2s 冗余
+    # 2. 设置跳板变量 dyn_buf (综合物理能力与带宽需求)
+    dyn_buf=$(( mem_total * 1024 * 1024 / 8 )) 
+    [ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min # 需求优先
+    local phys_limit=$(( max_udp_mb * 1024 * 1024 ))
+    [ "$dyn_buf" -gt "$phys_limit" ] && dyn_buf=$phys_limit   # 限制 dyn_buf 不超过当前档位定义的 max_udp_mb (转换为字节)
+	[ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864   # 单进程/协议栈缓冲区 64MB 封顶，足以支撑在 200ms 高延迟下跑满 2.5Gbps 的理论带宽
+    # 3. 联动导出：所有内核网络参数基于 dyn_buf 伸缩
+    VAR_UDP_RMEM="$dyn_buf"
+    VAR_UDP_WMEM="$dyn_buf"
+    VAR_DEF_MEM=$(( dyn_buf / 4 ))
+    VAR_BACKLOG=$(( VAR_HY2_BW * 30 )) 
+    [ "$VAR_BACKLOG" -lt 8192 ] && VAR_BACKLOG=8192
+    # 4. 联动导出：Sing-box 应用层参数
+    g_wnd=$(( VAR_HY2_BW / 10 )) # 带宽联动窗口，例如 150M 带宽对应 15 窗口
+    [ "$g_wnd" -lt 12 ] && g_wnd=12
+    g_buf=$(( dyn_buf / 8 ))   # 应用层 buffer 设为跳板的 1/8
+    # 5. 确定系统全局 UDP 限制 (作为 safe_rtt 的参照系)
+    udp_mem_global_min=$(( dyn_buf / 4096 ))
+    udp_mem_global_pressure=$(( dyn_buf * 2 / 4096 ))
+    udp_mem_global_max=$(( mem_total * 1024 * 1024 * 75 / 100 / 4096 )) # 物理红线 75%
+
+    # 阶段三：路况仲裁与持久化
+    local max_udp_pages=$(( max_udp_mb * 256 ))
+    safe_rtt "$dyn_buf" "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
     SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"
-	SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
-    info "优化策略: $SBOX_OPTIMIZE_LEVEL"
-    info "UDP 内存池: ${rtt_scale_min}页/${rtt_scale_pressure}页/${rtt_scale_max}页 ($(( rtt_scale_max * 4 / 1024 ))MB上限)"
-	# 4. 设置 TCP 专属上限保护 (防止 TCP 被 UDP 激进策略带偏导致内存溢出)
-    local VAR_TCP_RMEM_MAX=$(( mem_total < 256 ? 8388608 : 16777216 ))
+    SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
+    info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽引擎: ${VAR_HY2_BW}Mbps"
+    info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 ))MB"
 	
-    # 5. BBR 探测与内核锐化 (递进式锁定最强算法)
+    # 阶段四： BBR 探测与内核锐化 (递进式锁定最强算法)
     local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
     local avail=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "cubic")
     if [[ "$avail" =~ "bbr3" ]]; then tcp_cca="bbr3"; succ "检测到 BBRv3，激活极致响应模式"
@@ -495,7 +503,7 @@ optimize_system() {
     else warn "内核不支持 BBR，切换至高兼容 Cubic 模式"; fi
     if sysctl net.core.default_qdisc 2>/dev/null | grep -q "fq"; then info "FQ 调度器已就绪"; else info "准备激活 FQ 调度器..."; fi
 	
-    # 6. 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
+    # 阶段五： 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
     local SYSCTL_FILE="/etc/sysctl.d/99-sing-box.conf"
     cat > "$SYSCTL_FILE" <<SYSCTL
 # === 1. 基础转发与内存管理 ===
@@ -523,11 +531,11 @@ net.core.default_qdisc = fq                # BBR 必须配合 FQ 队列调度
 net.ipv4.tcp_congestion_control = $tcp_cca # 拥塞控制算法
 net.ipv4.tcp_no_metrics_save = 1           # 实时探测，不记忆旧 RTT 指标
 net.ipv4.tcp_fastopen = 3                  # 开启 TCP Fast Open (减少三次握手消耗)
-net.ipv4.tcp_slow_start_after_idle = $([ "$RTT_AVG" -ge 150 ] && echo "1" || echo "0")  # 闲置后不进入慢启动 (保持高吞吐)
+net.ipv4.tcp_slow_start_after_idle = $([ "$RTT_AVG" -ge 150 ] && echo "1" || echo "0")  # 基于延迟动态决定闲置后是否进入慢启动 (保持高吞吐)
 net.ipv4.tcp_notsent_lowat = 16384         # 限制待发送数据长度，降低缓冲膨胀延迟
 net.ipv4.tcp_limit_output_bytes = $([ "$mem_total" -ge 200 ] && echo "262144" || echo "131072") # 限制单个 TCP 连接占用发送队列的大小
-net.ipv4.tcp_rmem = 4096 87380 $VAR_TCP_RMEM_MAX
-net.ipv4.tcp_wmem = 4096 65536 $VAR_TCP_RMEM_MAX
+net.ipv4.tcp_rmem = 4096 87380 $tcp_rmem_max   # 确定 TCP 专属上限保护 (防止 TCP 抢占过多 UDP 预留内存)
+net.ipv4.tcp_wmem = 4096 65536 $tcp_rmem_max
 net.ipv4.tcp_frto = 2                      # 针对丢包环境的重传判断优化
 net.ipv4.tcp_ecn = 1
 net.ipv4.tcp_ecn_fallback = 1
@@ -583,7 +591,7 @@ vm.vfs_cache_pressure = 500                # 更积极回收dentry/inode缓存
 ZRAM_TUNING
 )
 SYSCTL
-    # 兼容地加载 sysctl（优先 sysctl --system，其次回退）
+    # 加载配置（优先 sysctl --system，其次回退）
 	if command -v sysctl >/dev/null 2>&1 && sysctl --system >/dev/null 2>&1; then :
 	else sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true; fi
 
