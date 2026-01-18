@@ -480,8 +480,8 @@ optimize_system() {
     [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || \
     { net_bgt=$(( base_budget * 20 / 10 )); net_usc=6000; } # 允许单核更长时间霸占 CPU 处理网络包
 	# 7. 内存保命机制：动态预留内核紧急水位 (vm.min_free_kbytes)
-    local min_free_val=$(( mem_total * 1024 * 4 / 100 ))  # 对于小内存，预留约 4% 的物理内存，确保网络中断有地方放数据包
-	[ "$min_free_val" -lt 3072 ] && min_free_val=3072     # 96M机型保底留 3MB
+    local min_free_val=$(( mem_total * 1024 * 4 / 100 ))  # 90M内存，预留约 4% 的物理内存，确保网络中断有地方放数据包
+	[ "$min_free_val" -lt 2560 ] && min_free_val=2560     # 64M机型保底留 3MB
 	[ "$min_free_val" -gt 65536 ] && min_free_val=65536   # 大机器 64MB 封顶
 	
     # 阶段三：路况仲裁与持久化
