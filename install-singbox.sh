@@ -489,8 +489,6 @@ optimize_system() {
     
     # 7. 内存保命机制：动态预留内核紧急水位 (vm.min_free_kbytes)
     local min_free_val=$(( calc_mem * 1024 * 4 / 100 ))  # 100M内存，预留约 4% 的物理内存，确保网络中断有地方放数据包
-    
-    # [修正判断] 针对 96M/128M 等极小机型进行硬上限拦截，防止算出 45056 等异常值
     if [ "$calc_mem" -le 128 ]; then
         [ "$min_free_val" -lt 3072 ] && min_free_val=3072     # 最小不低于 3MB
         [ "$min_free_val" -gt 4608 ] && min_free_val=4096     # 极小内存严禁超过 4.5MB，否则应用没空间运行
