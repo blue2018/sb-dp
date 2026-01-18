@@ -439,7 +439,7 @@ optimize_system() {
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         swappiness_val=60; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
-        SBOX_OPTIMIZE_LEVEL="90M 紧凑版"
+        SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
         VAR_HY2_BW="180"; max_udp_mb=$((mem_total * 55 / 100))
         SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="100"
@@ -480,7 +480,7 @@ optimize_system() {
     [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || \
     { net_bgt=$(( base_budget * 20 / 10 )); net_usc=6000; } # 允许单核更长时间霸占 CPU 处理网络包
 	# 7. 内存保命机制：动态预留内核紧急水位 (vm.min_free_kbytes)
-    local min_free_val=$(( mem_total * 1024 * 4 / 100 ))  # 90M内存，预留约 4% 的物理内存，确保网络中断有地方放数据包
+    local min_free_val=$(( mem_total * 1024 * 4 / 100 ))  # 100M内存，预留约 4% 的物理内存，确保网络中断有地方放数据包
 	[ "$min_free_val" -lt 2560 ] && min_free_val=2560     # 64M机型保底留 3MB
 	[ "$min_free_val" -gt 65536 ] && min_free_val=65536   # 大机器 64MB 封顶
 	
