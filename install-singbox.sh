@@ -476,9 +476,10 @@ optimize_system() {
     local base_budget=$(( VAR_HY2_BW * 10 ))
     [ "$base_budget" -lt 1000 ] && base_budget=1000
     [ "$base_budget" -gt 4000 ] && base_budget=4000
-    [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || \   # 多核：单次少吃多餐，靠多核并行
-    { net_bgt=$(( base_budget * 15 / 10 )); net_usc=4000; }   # 单核：必须一次多处理点，减少中断切换的开销
-
+	# 多核：单次少吃多餐，靠多核并行 / 单核：必须一次多处理点，减少中断切换的开销
+	[ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || \
+    { net_bgt=$(( base_budget * 15 / 10 )); net_usc=4000; }
+	
     # 阶段三：路况仲裁与持久化
     local max_udp_pages=$(( max_udp_mb * 256 ))
     safe_rtt "$dyn_buf" "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
