@@ -420,7 +420,7 @@ optimize_system() {
     # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
         VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 70 / 100))
-        SBOX_GOLIMIT="$((mem_total * 78 / 100))MiB"; SBOX_GOGC="200"
+        SBOX_GOLIMIT="$((mem_total * 80 / 100))MiB"; SBOX_GOGC="200"
 		SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
         g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
