@@ -455,10 +455,10 @@ optimize_system() {
     # 2. 设置跳板变量 dyn_buf (综合物理能力与带宽需求)
     dyn_buf=$(( (mem_total << 20) >> 3 ))
     [ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min
-    # 保底：18MB/24MB/32MB，封顶：32MB/48MB/64MB
-	if [ "$mem_total" -ge 200 ]; then [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432; [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864
-    elif [ "$mem_total" -ge 100 ]; then [ "$dyn_buf" -lt 25165824 ] && dyn_buf=25165824; [ "$dyn_buf" -gt 50331648 ] && dyn_buf=50331648
-    else [ "$dyn_buf" -lt 18874368 ] && dyn_buf=18874368; [ "$dyn_buf" -gt 33554432 ] && dyn_buf=33554432; fi
+    # 100M+ 机器给 32MB 爆发力保底；100M- 机器给 16MB 生存保底
+    [ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
+    [ "$dyn_buf" -lt 16777216 ] && dyn_buf=16777216
+    [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864
 	
     # 3. 所有内核网络参数基于 dyn_buf 伸缩
     VAR_UDP_RMEM="$dyn_buf"; VAR_UDP_WMEM="$dyn_buf"
