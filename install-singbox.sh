@@ -454,19 +454,9 @@ optimize_system() {
 	[ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min
 	
 	# 4. 分级边界保护
-	if [ "$mem_total" -ge 200 ]; then
-	    # 高内存：强制 32MB 爆发力保底，64MB 封顶
-	    [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
-	    [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864
-	elif [ "$mem_total" -ge 100 ]; then
-	    # 中等内存：24MB 保底，48MB 封顶
-	    [ "$dyn_buf" -lt 25165824 ] && dyn_buf=25165824
-	    [ "$dyn_buf" -gt 50331648 ] && dyn_buf=50331648
-	else
-	    # 小内存：16MB 保底，32MB 封顶（防止挤占应用内存）
-	    [ "$dyn_buf" -lt 16777216 ] && dyn_buf=16777216
-	    [ "$dyn_buf" -gt 33554432 ] && dyn_buf=33554432
-	fi
+	if [ "$mem_total" -ge 200 ]; then [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432; [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864
+	elif [ "$mem_total" -ge 100 ]; then [ "$dyn_buf" -lt 25165824 ] && dyn_buf=25165824; [ "$dyn_buf" -gt 50331648 ] && dyn_buf=50331648
+	else [ "$dyn_buf" -lt 16777216 ] && dyn_buf=16777216; [ "$dyn_buf" -gt 33554432 ] && dyn_buf=33554432; fi
 	
 	# 5. 动态内核上限联动（取 dyn_buf 的 1.5 倍作为 UDP 内存软红线）
 	max_udp_mb=$(( (dyn_buf * 15 / 10) >> 20 ))
