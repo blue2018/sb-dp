@@ -486,7 +486,7 @@ optimize_system() {
     [ "$base_budget" -gt 6000 ] && base_budget=6000
     # 多核：单次少吃多餐，靠多核并行 / 单核：必须一次多处理点，减少中断切换的开销
     [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || \
-    { net_bgt=$(( base_budget * 2 )); net_usc=6000; }
+    { net_bgt=$(( base_budget << 1 )); net_usc=6000; }
 
     # 8. 内存保命机制：动态预留内核紧急水位 (vm.min_free_kbytes)
     local min_free_val=$(( mem_total * 1024 * 4 / 100 ))  # 100M内存预留约4%
