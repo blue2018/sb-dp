@@ -313,9 +313,12 @@ safe_rtt() {
     # 4. 物理红线钳位
     [ "$target_pages" -gt "$max_udp_pages" ] && target_pages=$max_udp_pages
     # 5. 生成 0.7 : 0.9 : 1.0 内核标准梯度
-    rtt_scale_max=$target_pages
-    rtt_scale_pressure=$(( target_pages * 9 / 10 ))
-    rtt_scale_min=$(( target_pages * 7 / 10 ))
+    if [ "$rtt_scale_max" -gt "$max_udp_pages" ]; then
+	    rtt_scale_max=$max_udp_pages
+	    # 缩小梯度间距，在内存极限时进入“精细化管控”
+	    rtt_scale_pressure=$(( max_udp_pages * 98 / 100 )) 
+	    rtt_scale_min=$(( max_udp_pages * 95 / 100 ))
+	fi
     # 6. 系统全局安全阈值覆盖
     rtt_scale_max=$(( rtt_scale_max < udp_mem_max ? rtt_scale_max : udp_mem_max ))
     rtt_scale_pressure=$(( rtt_scale_pressure < udp_mem_pressure ? rtt_scale_pressure : udp_mem_pressure ))
