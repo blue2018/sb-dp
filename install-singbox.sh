@@ -477,8 +477,8 @@ optimize_system() {
     # 6. 确定系统全局 UDP 限制 (作为 safe_rtt 的参照系)
 	udp_mem_global_min=$(( dyn_buf >> 12 ))
 	udp_mem_global_pressure=$(( (dyn_buf << 1) >> 12 ))  # 2倍压力线
-	udp_mem_global_max=$(( ((mem_total << 20) * 75 / 100) >> 12 ))
-	max_udp_pages=$(( max_udp_mb << 8 )) # 物理红线 75%
+	udp_mem_global_max=$(( ((mem_total << 20) * 75 / 100) >> 12 ))   # 物理红线 75%
+	max_udp_pages=$(( max_udp_mb << 8 ))
 
     # 7. 根据带宽目标设定基础预算：每 100M 带宽分配约 1000 的预算
     local base_budget=$(( VAR_HY2_BW * 15 / 10 * 10 ))  # 基础权重增加50%
