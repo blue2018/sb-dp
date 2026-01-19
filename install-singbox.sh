@@ -7,7 +7,7 @@ set -euo pipefail
 # === 系统与环境参数初始化 ===
 SBOX_ARCH="";            OS_DISPLAY="";        SBOX_CORE="/etc/sing-box/core_script.sh"
 SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";      SBOX_MEM_MAX="55M";       SBOX_OPTIMIZE_LEVEL="未检测"
-SBOX_MEM_HIGH="42M";     CPU_CORE="1";         INITCWND_DONE="false";    VAR_DEF_MEM=""
+SBOX_MEM_HIGH="42M";     CPU_CORE="1";         INITCWND_DONE="false";    VAR_DEF_MEM="";      SBOX_G_WND="";    SBOX_G_BUF=""
 VAR_UDP_RMEM="";         VAR_UDP_WMEM="";      VAR_SYSTEMD_NICE="";      VAR_HY2_BW="200";    RAW_SALA=""
 VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";  BUSY_POLL_VAL="0";        VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
@@ -416,31 +416,27 @@ optimize_system() {
     # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
         VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 70 / 100))
-        SBOX_GOLIMIT="$((mem_total * 80 / 100))MiB"; SBOX_GOGC="200"
         SBOX_MEM_HIGH="$((mem_total * 86 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
-        VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
+		SBOX_GOGC="200"; VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
         g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
         VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 65 / 100))
-        SBOX_GOLIMIT="$((mem_total * 76 / 100))MiB"; SBOX_GOGC="150"
         SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
-        VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
+		SBOX_GOGC="150"; VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
         g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
         VAR_HY2_BW="220"; max_udp_mb=$((mem_total * 60 / 100))
-        SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="120"
         SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
-        VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
+        SBOX_GOGC="120"; VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         swappiness_val=60; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
         VAR_HY2_BW="180"; max_udp_mb=$((mem_total * 55 / 100))
-        SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="100"
         SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
-        VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
+		SBOX_GOGC="100"; VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         g_procs=1; swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         SBOX_OPTIMIZE_LEVEL="64M 激进版"
     fi
@@ -488,12 +484,14 @@ optimize_system() {
     else
         [ "$min_free_val" -gt 65536 ] && min_free_val=65536
     fi
-    # 8. 执行路况仲裁与持久化变量导出
+    # 8. 执行路况仲裁
+	SBOX_G_WND="$g_wnd"; SBOX_G_BUF="$g_buf"
+    SBOX_GOLIMIT="$(( (dyn_buf * 2) / 1048576 ))MiB"   # 动态计算 Go 内存限制：取 dyn_buf 的 2 倍作为运行配额，确保网络栈不被 GC 提前回收
     local max_udp_pages=$(( max_udp_mb * 256 ))
     safe_rtt "$dyn_buf" "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW}Mbps"
-    info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 ))MB"
+    info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 ))MB | Go配额: $SBOX_GOLIMIT"
 	
     # 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
     local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
@@ -662,6 +660,7 @@ install_singbox() {
 # ==========================================
 create_config() {
     local PORT_HY2="${1:-}"
+	local cur_buf="${SBOX_G_BUF:-2097152}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
@@ -703,9 +702,11 @@ create_config() {
     "down_mbps": ${VAR_HY2_BW:-200},
     "udp_timeout": "$timeout",
     "udp_fragment": true,
+	"udp_multi_path": true,
     "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
-    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}",
+	"socket_option": {"rcvbuf": $cur_buf, "sndbuf": $cur_buf}
   }],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
@@ -721,7 +722,7 @@ setup_service() {
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
     local cur_nice="${VAR_SYSTEMD_NICE:--5}"
-    local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"
+    local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"  
     local mem_total=$(probe_memory_total)
     [ "$CPU_N" -le 1 ] && core_range="0" || core_range="0-$((CPU_N - 1))"
     info "配置服务 (核心: $CPU_N | 绑定: $core_range | 权重: $cur_nice)..."
@@ -886,6 +887,7 @@ create_sb_tool() {
 set -uo pipefail 
 CPU_CORE='$CPU_CORE'
 SBOX_CORE='$SBOX_CORE'
+SBOX_G_BUF='${g_buf:-}'
 SBOX_GOLIMIT='$SBOX_GOLIMIT'
 SBOX_GOGC='${SBOX_GOGC:-100}'
 SBOX_MEM_MAX='$SBOX_MEM_MAX'
