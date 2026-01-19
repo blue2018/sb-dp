@@ -291,39 +291,35 @@ EOF
     fi
 }
 
-# 动态 RTT 内存钳位 (激进融合纯计算版)
+# 动态 RTT 内存页钳位 (物理公式版)
 safe_rtt() {
-    local dyn_buf="$1" RTT_AVG="$2" max_udp_pages="$3" udp_mem_global_min="$4" udp_mem_global_pressure="$5" udp_mem_global_max="$6"
-    # [核心融合] 引入 dyn_buf 跳板页数 (由 optimize_system 提前算出并传导)
-    local dyn_pages=$(( dyn_buf / 4096 ))
-    # 1. 计算探测 BDP：延迟 * 1024 因子 (作为扩张参考)
-    local probe_pages=$(( RTT_AVG * 1024 ))
-    # 2. 仲裁逻辑：探测值与 dyn_buf 保底值取最大者
-    # 如果 RTT 探测太低，由 dyn_buf 保底；如果 RTT 极高，则允许向上扩张
-    rtt_scale_max=$probe_pages
-    [ "$rtt_scale_max" -lt "$dyn_pages" ] && rtt_scale_max=$dyn_pages
-    # 3. 延迟补偿：根据 RTT 自动补全梯度
+    local dyn_buf="$1" RTT_AVG="$2" max_udp_pages="$3" 
+    local udp_mem_min="$4" udp_mem_pressure="$5" udp_mem_max="$6"
+    # 1. 物理 BDP 页面计算 (RTT * BW / 32 简化公式)
+    # 逻辑: (RTTms * BW_Mbps * 1024 / 8位) / 4096字节 = 需求页数
+    local bdp_pages=$(( RTT_AVG * VAR_HY2_BW / 32 ))
+    local base_pages=$(( dyn_buf / 4096 ))
+    # 2. 仲裁：取 BDP 需求与物理保底的最大值
+    local target_pages=$(( bdp_pages > base_pages ? bdp_pages : base_pages ))
+    # 3. 延迟补偿与画像定档
     local q_msg=""
-    if [ "$RTT_AVG" -ge 150 ]; then
-        rtt_scale_max=$(( rtt_scale_max * 15 / 10 )) # 长距增加 50% 缓冲冗余
+    if [ "$RTT_AVG" -ge 120 ]; then
+        target_pages=$(( target_pages * 12 / 10 )) # 高延迟增加 20% 冗余
         q_msg=" (QUIC远航模式)"
     else
         q_msg=" (QUIC竞速模式)"
     fi
     SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL:-}${q_msg}"
-    # 4. 生成三级梯度 (比例锁定：1.0 : 0.9 : 0.75)，相比手动填数，这种比例生成能让内核在内存回收时更加平滑
-    rtt_scale_pressure=$(( rtt_scale_max * 90 / 100 ))
-    rtt_scale_min=$(( rtt_scale_max * 75 / 100 ))
-    # 5. 激进内存保护 (当超过该档位设定的最大页数时钳位)
-    if [ "$rtt_scale_max" -gt "$max_udp_pages" ]; then
-        rtt_scale_max=$max_udp_pages
-        rtt_scale_pressure=$(( max_udp_pages * 95 / 100 ))
-        rtt_scale_min=$(( max_udp_pages * 80 / 100 ))
-    fi
-    # 6. 系统全局硬上限最终防护
-    rtt_scale_max=$(( rtt_scale_max < udp_mem_global_max ? rtt_scale_max : udp_mem_global_max ))
-    rtt_scale_pressure=$(( rtt_scale_pressure < udp_mem_global_pressure ? rtt_scale_pressure : udp_mem_global_pressure ))
-    rtt_scale_min=$(( rtt_scale_min < udp_mem_global_min ? rtt_scale_min : udp_mem_global_min ))
+    # 4. 物理红线钳位
+    [ "$target_pages" -gt "$max_udp_pages" ] && target_pages=$max_udp_pages
+    # 5. 生成 0.7 : 0.9 : 1.0 内核标准梯度
+    rtt_scale_max=$target_pages
+    rtt_scale_pressure=$(( target_pages * 9 / 10 ))
+    rtt_scale_min=$(( target_pages * 7 / 10 ))
+    # 6. 系统全局安全阈值覆盖
+    rtt_scale_max=$(( rtt_scale_max < udp_mem_max ? rtt_scale_max : udp_mem_max ))
+    rtt_scale_pressure=$(( rtt_scale_pressure < udp_mem_pressure ? rtt_scale_pressure : udp_mem_pressure ))
+    rtt_scale_min=$(( rtt_scale_min < udp_mem_min ? rtt_scale_min : udp_mem_min ))
 }
 
 # sing-box 用户态运行时调度人格（Go/QUIC/缓冲区自适应）
@@ -449,60 +445,57 @@ optimize_system() {
         SBOX_OPTIMIZE_LEVEL="64M 激进版"
     fi
 
-    # 阶段二：[重点] dyn_buf 跳板与带宽灵魂联动
-    # 1. 计算带宽所需 BDP 保底 (系数3以应对国际链路抖动)
-    local bdp_min=$(( VAR_HY2_BW * 1024 * 1024 / 8 / 5 * 3 )) # 约 0.3s 冗余
-    # 2. 设置跳板变量 dyn_buf (综合物理能力与带宽需求)
-    dyn_buf=$(( mem_total * 1024 * 1024 / 8 ))
-    [ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min
-    # 强制给 100M+ 机器分配至少 32MB 核心缓冲，确保高延迟下吞吐不掉速
-    [ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
-    # 限制 dyn_buf 不超过当前档位定义的 max_udp_mb / 64MB 封顶
-    local phys_limit=$(( max_udp_mb * 1024 * 1024 ))
-    [ "$dyn_buf" -gt "$phys_limit" ] && dyn_buf=$phys_limit
+    # 阶段二：[重点] 动态蓄水池与物理 BDP 联动计算
+    # 1. 计算物理跳板变量 dyn_buf (基于总内存位移，比除法更稳定)
+    local total_mem_bytes=$(( mem_total * 1024 * 1024 ))
+    dyn_buf=$(( total_mem_bytes >> 3 )) # 初始取总内存 1/8
+    # 2. 强制边界保护 (针对 64M - 1G 机型优化)
+    # 确保最小不少于 16MB (维持基础吞吐)，最大不超过 64MB (防止内核内存碎片化)
+    [ "$dyn_buf" -lt 16777216 ] && dyn_buf=16777216
     [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864
-
-    # 3. 所有内核网络参数基于 dyn_buf 伸缩
-    VAR_UDP_RMEM="$dyn_buf"; VAR_UDP_WMEM="$dyn_buf"
-    VAR_DEF_MEM=$(( dyn_buf / 4 ))
-    VAR_BACKLOG=$(( VAR_HY2_BW * 50 ))   # 队列从30提到50，抗突发丢包
+    # 3. 内核 Socket 缓冲区联动导出
+    VAR_UDP_RMEM="$dyn_buf"
+    VAR_UDP_WMEM="$dyn_buf"
+    VAR_DEF_MEM=$(( dyn_buf >> 2 ))    # 默认值取 Max 的 1/4
+    VAR_BACKLOG=$(( VAR_HY2_BW * 50 )) # 接收队列防突发
     [ "$VAR_BACKLOG" -lt 8192 ] && VAR_BACKLOG=8192
-
-    # 4. 联动导出：Sing-box 应用层参数
-    g_wnd=$(( VAR_HY2_BW / 8 ))      # 激进窗口，应对 80ms+ 延迟（原为 /10）
-    [ "$g_wnd" -lt 15 ] && g_wnd=15  # 调高起步窗口（原为 12）
-    g_buf=$(( dyn_buf / 6 ))         # 应用层 buffer 设为跳板的 1/6（原为 /8）
-
-    # 5. 确定系统全局 UDP 限制 (作为 safe_rtt 的参照系)
-    udp_mem_global_min=$(( dyn_buf / 4096 ))
-    udp_mem_global_pressure=$(( dyn_buf * 2 / 4096 ))
-    udp_mem_global_max=$(( mem_total * 1024 * 1024 * 75 / 100 / 4096 )) # 物理红线 75%
-
-    # 6. 根据带宽目标设定基础预算：每 100M 带宽分配约 1000 的预算
-    local base_budget=$(( VAR_HY2_BW * 15 / 10 * 10 ))  # 基础权重增加50%
+    # 4. Sing-box 应用层参数自适应 (物理公式推导)
+    # g_wnd (窗口大小) = BDP / MTU，确保在高延迟下填满管道
+    g_wnd=$(( (VAR_HY2_BW * 1024 * 1024 / 8) * RTT_AVG / 1000 / 1350 ))
+    [ "$g_wnd" -lt 25 ] && g_wnd=25    # 提高初始起步窗口
+    [ "$g_wnd" -gt 3000 ] && g_wnd=3000 # 封顶防止过度消耗内存
+    # 应用层 buffer 设为内核缓冲区的 1/6，维持 Go 运行时的高效流转
+    g_buf=$(( dyn_buf / 6 ))
+    # 5. 确定系统全局 UDP 限制边界 (Page 为单位)
+    udp_mem_global_min=$(( dyn_buf >> 12 ))
+    udp_mem_global_pressure=$(( (dyn_buf * 2) >> 12 ))
+    udp_mem_global_max=$(( (total_mem_bytes * 75 / 100) >> 12 )) # 物理红线 75%
+    # 6. 网络调度预算分发 (基于带宽目标)
+    local base_budget=$(( VAR_HY2_BW * 15 )) 
     [ "$base_budget" -lt 2000 ] && base_budget=2000
     [ "$base_budget" -gt 6000 ] && base_budget=6000
-    # 多核：单次少吃多餐，靠多核并行 / 单核：必须一次多处理点，减少中断切换的开销
-    [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || \
-    { net_bgt=$(( base_budget * 2 )); net_usc=6000; }
-
-    # 7. 内存保命机制：动态预留内核紧急水位 (vm.min_free_kbytes)
-    local min_free_val=$(( mem_total * 1024 * 4 / 100 ))  # 100M内存预留约4%
-    [ "$min_free_val" -lt 3072 ] && min_free_val=3072     # 最小不低于 3MB
-    if [ "$mem_total" -le 128 ]; then
-        [ "$min_free_val" -gt 4608 ] && min_free_val=4096 # 极小内存严禁超过 4.5MB
+    # 多核/单核差异化中断预算
+    if [ "$real_c" -ge 2 ]; then
+        net_bgt=$base_budget; net_usc=2000
     else
-        [ "$min_free_val" -gt 65536 ] && min_free_val=65536 # 大机器 64MB 封顶
+        net_bgt=$(( base_budget << 1 )); net_usc=6000
     fi
-	
-	# 阶段三：路况仲裁与持久化
+    # 7. 内存保命机制：紧急水位线 (vm.min_free_kbytes)
+    local min_free_val=$(( (mem_total << 10) * 4 / 100 )) # 预留 4%
+    if [ "$mem_total" -le 128 ]; then
+        [ "$min_free_val" -lt 3072 ] && min_free_val=3072
+        [ "$min_free_val" -gt 4608 ] && min_free_val=4096
+    else
+        [ "$min_free_val" -gt 65536 ] && min_free_val=65536
+    fi
+    # 8. 执行路况仲裁与持久化变量导出
     local max_udp_pages=$(( max_udp_mb * 256 ))
     safe_rtt "$dyn_buf" "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW}Mbps"
     info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 ))MB"
 	
-    # 阶段四： BBR 探测与内核锐化 (递进式锁定最强算法)
+    # 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
     local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
     local avail=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "cubic")
     if [[ "$avail" =~ "bbr3" ]]; then tcp_cca="bbr3"; succ "检测到 BBRv3，激活极致响应模式"
@@ -511,7 +504,7 @@ optimize_system() {
     else warn "内核不支持 BBR，切换至高兼容 Cubic 模式"; fi
     if sysctl net.core.default_qdisc 2>/dev/null | grep -q "fq"; then info "FQ 调度器已就绪"; else info "准备激活 FQ 调度器..."; fi
 	
-    # 阶段五： 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
+    # 阶段四： 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
     local SYSCTL_FILE="/etc/sysctl.d/99-sing-box.conf"
     cat > "$SYSCTL_FILE" <<SYSCTL
 # === 一、 基础转发与内存管理 (含 ZRAM 与 OOM 策略) ===
