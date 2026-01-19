@@ -419,33 +419,29 @@ optimize_system() {
 
     # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
-        VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 70 / 100))
-        SBOX_GOLIMIT="$((mem_total * 80 / 100))MiB"; SBOX_GOGC="200"
+        VAR_HY2_BW="500"; SBOX_GOGC="200"; g_procs=$real_c
         SBOX_MEM_HIGH="$((mem_total * 86 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
-        VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
-        g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
+		VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
+        swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
-        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 65 / 100))
-        SBOX_GOLIMIT="$((mem_total * 76 / 100))MiB"; SBOX_GOGC="150"
+        VAR_HY2_BW="300"; SBOX_GOGC="150"; g_procs=$real_c
         SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
-        VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
-        g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
+		VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
+        swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
-        VAR_HY2_BW="220"; max_udp_mb=$((mem_total * 60 / 100))
-        SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="120"
+        VAR_HY2_BW="220"; SBOX_GOGC="120"
         SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         swappiness_val=60; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
-        VAR_HY2_BW="180"; max_udp_mb=$((mem_total * 55 / 100))
-        SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="100"
-        SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
-        VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
-        g_procs=1; swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
+        VAR_HY2_BW="180"; SBOX_GOGC="100"; g_procs=1
+        SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"  
+		VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
+        swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         SBOX_OPTIMIZE_LEVEL="64M 激进版"
     fi
 
@@ -453,33 +449,38 @@ optimize_system() {
     # 1. 计算带宽所需 BDP 保底 (系数3以应对国际链路抖动)
     local bdp_min=$(( VAR_HY2_BW * 1024 * 1024 / 8 / 5 * 3 )) # 约 0.3s 冗余
     # 2. 设置跳板变量 dyn_buf (综合物理能力与带宽需求)
-    dyn_buf=$(( mem_total * 1024 * 1024 / 8 ))
+    dyn_buf=$(( (mem_total << 20) >> 3 ))
     [ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min
-    # 强制给 100M+ 机器分配至少 32MB 核心缓冲，确保高延迟下吞吐不掉速
-    [ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
-    # 限制 dyn_buf 不超过当前档位定义的 max_udp_mb / 64MB 封顶
-    local phys_limit=$(( max_udp_mb * 1024 * 1024 ))
-    [ "$dyn_buf" -gt "$phys_limit" ] && dyn_buf=$phys_limit
-    [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864
+    # 保底：18MB/24MB/32MB，封顶：32MB/48MB/64MB
+	if [ "$mem_total" -ge 200 ]; then [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432; [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864
+    elif [ "$mem_total" -ge 100 ]; then [ "$dyn_buf" -lt 25165824 ] && dyn_buf=25165824; [ "$dyn_buf" -gt 50331648 ] && dyn_buf=50331648
+    else [ "$dyn_buf" -lt 18874368 ] && dyn_buf=18874368; [ "$dyn_buf" -gt 33554432 ] && dyn_buf=33554432; fi
+	
+	# 3. 动态内核上限联动（取 dyn_buf 的 1.5 倍作为 UDP 内存软红线）
+	max_udp_mb=$(( (dyn_buf * 15 / 10) >> 20 ))
+	local max_safe_phys=$(( mem_total * 75 / 100 ))
+	[ "$max_udp_mb" -gt "$max_safe_phys" ] && max_udp_mb=$max_safe_phys
+	[ "$max_udp_mb" -lt 18 ] && max_udp_mb=18      # 即使再小，也给 18MB 保证基础吞吐
+	SBOX_GOLIMIT="$(( max_udp_mb * 14 / 10 ))MiB"  # 给 1.4 倍冗余，防高并发 GC 抖动
 
-    # 3. 所有内核网络参数基于 dyn_buf 伸缩
+    # 4. 所有内核网络参数基于 dyn_buf 伸缩
     VAR_UDP_RMEM="$dyn_buf"; VAR_UDP_WMEM="$dyn_buf"
     VAR_DEF_MEM=$(( dyn_buf / 4 ))
     VAR_BACKLOG=$(( VAR_HY2_BW * 50 ))   # 队列从30提到50，抗突发丢包
     [ "$VAR_BACKLOG" -lt 8192 ] && VAR_BACKLOG=8192
 
-    # 4. 联动导出：Sing-box 应用层参数
+    # 5. 联动导出：Sing-box 应用层参数
     g_wnd=$(( VAR_HY2_BW / 8 ))      # 激进窗口，应对 80ms+ 延迟（原为 /10）
     [ "$g_wnd" -lt 15 ] && g_wnd=15  # 调高起步窗口（原为 12）
     g_buf=$(( dyn_buf / 6 ))         # 应用层 buffer 设为跳板的 1/6（原为 /8）
 
-    # 5. 确定系统全局 UDP 限制 (作为 safe_rtt 的参照系)
-	max_udp_pages=$(( max_udp_mb * 256 ))
-    udp_mem_global_min=$(( dyn_buf / 4096 ))
-    udp_mem_global_pressure=$(( dyn_buf * 2 / 4096 ))
-    udp_mem_global_max=$(( mem_total * 1024 * 1024 * 75 / 100 / 4096 )) # 物理红线 75%
+    # 6. 确定系统全局 UDP 限制 (作为 safe_rtt 的参照系)
+	udp_mem_global_min=$(( dyn_buf >> 12 ))
+	udp_mem_global_pressure=$(( (dyn_buf << 1) >> 12 ))  # 2倍压力线
+	udp_mem_global_max=$(( ((mem_total << 20) * 75 / 100) >> 12 ))
+	max_udp_pages=$(( max_udp_mb << 8 )) # 物理红线 75%
 
-    # 6. 根据带宽目标设定基础预算：每 100M 带宽分配约 1000 的预算
+    # 7. 根据带宽目标设定基础预算：每 100M 带宽分配约 1000 的预算
     local base_budget=$(( VAR_HY2_BW * 15 / 10 * 10 ))  # 基础权重增加50%
     [ "$base_budget" -lt 2000 ] && base_budget=2000
     [ "$base_budget" -gt 6000 ] && base_budget=6000
@@ -487,16 +488,14 @@ optimize_system() {
     [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || \
     { net_bgt=$(( base_budget * 2 )); net_usc=6000; }
 
-    # 7. 内存保命机制：动态预留内核紧急水位 (vm.min_free_kbytes)
+    # 8. 内存保命机制：动态预留内核紧急水位 (vm.min_free_kbytes)
     local min_free_val=$(( mem_total * 1024 * 4 / 100 ))  # 100M内存预留约4%
-    [ "$min_free_val" -lt 3072 ] && min_free_val=3072     # 最小不低于 3MB
-    if [ "$mem_total" -le 128 ]; then
-        [ "$min_free_val" -gt 4608 ] && min_free_val=4096 # 极小内存严禁超过 4.5MB
-    else
+    [ "$min_free_val" -lt 4608 ] && min_free_val=4608     # 最小不低于 3MB
+    if [ "$mem_total" -gt 100 ]; then
         [ "$min_free_val" -gt 65536 ] && min_free_val=65536 # 大机器 64MB 封顶
     fi
 	
-	# 8. 路况仲裁
+	# 9. 路况仲裁
     safe_rtt "$dyn_buf" "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW}Mbps"
