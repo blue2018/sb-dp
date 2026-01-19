@@ -7,7 +7,7 @@ set -euo pipefail
 # === 系统与环境参数初始化 ===
 SBOX_ARCH="";            OS_DISPLAY="";        SBOX_CORE="/etc/sing-box/core_script.sh"
 SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";      SBOX_MEM_MAX="55M";       SBOX_OPTIMIZE_LEVEL="未检测"
-SBOX_MEM_HIGH="42M";     CPU_CORE="1";         INITCWND_DONE="false";    VAR_DEF_MEM="";      SBOX_G_WND="";    SBOX_G_BUF=""
+SBOX_MEM_HIGH="42M";     CPU_CORE="1";         INITCWND_DONE="false";    VAR_DEF_MEM=""
 VAR_UDP_RMEM="";         VAR_UDP_WMEM="";      VAR_SYSTEMD_NICE="";      VAR_HY2_BW="200";    RAW_SALA=""
 VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";  BUSY_POLL_VAL="0";        VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
@@ -476,7 +476,6 @@ optimize_system() {
     [ "$g_wnd" -lt 30 ] && g_wnd=30      # 略微调高起步窗口
     [ "$g_wnd" -gt 3000 ] && g_wnd=3000
 	g_buf=$(( dyn_buf / 6 ))
-	SBOX_G_BUF="$g_buf"
 
     # 6. 全局 UDP 限制边界 (位移法转换 Page)
     udp_mem_global_min=$(( dyn_buf >> 12 ))
@@ -673,7 +672,6 @@ install_singbox() {
 create_config() {
     local PORT_HY2="${1:-}"
 	local cur_bw="${VAR_HY2_BW:-200}"
-	local cur_buf="${SBOX_G_BUF:-2097152}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
@@ -718,8 +716,7 @@ create_config() {
     "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}",
-	"tcp_fast_open": true,
-	"socket_option": {"rcvbuf": $cur_buf, "sndbuf": $cur_buf, "priority": 7}
+	"tcp_fast_open": true
   }],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
@@ -901,7 +898,6 @@ set -uo pipefail
 CPU_CORE='$CPU_CORE'
 SBOX_CORE='$SBOX_CORE'
 VAR_HY2_BW='${VAR_HY2_BW:-200}'
-SBOX_G_BUF='${SBOX_G_BUF:-2097152}'
 SBOX_GOLIMIT='$SBOX_GOLIMIT'
 SBOX_GOGC='${SBOX_GOGC:-100}'
 SBOX_MEM_MAX='$SBOX_MEM_MAX'
