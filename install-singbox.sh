@@ -291,31 +291,35 @@ EOF
     fi
 }
 
-# 动态 RTT 内存页钳位 (物理公式版)
+# 动态 RTT 内存页钳位
 safe_rtt() {
     local dyn_buf="$1" RTT_AVG="$2" max_udp_pages="$3" 
     local udp_mem_min="$4" udp_mem_pressure="$5" udp_mem_max="$6"
-    # 1. 物理 BDP 页面计算 (RTT * BW / 32 简化公式)
-    # 逻辑: (RTTms * BW_Mbps * 1024 / 8位) / 4096字节 = 需求页数
+
+    # 1. 物理 BDP 页面计算 (由版本二推导：RTT * BW)
     local bdp_pages=$(( RTT_AVG * VAR_HY2_BW / 32 ))
     local base_pages=$(( dyn_buf / 4096 ))
-    # 2. 仲裁：取 BDP 需求与物理保底的最大值
+    # 2. 仲裁逻辑：取精准需求与经验保底的最大值
     local target_pages=$(( bdp_pages > base_pages ? bdp_pages : base_pages ))
-    # 3. 延迟补偿与画像定档
+	
+    # 3. 远航/竞速模式自动梯度
     local q_msg=""
-    if [ "$RTT_AVG" -ge 120 ]; then
-        target_pages=$(( target_pages * 12 / 10 )) # 高延迟增加 20% 冗余
+    if [ "$RTT_AVG" -ge 150 ]; then
+        target_pages=$(( target_pages * 15 / 10 )) 
         q_msg=" (QUIC远航模式)"
     else
+        target_pages=$(( target_pages * 11 / 10 )) # 竞速模式微调 10% 缓冲
         q_msg=" (QUIC竞速模式)"
     fi
     SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL:-}${q_msg}"
+
     # 4. 物理红线钳位
     [ "$target_pages" -gt "$max_udp_pages" ] && target_pages=$max_udp_pages
-    # 5. 生成 0.7 : 0.9 : 1.0 内核标准梯度
+    # 5. 生成 0.75 : 0.9 : 1.0 黄金平滑梯度
     rtt_scale_max=$target_pages
-	rtt_scale_pressure=$(( target_pages * 9 / 10 ))
-	rtt_scale_min=$(( target_pages * 7 / 10 ))
+    rtt_scale_pressure=$(( target_pages * 90 / 100 ))
+    rtt_scale_min=$(( target_pages * 75 / 100 ))
+
     # 6. 系统全局安全阈值覆盖
     rtt_scale_max=$(( rtt_scale_max < udp_mem_max ? rtt_scale_max : udp_mem_max ))
     rtt_scale_pressure=$(( rtt_scale_pressure < udp_mem_pressure ? rtt_scale_pressure : udp_mem_pressure ))
@@ -407,7 +411,7 @@ optimize_system() {
     local mem_total=$(probe_memory_total)
     local real_c="$CPU_CORE" ct_max=16384 ct_udp_to=30 ct_stream_to=30
     local dyn_buf g_procs g_wnd g_buf net_bgt net_usc tcp_rmem_max
-    local max_udp_mb udp_mem_global_min udp_mem_global_pressure udp_mem_global_max
+    local max_udp_mb max_udp_pages udp_mem_global_min udp_mem_global_pressure udp_mem_global_max
     local swappiness_val="${SWAPPINESS_VAL:-10}" busy_poll_val="${BUSY_POLL_VAL:-0}"
     
     setup_zrm_swap "$mem_total"
@@ -415,79 +419,87 @@ optimize_system() {
 
     # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
-        VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 70 / 100))
+        VAR_HY2_BW="500"; SBOX_GOGC="200"; g_procs=$real_c
         SBOX_MEM_HIGH="$((mem_total * 86 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
-		SBOX_GOGC="200"; VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
-        g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
+		VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
+        swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
-        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 65 / 100))
+        VAR_HY2_BW="300"; SBOX_GOGC="150"; g_procs=$real_c
         SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
-		SBOX_GOGC="150"; VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
-        g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
+		VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
+        swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
-        VAR_HY2_BW="220"; max_udp_mb=$((mem_total * 60 / 100))
+        VAR_HY2_BW="220"; SBOX_GOGC="120"
         SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
-        SBOX_GOGC="120"; VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
+        VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         swappiness_val=60; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
-        VAR_HY2_BW="180"; max_udp_mb=$((mem_total * 55 / 100))
-        SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
-		SBOX_GOGC="100"; VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
-        g_procs=1; swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
+        VAR_HY2_BW="180"; SBOX_GOGC="100"; g_procs=1
+        SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"  
+		VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
+        swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         SBOX_OPTIMIZE_LEVEL="64M 激进版"
     fi
 
-    # 阶段二：[重点] 动态蓄水池与物理 BDP 联动计算
-    # 1. 计算物理跳板变量 dyn_buf (基于总内存位移，比除法更稳定)
-    local total_mem_bytes=$(( mem_total * 1024 * 1024 ))
-    dyn_buf=$(( total_mem_bytes >> 3 )) # 初始取总内存 1/8
-    # 2. 强制边界保护 (针对 64M - 1G 机型优化)
-    # 确保最小不少于 16MB (维持基础吞吐)，最大不超过 64MB (防止内核内存碎片化)
+    # 阶段二：动态蓄水池与协同计算
+    # 1. 物理跳板位移计算 (取 1/8 物理内存作为基准蓄水池)
+    local total_mem_bytes=$(( mem_total << 20 ))
+    dyn_buf=$(( total_mem_bytes >> 3 ))
+
+    # 2. 边界保护融合
+    # 100M+ 机器给 32MB 爆发力保底；96M 机器给 16MB 生存保底
+    [ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
     [ "$dyn_buf" -lt 16777216 ] && dyn_buf=16777216
     [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864
-    # 3. 内核 Socket 缓冲区联动导出
-    VAR_UDP_RMEM="$dyn_buf"
-    VAR_UDP_WMEM="$dyn_buf"
-    VAR_DEF_MEM=$(( dyn_buf >> 2 ))    # 默认值取 Max 的 1/4
-    VAR_BACKLOG=$(( VAR_HY2_BW * 50 )) # 接收队列防突发
+
+	# 3. 动态内核上限联动
+    # 动态设定 max_udp_mb：取 dyn_buf 的 1.5 倍，作为内核 UDP 内存的软红线
+    max_udp_mb=$(( (dyn_buf * 15 / 10) >> 20 ))
+	# 安全兜底：确保 max_udp_mb 不会吃掉超过 75% 的物理内存
+    local max_safe_phys=$(( mem_total * 75 / 100 ))
+    [ "$max_udp_mb" -gt "$max_safe_phys" ] && max_udp_mb=$max_safe_phys
+    [ "$max_udp_mb" -lt 16 ] && max_udp_mb=16      # 即使再小，也给 16MB 保证基础吞吐
+	SBOX_GOLIMIT="$(( (dyn_buf * 2) >> 20 ))MiB"   # 自动根据网络栈需求锁定 Go 的 GC 阈值，防止高带宽时内存被频繁回收影响性能
+	
+    # 4. 内核 Socket 缓冲区变量导出
+    VAR_UDP_RMEM="$dyn_buf"; VAR_UDP_WMEM="$dyn_buf"
+    VAR_DEF_MEM=$(( dyn_buf >> 2 ))
+    VAR_BACKLOG=$(( VAR_HY2_BW * 50 ))   # 接收队列防突发
     [ "$VAR_BACKLOG" -lt 8192 ] && VAR_BACKLOG=8192
-    # 4. Sing-box 应用层参数自适应 (物理公式推导)
-    # g_wnd (窗口大小) = BDP / MTU，确保在高延迟下填满管道
-    g_wnd=$(( (VAR_HY2_BW * 1024 * 1024 / 8) * RTT_AVG / 1000 / 1350 ))
-    [ "$g_wnd" -lt 25 ] && g_wnd=25    # 提高初始起步窗口
-    [ "$g_wnd" -gt 3000 ] && g_wnd=3000 # 封顶防止过度消耗内存
-    # 应用层 buffer 设为内核缓冲区的 1/6，维持 Go 运行时的高效流转
-    g_buf=$(( dyn_buf / 6 ))
-    # 5. 确定系统全局 UDP 限制边界 (Page 为单位)
+
+    # 5. Sing-box 物理窗口精准推导，直接消除高延迟卡顿
+    g_wnd=$(( (VAR_HY2_BW * 1048576 / 8) * RTT_AVG / 1350000 ))
+    [ "$g_wnd" -lt 30 ] && g_wnd=30      # 略微调高起步窗口
+    [ "$g_wnd" -gt 3000 ] && g_wnd=3000
+	g_buf=$(( dyn_buf / 6 ))
+	SBOX_G_BUF="$g_buf"
+
+    # 6. 全局 UDP 限制边界 (位移法转换 Page)
     udp_mem_global_min=$(( dyn_buf >> 12 ))
-    udp_mem_global_pressure=$(( (dyn_buf * 2) >> 12 ))
-    udp_mem_global_max=$(( (total_mem_bytes * 75 / 100) >> 12 )) # 物理红线 75%
-    # 6. 网络调度预算分发 (基于带宽目标)
-    local base_budget=$(( VAR_HY2_BW * 15 )) 
+    udp_mem_global_pressure=$(( (dyn_buf * 18 / 10) >> 12 ))   # 1.8倍压力线
+    udp_mem_global_max=$(( (total_mem_bytes * 75 / 100) >> 12 ))
+	max_udp_pages=$(( max_udp_mb << 8 ))
+
+    # 7. 网络预算 (基于带宽的线性预算)
+    local base_budget=$(( VAR_HY2_BW * 15 ))
     [ "$base_budget" -lt 2000 ] && base_budget=2000
     [ "$base_budget" -gt 6000 ] && base_budget=6000
-    # 多核/单核差异化中断预算
-    if [ "$real_c" -ge 2 ]; then
-        net_bgt=$base_budget; net_usc=2000
-    else
-        net_bgt=$(( base_budget << 1 )); net_usc=6000
-    fi
-    # 7. 内存保命机制：紧急水位线 (vm.min_free_kbytes)
-    local min_free_val=$(( (mem_total << 10) * 4 / 100 )) # 预留 4%
+    [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || { net_bgt=$(( base_budget << 1 )); net_usc=6000; }
+
+    # 8. 内存水位保护 (vm.min_free_kbytes)
+    local min_free_val=$(( (mem_total << 10) * 4 / 100 ))
+    [ "$min_free_val" -lt 3072 ] && min_free_val=3072
     if [ "$mem_total" -le 128 ]; then
-        [ "$min_free_val" -lt 3072 ] && min_free_val=3072
         [ "$min_free_val" -gt 4608 ] && min_free_val=4096
     else
         [ "$min_free_val" -gt 65536 ] && min_free_val=65536
     fi
-    # 8. 执行路况仲裁
-	SBOX_G_BUF="$g_buf"
-    SBOX_GOLIMIT="$(( (dyn_buf * 2) / 1048576 ))MiB"   # 动态计算 Go 内存限制：取 dyn_buf 的 2 倍作为运行配额，确保网络栈不被 GC 提前回收
-    local max_udp_pages=$(( max_udp_mb * 256 ))
+
+    # 9. Go 运行时内存钳位
     safe_rtt "$dyn_buf" "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW}Mbps"
@@ -706,7 +718,8 @@ create_config() {
     "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}",
-	"socket_option": {"rcvbuf": $cur_buf, "sndbuf": $cur_buf}
+	"tcp_fast_open": true,
+	"socket_option": {"rcvbuf": $cur_buf, "sndbuf": $cur_buf, "priority": 7}
   }],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
