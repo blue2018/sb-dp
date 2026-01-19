@@ -672,8 +672,8 @@ install_singbox() {
 # ==========================================
 create_config() {
     local PORT_HY2="${1:-}"
-	local final_bw="${VAR_HY2_BW:-200}"
-	local final_buf="${SBOX_G_BUF:-2097152}"
+	local cur_bw="${VAR_HY2_BW:-200}"
+	local cur_buf="${SBOX_G_BUF:-2097152}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
@@ -702,61 +702,25 @@ create_config() {
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": {
-    "level": "fatal",
-    "timestamp": true
-  },
-  "dns": {
-    "servers": [
-      { "address": "8.8.4.4", "detour": "direct-out" },
-      { "address": "1.1.1.1", "detour": "direct-out" }
-    ],
-    "strategy": "$ds",
-    "independent_cache": false,
-    "disable_cache": false,
-    "disable_expire": false
-  },
-  "inbounds": [
-    {
-      "type": "hysteria2",
-      "tag": "hy2-in",
-      "listen": "::",
-      "listen_port": $PORT_HY2,
-      "users": [
-        { "password": "$PSK" }
-      ],
-      "ignore_client_bandwidth": false,
-      "up_mbps": $final_bw,
-      "down_mbps": $final_bw,
-      "udp_timeout": "${timeout:-30s}",
-      "udp_fragment": true,
-      "tls": {
-        "enabled": true,
-        "alpn": ["h3"],
-        "min_version": "1.3",
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-        "key_path": "/etc/sing-box/certs/privkey.pem"
-      },
-      "obfs": {
-        "type": "salamander",
-        "password": "$SALA_PASS"
-      },
-      "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}",
-      "tcp_fast_open": true,
-      "socket_option": {
-        "rcvbuf": $final_buf,
-        "sndbuf": $final_buf,
-        "priority": 7
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct-out",
-      "domain_strategy": "$ds"
-    }
-  ]
+  "log": { "level": "fatal", "timestamp": true },
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
+  "inbounds": [{
+    "type": "hysteria2",
+    "tag": "hy2-in",
+    "listen": "::",
+    "listen_port": $PORT_HY2,
+    "users": [ { "password": "$PSK" } ],
+    "ignore_client_bandwidth": false,
+    "up_mbps": $cur_bw,
+    "down_mbps": $cur_bw,
+    "udp_timeout": "$timeout",
+    "udp_fragment": true,
+    "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
+    "obfs": {"type": "salamander", "password": "$SALA_PASS"},
+    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}",
+	"socket_option": {"rcvbuf": $cur_buf, "sndbuf": $cur_buf, "priority": 7}
+  }],
+  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
