@@ -313,12 +313,9 @@ safe_rtt() {
     # 4. 物理红线钳位
     [ "$target_pages" -gt "$max_udp_pages" ] && target_pages=$max_udp_pages
     # 5. 生成 0.7 : 0.9 : 1.0 内核标准梯度
-    if [ "$rtt_scale_max" -gt "$max_udp_pages" ]; then
-	    rtt_scale_max=$max_udp_pages
-	    # 缩小梯度间距，在内存极限时进入“精细化管控”
-	    rtt_scale_pressure=$(( max_udp_pages * 98 / 100 )) 
-	    rtt_scale_min=$(( max_udp_pages * 95 / 100 ))
-	fi
+    rtt_scale_max=$target_pages
+	rtt_scale_pressure=$(( target_pages * 9 / 10 ))
+	rtt_scale_min=$(( target_pages * 7 / 10 ))
     # 6. 系统全局安全阈值覆盖
     rtt_scale_max=$(( rtt_scale_max < udp_mem_max ? rtt_scale_max : udp_mem_max ))
     rtt_scale_pressure=$(( rtt_scale_pressure < udp_mem_pressure ? rtt_scale_pressure : udp_mem_pressure ))
@@ -488,7 +485,7 @@ optimize_system() {
         [ "$min_free_val" -gt 65536 ] && min_free_val=65536
     fi
     # 8. 执行路况仲裁
-	SBOX_G_WND="$g_wnd"; SBOX_G_BUF="$g_buf"
+	SBOX_G_BUF="$g_buf"
     SBOX_GOLIMIT="$(( (dyn_buf * 2) / 1048576 ))MiB"   # 动态计算 Go 内存限制：取 dyn_buf 的 2 倍作为运行配额，确保网络栈不被 GC 提前回收
     local max_udp_pages=$(( max_udp_mb * 256 ))
     safe_rtt "$dyn_buf" "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
