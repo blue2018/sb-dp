@@ -495,14 +495,14 @@ optimize_system() {
         [ "$min_free_val" -gt 65536 ] && min_free_val=65536 # 大机器 64MB 封顶
     fi
 	
-	# 阶段三：路况仲裁与持久化
+	# 8. 路况仲裁与持久化
     local max_udp_pages=$(( max_udp_mb * 256 ))
     safe_rtt "$dyn_buf" "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW}Mbps"
     info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 ))MB"
 	
-    # 阶段四： BBR 探测与内核锐化 (递进式锁定最强算法)
+    # 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
     local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
     local avail=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "cubic")
     if [[ "$avail" =~ "bbr3" ]]; then tcp_cca="bbr3"; succ "检测到 BBRv3，激活极致响应模式"
@@ -511,7 +511,7 @@ optimize_system() {
     else warn "内核不支持 BBR，切换至高兼容 Cubic 模式"; fi
     if sysctl net.core.default_qdisc 2>/dev/null | grep -q "fq"; then info "FQ 调度器已就绪"; else info "准备激活 FQ 调度器..."; fi
 	
-    # 阶段五： 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
+    # 阶段四： 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）  
     local SYSCTL_FILE="/etc/sysctl.d/99-sing-box.conf"
     cat > "$SYSCTL_FILE" <<SYSCTL
 # === 一、 基础转发与内存管理 (含 ZRAM 与 OOM 策略) ===
