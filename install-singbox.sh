@@ -718,6 +718,7 @@ create_config() {
     "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}",
+	"tcp_fast_open": true,
 	"socket_option": {"rcvbuf": $cur_buf, "sndbuf": $cur_buf, "priority": 7}
   }],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
@@ -899,7 +900,8 @@ create_sb_tool() {
 set -uo pipefail 
 CPU_CORE='$CPU_CORE'
 SBOX_CORE='$SBOX_CORE'
-SBOX_G_BUF='${g_buf:-}'
+VAR_HY2_BW='${VAR_HY2_BW:-200}'
+SBOX_G_BUF='${SBOX_G_BUF:-2097152}'
 SBOX_GOLIMIT='$SBOX_GOLIMIT'
 SBOX_GOGC='${SBOX_GOGC:-100}'
 SBOX_MEM_MAX='$SBOX_MEM_MAX'
