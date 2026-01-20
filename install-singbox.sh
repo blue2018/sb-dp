@@ -227,25 +227,25 @@ apply_initcwnd_optimization() {
     local silent="${1:-false}" info gw dev mtu mss opts
     command -v ip >/dev/null || return 0
     local current_route=$(ip route show default | head -n1)
-    # 幂等性检查：若已包含 initcwnd 15 则跳过
+    # 1. 幂等性检查：若已包含 initcwnd 15 则跳过，防止重复修改路由表导致开销
     echo "$current_route" | grep -q "initcwnd 15" && { [[ "$silent" == "false" ]] && info "InitCWND 已优化，跳过"; INITCWND_DONE="true"; return 0; }
 
-    # 提取核心路由参数
-    gw=$(echo "$current_route" | grep -oE 'via [^ ]+' | awk '{print $2}')
-    dev=$(echo "$current_route" | grep -oE 'dev [^ ]+' | awk '{print $2}')
-    mtu=$(echo "$current_route" | grep -oE 'mtu [0-9]+' | awk '{print $2}' || echo 1500)
-    mss=$((mtu - 40))
+    # 2. 核心参数提取：使用更严谨的正则匹配，优先对齐物理画像 MTU
+    gw=$(echo "$current_route" | grep -oP 'via \K\S+')
+    dev=$(echo "$current_route" | grep -oP 'dev \K\S+')
+    local target_mtu="${REAL_MTU_FACTORS:-$(echo "$current_route" | grep -oP 'mtu \K[0-9]+' || echo 1500)}"
+    mss=$((target_mtu - 40))
     opts="initcwnd 15 initrwnd 15 advmss $mss"
 
-    # 执行修改（逻辑依然采用你的高效尝试链）
+    # 3. 执行修改：通过“尝试链”兼容各种复杂的网络配置（含网关/点对点/无网关环境）
     if { [ -n "$gw" ] && [ -n "$dev" ] && ip route change default via "$gw" dev "$dev" $opts 2>/dev/null; } || \
        { [ -n "$gw" ] && [ -n "$dev" ] && ip route replace default via "$gw" dev "$dev" $opts 2>/dev/null; } || \
        { [ -n "$dev" ] && ip route replace default dev "$dev" $opts 2>/dev/null; } || \
        ip route change default $opts 2>/dev/null; then
         INITCWND_DONE="true"
-        [[ "$silent" == "false" ]] && succ "InitCWND 优化成功 (15/MSS $mss)"
+        [[ "$silent" == "false" ]] && info "InitCWND 优化成功 (15/MSS $mss)"
     else
-        [[ "$silent" == "false" ]] && warn "InitCWND 修改失败（内核或容器限制）"
+        [[ "$silent" == "false" ]] && warn "InitCWND 修改失败（内核或容器权限限制）"
     fi
 }
 
