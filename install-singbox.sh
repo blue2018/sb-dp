@@ -369,10 +369,8 @@ apply_nic_core_boost() {
     local IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
     [ -z "$IFACE" ] && return 0
     local real_c="$1" bgt="$2" usc="$3"
-	# 物理层修正：联动画像锁定 MTU，消除链路分片延迟 (OpenVZ/LXC 兼容)
-    if [ -n "$REAL_MTU_FACTORS" ] && [ -d "/sys/class/net/$IFACE" ]; then
-        ip link set dev "$IFACE" mtu "$REAL_MTU_FACTORS" >/dev/null 2>&1 || true
-    fi
+	# 物理 MTU 锁定：锁定网卡上限，消除链路分片延迟 (OpenVZ/LXC 兼容)
+	[ -n "$REAL_MTU_FACTORS" ] && [ -d "/sys/class/net/$IFACE" ] && ip link set dev "$IFACE" mtu "$REAL_MTU_FACTORS" >/dev/null 2>&1 || true
 	# 2. 内核软中断预算优化
     sysctl -w net.core.netdev_budget="$bgt" net.core.netdev_budget_usecs="$usc" >/dev/null 2>&1 || true
     # 3. 驱动识别与发送队列 (TXQLEN) 动态调整
@@ -671,7 +669,6 @@ create_config() {
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-    local frag_size=$(( ${REAL_MTU_FACTORS:-1350} - 28 ))   # 计算分片大小，对齐物理 MTU，消除 UDP 黑洞与分片延迟
 	local mem_total=$(probe_memory_total); : ${mem_total:=64}
 	local timeout=$( [ "$mem_total" -ge 450 ] && echo "60s" || { [ "$mem_total" -ge 200 ] && echo "50s" || { [ "$mem_total" -ge 100 ] && echo "40s" || echo "30s"; }; } )
     
@@ -710,7 +707,6 @@ create_config() {
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
     "udp_fragment": true,
-	"udp_fragment_size": $frag_size,
     "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
