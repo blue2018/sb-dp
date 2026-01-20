@@ -366,9 +366,7 @@ apply_nic_core_boost() {
     # 1. 寻找默认出口网卡
     local IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
     [ -z "$IFACE" ] && return 0
-    local real_c="$1" bgt="$2" usc="$3"
-	# 锁定网卡上限，消除链路分片延迟 (MTU能改则改，不能改则靠内核自适应)
-	
+    local real_c="$1" bgt="$2" usc="$3"	
 	# 2. 内核软中断预算优化
     sysctl -w net.core.netdev_budget="$bgt" net.core.netdev_budget_usecs="$usc" >/dev/null 2>&1 || true
     # 3. 驱动识别与发送队列 (TXQLEN) 动态调整
