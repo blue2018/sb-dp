@@ -415,7 +415,7 @@ optimize_system() {
     local swappiness_val="${SWAPPINESS_VAL:-10}" busy_poll_val="${BUSY_POLL_VAL:-0}"
     
     setup_zrm_swap "$mem_total"
-    info "系统画像: CPU核心=${real_c}核 | 系统内存=${mem_total}MB | 平均延迟=${RTT_AVG}ms | RTT补偿=${REAL_RTT_FACTORS}ms | 丢包补偿=${LOSS_COMPENSATION}%"
+	info "系统画像: CPU核心=${real_c}核 | 系统内存=${mem_total}mb | 平均延迟=${RTT_AVG}ms | RTT补偿=${REAL_RTT_FACTORS}ms | 丢包补偿=${LOSS_COMPENSATION}%"
 
     # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
