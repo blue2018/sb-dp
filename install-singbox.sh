@@ -370,16 +370,7 @@ apply_nic_core_boost() {
     [ -z "$IFACE" ] && return 0
     local real_c="$1" bgt="$2" usc="$3"
 	# 锁定网卡上限，消除链路分片延迟 (MTU能改则改，不能改则靠内核自适应)
-	if [ -d "/sys/class/net/$IFACE" ]; then
-	    local tm="${REAL_MTU_FACTORS:-1350}"
-	    if ip link set dev "$IFACE" mtu "$tm" >/dev/null 2>&1; then
-	        succ "MTU 已锁定为 $tm"
-	    else
-	        ip link set dev "$IFACE" mtu 1500 >/dev/null 2>&1 || true
-	        sysctl -w net.ipv4.tcp_mtu_probing=1 >/dev/null 2>&1 || true
-	        warn "MTU无法修改，已启用内核自适应探测"
-	    fi
-	fi
+	
 	# 2. 内核软中断预算优化
     sysctl -w net.core.netdev_budget="$bgt" net.core.netdev_budget_usecs="$usc" >/dev/null 2>&1 || true
     # 3. 驱动识别与发送队列 (TXQLEN) 动态调整
