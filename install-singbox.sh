@@ -10,7 +10,7 @@ SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";         SBOX_MEM_MAX="55M";       SBOX
 SBOX_MEM_HIGH="42M";     CPU_CORE="1";            INITCWND_DONE="false";    VAR_DEF_MEM=""
 VAR_UDP_RMEM="";         VAR_UDP_WMEM="";         VAR_SYSTEMD_NICE="";      VAR_HY2_BW="200";    RAW_SALA=""
 VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";     BUSY_POLL_VAL="0";        VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
-REAL_RTT_FACTORS="130";  LOSS_COMPENSATION="100"; REAL_MTU_FACTORS="1350"
+REAL_RTT_FACTORS="130";  LOSS_COMPENSATION="100"
 
 # TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
@@ -191,8 +191,6 @@ probe_network_rtt() {
     REAL_RTT_FACTORS=$(( RTT_VAL + 100 ))   # 延迟补偿：实测值 + 100ms (平衡握手开销)
 	# 丢包补偿：每 1% 丢包增加 5% 缓冲区冗余，最高 200%
     LOSS_COMPENSATION=$(( 100 + loss_val * 5 )); [ "$LOSS_COMPENSATION" -gt 200 ] && LOSS_COMPENSATION=200
-    local mem_total=$(probe_memory_total)   # MTU 画像：基于内存资源确定物理分片界限
-    [ "$mem_total" -le 128 ] && REAL_MTU_FACTORS="1280" || REAL_MTU_FACTORS="1350"
 	# 输出原始 RTT 供脚本其它函数引用
     echo "$RTT_VAL"
 }
@@ -227,25 +225,25 @@ apply_initcwnd_optimization() {
     local silent="${1:-false}" info gw dev mtu mss opts
     command -v ip >/dev/null || return 0
     local current_route=$(ip route show default | head -n1)
-    # 1. 幂等性检查：若已包含 initcwnd 15 则跳过，防止重复修改路由表导致开销
+    # 幂等性检查：若已包含 initcwnd 15 则跳过
     echo "$current_route" | grep -q "initcwnd 15" && { [[ "$silent" == "false" ]] && info "InitCWND 已优化，跳过"; INITCWND_DONE="true"; return 0; }
 
-    # 2. 核心参数提取：使用更严谨的正则匹配，优先对齐物理画像 MTU
-    gw=$(echo "$current_route" | grep -oP 'via \K\S+')
-    dev=$(echo "$current_route" | grep -oP 'dev \K\S+')
-    local target_mtu="${REAL_MTU_FACTORS:-$(echo "$current_route" | grep -oP 'mtu \K[0-9]+' || echo 1500)}"
-    mss=$((target_mtu - 40))
+    # 提取核心路由参数
+    gw=$(echo "$current_route" | grep -oE 'via [^ ]+' | awk '{print $2}')
+    dev=$(echo "$current_route" | grep -oE 'dev [^ ]+' | awk '{print $2}')
+    mtu=$(echo "$current_route" | grep -oE 'mtu [0-9]+' | awk '{print $2}' || echo 1500)
+    mss=$((mtu - 40))
     opts="initcwnd 15 initrwnd 15 advmss $mss"
 
-    # 3. 执行修改：通过“尝试链”兼容各种复杂的网络配置（含网关/点对点/无网关环境）
+    # 执行修改（逻辑依然采用你的高效尝试链）
     if { [ -n "$gw" ] && [ -n "$dev" ] && ip route change default via "$gw" dev "$dev" $opts 2>/dev/null; } || \
        { [ -n "$gw" ] && [ -n "$dev" ] && ip route replace default via "$gw" dev "$dev" $opts 2>/dev/null; } || \
        { [ -n "$dev" ] && ip route replace default dev "$dev" $opts 2>/dev/null; } || \
        ip route change default $opts 2>/dev/null; then
         INITCWND_DONE="true"
-        [[ "$silent" == "false" ]] && info "InitCWND 优化成功 (15/MSS $mss)"
+        [[ "$silent" == "false" ]] && succ "InitCWND 优化成功 (15/MSS $mss)"
     else
-        [[ "$silent" == "false" ]] && warn "InitCWND 修改失败（内核或容器权限限制）"
+        [[ "$silent" == "false" ]] && warn "InitCWND 修改失败（内核或容器限制）"
     fi
 }
 
@@ -404,7 +402,7 @@ apply_nic_core_boost() {
             [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
         done
     fi
-	info "NIC 优化 → 网卡:$IFACE | MTU:$REAL_MTU_FACTORS | QLen:$target_qlen | 中断延迟:${tuned_usc:-default}us"
+	info "NIC 优化 → 网卡:$IFACE | QLen:$target_qlen | 中断延迟:${tuned_usc:-default}us"
 }
 
 # ==========================================
@@ -910,7 +908,6 @@ RAW_IP6='${RAW_IP6:-}'
 IS_V6_OK='${IS_V6_OK:-false}'
 REAL_RTT_FACTORS='$REAL_RTT_FACTORS'
 LOSS_COMPENSATION='$LOSS_COMPENSATION'
-REAL_MTU_FACTORS='$REAL_MTU_FACTORS'
 EOF
 
     # 导出函数
