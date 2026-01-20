@@ -665,8 +665,8 @@ create_config() {
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-	local mem_total=$(probe_memory_total); : ${mem_total:=64}
-	local timeout=$( [ "$mem_total" -ge 450 ] && echo "60s" || { [ "$mem_total" -ge 200 ] && echo "50s" || { [ "$mem_total" -ge 100 ] && echo "40s" || echo "30s"; }; } )
+	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
+	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
     # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
