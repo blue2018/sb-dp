@@ -717,14 +717,14 @@ EOF
 # 服务配置
 # ==========================================
 setup_service() {
-    local CPU_N="$CPU_CORE" core_range=""
+    local real_c="$CPU_CORE" core_range=""
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
     local cur_nice="${VAR_SYSTEMD_NICE:--5}"
     local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"  
     local mem_total=$(probe_memory_total); local io_prio=2
-    [ "$CPU_N" -le 1 ] && core_range="0" || core_range="0-$((CPU_N - 1))"
-    info "配置服务 (核心: $CPU_N | 绑定: $core_range | 权重: $cur_nice)..."
+    [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
+    info "配置服务 (核心: $real_c | 绑定: $core_range | 权重: $cur_nice)..."
     
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
@@ -761,9 +761,9 @@ EOF
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
         
 		[ "$mem_total" -lt 200 ] && io_prio=4
-        [ "$io_class" = "realtime" ] && [ "$mem_total" -ge 450 ] && io_prio=0
+        [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
         local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
-        local cpu_quota=$((CPU_N * 100))
+        local cpu_quota=$((real_c * 100))
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100        
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
