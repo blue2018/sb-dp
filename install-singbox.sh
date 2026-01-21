@@ -722,7 +722,7 @@ setup_service() {
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
     local cur_nice="${VAR_SYSTEMD_NICE:--5}"
     local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"  
-    local mem_total=$(probe_memory_total)
+    local mem_total=$(probe_memory_total); local io_prio=2
     [ "$CPU_N" -le 1 ] && core_range="0" || core_range="0-$((CPU_N - 1))"
     info "配置服务 (核心: $CPU_N | 绑定: $core_range | 权重: $cur_nice)..."
     
@@ -730,7 +730,7 @@ setup_service() {
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
         local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
         if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
-            local io_prio=2; [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
+            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
             exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
         fi
         cat > /etc/init.d/sing-box <<EOF
@@ -751,7 +751,6 @@ rc_nice="$cur_nice"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
 start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
-# 【保留】稳健的延时，确保 Hysteria 端口完全释放后执行内核优化
 start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
 EOF
         chmod +x /etc/init.d/sing-box
@@ -760,7 +759,7 @@ EOF
         local mem_config=""
         [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
-        local io_prio=2
+        
 		[ "$mem_total" -lt 200 ] && io_prio=4
         [ "$io_class" = "realtime" ] && [ "$mem_total" -ge 450 ] && io_prio=0
         local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
