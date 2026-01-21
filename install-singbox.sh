@@ -721,7 +721,7 @@ setup_service() {
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
     local cur_nice="${VAR_SYSTEMD_NICE:--5}"
-    local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"  
+    local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"  
     local mem_total=$(probe_memory_total)
     [ "$CPU_N" -le 1 ] && core_range="0" || core_range="0-$((CPU_N - 1))"
     info "配置服务 (核心: $CPU_N | 绑定: $core_range | 权重: $cur_nice)..."
@@ -751,6 +751,7 @@ rc_nice="$cur_nice"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
 start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
+# 【保留】稳健的延时，确保 Hysteria 端口完全释放后执行内核优化
 start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
 EOF
         chmod +x /etc/init.d/sing-box
@@ -759,12 +760,10 @@ EOF
         local mem_config=""
         [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
-        local io_config=""
-        if [ "$mem_total" -ge 200 ]; then
-            [ "$io_class" = "realtime" ] && [ "$mem_total" -ge 450 ] && \
-                io_config="-IOSchedulingClass=realtime"$'\n'"-IOSchedulingPriority=0" || \
-                io_config="-IOSchedulingClass=best-effort"$'\n'"-IOSchedulingPriority=2"
-        else io_config="-IOSchedulingClass=best-effort"$'\n'"-IOSchedulingPriority=4"; fi
+        local io_prio=2
+		[ "$mem_total" -lt 200 ] && io_prio=4
+        [ "$io_class" = "realtime" ] && [ "$mem_total" -ge 450 ] && io_prio=0
+        local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
         local cpu_quota=$((CPU_N * 100))
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100        
         cat > /etc/systemd/system/sing-box.service <<EOF
@@ -798,16 +797,21 @@ TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload && systemctl enable sing-box --now >/dev/null 2>&1 || true
+
+        systemctl daemon-reload && systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || true
     fi
     
-    sleep 2; local pid=""
-    [ "$OS" = "alpine" ] && pid=$(pidof sing-box | awk '{print $1}') || pid=$(systemctl show -p MainPID --value sing-box 2>/dev/null | grep -E -v '^0$|^$' || echo "")
+    local pid=""
+	for i in 1 2 3 4 5; do 
+        pid=$(pidof sing-box | awk '{print $1}')
+        [ -n "$pid" ] && break || sleep 0.4
+    done
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
-        local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null); local ma_mb=$(( ${ma:-0} / 1024 ))
+        local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
+        local ma_mb=$(( ${ma:-0} / 1024 ))
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
     else 
-        err "sing-box 启动失败，最近日志："; [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 5 || tail -n 5 /var/log/messages 2>/dev/null || echo "无法获取系统日志"; } || { journalctl -u sing-box -n 5 --no-pager 2>/dev/null || echo "无法获取服务日志"; }
+        err "sing-box 启动失败，最近日志："; [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 5 || tail -n 5 /var/log/messages 2>/dev/null; } || { journalctl -u sing-box -n 5 --no-pager 2>/dev/null; }
         echo -e "\033[1;33m[配置自检]\033[0m"; /usr/bin/sing-box check -c /etc/sing-box/config.json || true; exit 1
     fi
 }
