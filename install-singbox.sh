@@ -592,150 +592,6 @@ SYSCTL
 	else sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true; fi
 }
 
-# 检测 WARP 可用性
-check_warp_available() {
-    command -v wg >/dev/null 2>&1 || return 1
-    [ -f /etc/wireguard/wgcf.conf ] || return 1
-    return 0
-}
-
-# 安装 WireGuard 工具（仅 wg-quick，无守护进程）
-install_warp_minimal() {
-    info "正在部署 WARP 轻量模块..."
-    
-    # 1. 安装 WireGuard 工具链
-    case "$OS" in
-        alpine) 
-            apk add --no-cache wireguard-tools curl jq >/dev/null 2>&1
-            # Alpine 特殊处理：根据内核版本安装对应模块
-            local kernel_flavor=$(uname -r | grep -oE '(virt|lts)' || echo "virt")
-            apk add --no-cache "wireguard-$kernel_flavor" >/dev/null 2>&1
-            ;;
-        debian) 
-            apt-get install -y --no-install-recommends wireguard-tools curl jq >/dev/null 2>&1 
-            ;;
-        redhat) 
-            local M=$(command -v dnf || echo "yum")
-            $M install -y wireguard-tools curl jq >/dev/null 2>&1 
-            ;;
-    esac
-    
-    # 2. 检查并加载内核模块
-    if ! lsmod | grep -q wireguard; then
-        if ! modprobe wireguard 2>/dev/null; then
-            warn "首次加载失败，尝试内核模块修复..."
-            case "$OS" in
-                alpine) 
-                    # Alpine 深度修复：强制重装内核模块
-                    apk del wireguard-virt wireguard-lts >/dev/null 2>&1 || true
-                    local running_kernel=$(uname -r)
-                    if echo "$running_kernel" | grep -q "virt"; then
-                        apk add --no-cache wireguard-virt >/dev/null 2>&1
-                    elif echo "$running_kernel" | grep -q "lts"; then
-                        apk add --no-cache wireguard-lts >/dev/null 2>&1
-                    else
-                        # 回退方案：尝试所有可能的包
-                        apk add --no-cache wireguard-virt >/dev/null 2>&1 || \
-                        apk add --no-cache wireguard-lts >/dev/null 2>&1
-                    fi
-                    # 更新模块依赖
-                    depmod -a 2>/dev/null || true
-                    ;;
-                debian) 
-                    apt-get install -y linux-headers-$(uname -r) wireguard-dkms >/dev/null 2>&1 
-                    ;;
-            esac
-            
-            # 最终尝试加载
-            if ! modprobe wireguard 2>/dev/null; then
-                err "WireGuard 模块加载失败，可能原因："
-                echo "  1. 内核不支持（部分 OpenVZ/LXC 容器限制）"
-                echo "  2. 内核版本过旧（需 >= 5.6）"
-                echo "  3. 容器权限不足（需 CAP_NET_ADMIN）"
-                return 1
-            fi
-        fi
-    fi
-    
-    succ "WireGuard 内核模块已加载"
-    
-    # 3. 获取 WARP 配置
-    local WARP_KEY=$(wg genkey)
-    local WARP_PUB=$(echo "$WARP_KEY" | wg pubkey)
-    local WARP_DATA=$(curl -sL --max-time 10 "https://api.cloudflareclient.com/v0a2158/reg" \
-        -H "Content-Type: application/json" \
-        -d "{\"install_id\":\"\",\"fcm_token\":\"\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"key\":\"$WARP_PUB\",\"type\":\"Android\",\"model\":\"PC\",\"locale\":\"en_US\"}" 2>/dev/null)
-    
-    [ -z "$WARP_DATA" ] && { err "WARP 注册失败"; return 1; }
-    
-    local WARP_ADDR_V4=$(echo "$WARP_DATA" | jq -r '.config.interface.addresses.v4' 2>/dev/null)
-    local WARP_ADDR_V6=$(echo "$WARP_DATA" | jq -r '.config.interface.addresses.v6' 2>/dev/null)
-    local WARP_ENDPOINT=$(echo "$WARP_DATA" | jq -r '.config.peers[0].endpoint.host' 2>/dev/null)
-    local WARP_PEER_PUB=$(echo "$WARP_DATA" | jq -r '.config.peers[0].public_key' 2>/dev/null)
-    
-    # 4. 生成极简配置（按需路由模式）
-    mkdir -p /etc/wireguard
-    cat > /etc/wireguard/wgcf.conf <<WGEOF
-[Interface]
-PrivateKey = $WARP_KEY
-Address = $WARP_ADDR_V4/32, $WARP_ADDR_V6/128
-MTU = 1280
-
-[Peer]
-PublicKey = $WARP_PEER_PUB
-Endpoint = $WARP_ENDPOINT:2408
-AllowedIPs = 104.18.0.0/15, 162.159.0.0/16
-PersistentKeepalive = 25
-WGEOF
-    
-    chmod 600 /etc/wireguard/wgcf.conf
-    succ "WARP 配置已生成（按需路由模式）"
-}
-
-# 启用 WARP
-enable_warp() {
-    if ! check_warp_available; then
-        install_warp_minimal || return 1
-    fi
-    
-    # 启动 WireGuard 接口
-    wg-quick up wgcf >/dev/null 2>&1 || { err "WARP 启动失败"; return 1; }
-    
-    # 添加开机自启
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl enable wg-quick@wgcf >/dev/null 2>&1
-    elif [ "$OS" = "alpine" ]; then
-        cat > /etc/init.d/wgcf <<'WGRC'
-#!/sbin/openrc-run
-depend() { need net; after firewall; }
-start() { wg-quick up wgcf; }
-stop() { wg-quick down wgcf; }
-WGRC
-        chmod +x /etc/init.d/wgcf
-        rc-update add wgcf default >/dev/null 2>&1
-    fi
-    
-    succ "WARP 已激活（内存开销 < 500KB）"
-}
-
-# 禁用 WARP
-disable_warp() {
-    wg-quick down wgcf >/dev/null 2>&1 || true
-    systemctl disable wg-quick@wgcf >/dev/null 2>&1 || true
-    rc-update del wgcf >/dev/null 2>&1 || true
-    info "WARP 已停用"
-}
-
-# 检查 WARP 状态
-check_warp_status() {
-    if ip link show wgcf >/dev/null 2>&1; then
-        local WARP_IP=$(curl -s --interface wgcf --max-time 3 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/ip/ {print $2}')
-        echo -e "\033[1;32m[WARP]\033[0m 已激活 | 出口IP: ${WARP_IP:-检测失败}"
-    else
-        echo -e "\033[1;33m[WARP]\033[0m 未启用"
-    fi
-}
-
 # ==========================================
 # 安装/更新 Sing-box 内核
 # ==========================================
@@ -1027,7 +883,6 @@ create_sb_tool() {
     mkdir -p /etc/sing-box
     local FINAL_SALA=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     local CORE_TMP=$(mktemp) || CORE_TMP="/tmp/core_script_$$.sh"
-    
     # 写入固化变量
     cat > "$CORE_TMP" <<EOF
 #!/usr/bin/env bash
@@ -1056,12 +911,12 @@ REAL_RTT_FACTORS='$REAL_RTT_FACTORS'
 LOSS_COMPENSATION='$LOSS_COMPENSATION'
 EOF
 
-    # 导出函数（新增 WARP 相关函数）
+    # 导出函数
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
 create_config setup_service install_singbox info err warn succ optimize_system \
-apply_userspace_adaptive_profile apply_nic_core_boost setup_zrm_swap safe_rtt \
-check_warp_available install_warp_minimal enable_warp disable_warp check_warp_status)
+apply_userspace_adaptive_profile apply_nic_core_boost \
+setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
 
     for f in "${funcs[@]}"; do
         if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
@@ -1110,84 +965,65 @@ EOF
 
     # 生成交互管理脚本 /usr/local/bin/sb
     local SB_PATH="/usr/local/bin/sb"
-    cat > "$SB_PATH" <<'SBEOF'
+    cat > "$SB_PATH" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
 SBOX_CORE="/etc/sing-box/core_script.sh"
-if [ ! -f "$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
-[[ $# -gt 0 ]] && { /bin/bash "$SBOX_CORE" "$@"; exit 0; }
-source "$SBOX_CORE" --detect-only
+if [ ! -f "\$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
+[[ \$# -gt 0 ]] && { /bin/bash "\$SBOX_CORE" "\$@"; exit 0; }
+source "\$SBOX_CORE" --detect-only
 
 service_ctrl() {
-    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "$1" && return
-    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "$1" sing-box
+    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "\$1" && return
+    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "\$1" sing-box
 }
 
 while true; do
     echo "========================" 
     echo " Sing-box HY2 管理 (sb)"
     echo "------------------------------------------------------"
-    echo " Level: ${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: $([[ "$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
-    check_warp_status
+    echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "------------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
-    echo "4. 更新内核    5. 重启服务    6. WARP管理"
-    echo "7. 卸载脚本    0. 退出"
+    echo "4. 更新内核    5. 重启服务    6. 卸载脚本"
+    echo "0. 退出"
     echo ""  
-    read -r -p "请选择 [0-7]: " opt
-    opt=$(echo "$opt" | xargs echo -n 2>/dev/null || echo "$opt")
-    if [[ -z "$opt" ]] || [[ ! "$opt" =~ ^[0-7]$ ]]; then
-        echo -e "\033[1;31m输入有误 [$opt]，请重新输入\033[0m"; sleep 1; continue
+    read -r -p "请选择 [0-6]: " opt
+    opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
+    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-6]$ ]]; then
+        echo -e "\033[1;31m输入有误 [\$opt]，请重新输入\033[0m"; sleep 1; continue
     fi
-    case "$opt" in
-        1) source "$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
-        2) f="/etc/sing-box/config.json"; old=$(md5sum $f 2>/dev/null)
-           vi $f; if [ "$old" != "$(md5sum $f 2>/dev/null)" ]; then
+    case "\$opt" in
+        1) source "\$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
+        2) f="/etc/sing-box/config.json"; old=\$(md5sum \$f 2>/dev/null)
+           vi \$f; if [ "\$old" != "\$(md5sum \$f 2>/dev/null)" ]; then
                service_ctrl restart && succ "配置已更新，网络画像与防火墙已同步刷新"
            else info "配置未作变更"; fi
            read -r -p $'\n按回车键返回菜单...' ;;
-        3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
-        4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
+        3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
+        4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-        6) # WARP 子菜单
-           while true; do
-               echo -e "\n========== WARP 管理 =========="
-               check_warp_status
-               echo "1. 启用 WARP"
-               echo "2. 停用 WARP"
-               echo "0. 返回主菜单"
-               echo ""
-               read -r -p "请选择: " wopt
-               case "$wopt" in
-                   1) enable_warp; read -r -p $'\n按回车继续...' ;;
-                   2) disable_warp; read -r -p $'\n按回车继续...' ;;
-                   0|"") break ;;
-                   *) echo -e "\033[1;31m无效选项\033[0m"; sleep 1 ;;
-               esac
-           done ;;
-        7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
-           if [ "${cf:-n}" = "y" ] || [ "${cf:-n}" = "Y" ]; then
+        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+           if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
                # 1. 停止并禁用所有服务
                systemctl stop sing-box 2>/dev/null; rc-service sing-box stop 2>/dev/null
                systemctl disable zram-swap.service sing-box.service 2>/dev/null; rc-update del zram-swap sing-box 2>/dev/null
-               # 2. 停用 WARP
-               disable_warp
-               # 3. 清理 ZRAM 与 磁盘 Swap
+               # 2. 清理 ZRAM 与 磁盘 Swap (单行合并逻辑)
                grep -q "/dev/zram0" /proc/swaps && { swapoff /dev/zram0 2>/dev/null; echo 1 > /sys/block/zram0/reset 2>/dev/null; info "ZRAM 已清理"; }
                grep -q "/swapfile" /proc/swaps && { swapoff /swapfile 2>/dev/null; rm -f /swapfile; sed -i '/\/swapfile/d' /etc/fstab 2>/dev/null; info "磁盘 Swap 已清理"; }
-               # 4. 文件一键清理
-               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{zram-swap,sing-box}.service /etc/init.d/{zram-swap,sing-box,wgcf} /etc/sysctl.d/99-sing-box.conf /etc/wireguard/wgcf.conf
-               # 5. 系统恢复并退出
+               # 3. 文件一键清理 (使用大括号扩展压缩)
+               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{zram-swap,sing-box}.service /etc/init.d/{zram-swap,sing-box} /etc/sysctl.d/99-sing-box.conf
+               # 4. 系统恢复并退出
                printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
                sysctl -p >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "卸载完成"; exit 0
            else info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; fi ;;
         0) exit 0 ;;
     esac
 done
-SBEOF
+EOF
 
-    chmod +x "$SB_PATH"
+	chmod +x "$SB_PATH"
     ln -sf "$SB_PATH" "/usr/local/bin/SB" 2>/dev/null || true
 }
 
