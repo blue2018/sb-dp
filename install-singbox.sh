@@ -605,22 +605,59 @@ install_warp_minimal() {
     
     # 1. 安装 WireGuard 工具链
     case "$OS" in
-        alpine) apk add --no-cache wireguard-tools curl jq >/dev/null 2>&1 ;;
-        debian) apt-get install -y --no-install-recommends wireguard-tools curl jq >/dev/null 2>&1 ;;
+        alpine) 
+            apk add --no-cache wireguard-tools curl jq >/dev/null 2>&1
+            # Alpine 特殊处理：根据内核版本安装对应模块
+            local kernel_flavor=$(uname -r | grep -oE '(virt|lts)' || echo "virt")
+            apk add --no-cache "wireguard-$kernel_flavor" >/dev/null 2>&1
+            ;;
+        debian) 
+            apt-get install -y --no-install-recommends wireguard-tools curl jq >/dev/null 2>&1 
+            ;;
         redhat) 
             local M=$(command -v dnf || echo "yum")
-            $M install -y wireguard-tools curl jq >/dev/null 2>&1 ;;
+            $M install -y wireguard-tools curl jq >/dev/null 2>&1 
+            ;;
     esac
     
-    # 2. 检查内核模块
-    if ! modprobe wireguard 2>/dev/null; then
-        warn "内核不支持 WireGuard，尝试安装内核模块..."
-        case "$OS" in
-            alpine) apk add wireguard-lts >/dev/null 2>&1 ;;
-            debian) apt-get install -y linux-headers-$(uname -r) wireguard-dkms >/dev/null 2>&1 ;;
-        esac
-        modprobe wireguard 2>/dev/null || { err "WireGuard 模块加载失败"; return 1; }
+    # 2. 检查并加载内核模块
+    if ! lsmod | grep -q wireguard; then
+        if ! modprobe wireguard 2>/dev/null; then
+            warn "首次加载失败，尝试内核模块修复..."
+            case "$OS" in
+                alpine) 
+                    # Alpine 深度修复：强制重装内核模块
+                    apk del wireguard-virt wireguard-lts >/dev/null 2>&1 || true
+                    local running_kernel=$(uname -r)
+                    if echo "$running_kernel" | grep -q "virt"; then
+                        apk add --no-cache wireguard-virt >/dev/null 2>&1
+                    elif echo "$running_kernel" | grep -q "lts"; then
+                        apk add --no-cache wireguard-lts >/dev/null 2>&1
+                    else
+                        # 回退方案：尝试所有可能的包
+                        apk add --no-cache wireguard-virt >/dev/null 2>&1 || \
+                        apk add --no-cache wireguard-lts >/dev/null 2>&1
+                    fi
+                    # 更新模块依赖
+                    depmod -a 2>/dev/null || true
+                    ;;
+                debian) 
+                    apt-get install -y linux-headers-$(uname -r) wireguard-dkms >/dev/null 2>&1 
+                    ;;
+            esac
+            
+            # 最终尝试加载
+            if ! modprobe wireguard 2>/dev/null; then
+                err "WireGuard 模块加载失败，可能原因："
+                echo "  1. 内核不支持（部分 OpenVZ/LXC 容器限制）"
+                echo "  2. 内核版本过旧（需 >= 5.6）"
+                echo "  3. 容器权限不足（需 CAP_NET_ADMIN）"
+                return 1
+            fi
+        fi
     fi
+    
+    succ "WireGuard 内核模块已加载"
     
     # 3. 获取 WARP 配置
     local WARP_KEY=$(wg genkey)
