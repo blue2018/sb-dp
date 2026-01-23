@@ -696,42 +696,72 @@ create_config() {
     local PORT_HY2="${1:-}"
     local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
-    local ds="ipv4_only"
-    [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # --- 原有端口/密码逻辑 ---
+    # --- 1. 自动获取/生成 Hysteria2 所需参数 ---
+    # 端口处理
     if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
-        else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
+        if [ -f /etc/sing-box/config.json ]; then 
+            PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
+        else 
+            PORT_HY2=$(shuf -i 10000-60000 -n 1)
+        fi
     fi
+    
+    # UUID 密码处理
     local PSK
-    if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
-    elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
-    else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
+    if [ -f /etc/sing-box/config.json ]; then 
+        PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
+    elif [ -f /proc/sys/kernel/random/uuid ]; then 
+        PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
+    else 
+        local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"
+    fi
+    
+    # Salamander 混淆密码处理
     local SALA_PASS=""
-    if [ -f /etc/sing-box/config.json ]; then SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo ""); fi
+    if [ -f /etc/sing-box/config.json ]; then 
+        SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
+    fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # --- WARP 1.12.x 适配逻辑 ---
+    # --- 2. 策略与性能参数 ---
+    local ds="ipv4_only"
+    [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
+    
+    local mem_total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local timeout="30s"
+    [ "$mem_total" -ge 204800 ] && timeout="50s"
+    [ "$mem_total" -ge 460800 ] && timeout="60s"
+
+    # --- 3. WARP 逻辑适配 (1.12.x 兼容模式) ---
     local warp_state=$(cat /etc/sing-box/warp_enabled 2>/dev/null || echo "off")
     local warp_out=""
     local default_outbound="direct-out"
     
     if [ "$warp_state" = "on" ] && [ -f /etc/sing-box/warp_auth.conf ]; then
         source /etc/sing-box/warp_auth.conf
-        warp_out=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"system_interface":false,"local_address":["'$WARP_V4'","'$WARP_V6'"],"private_key":"'$WARP_PRIV'","peer_public_key":"'$WARP_PUB'","mtu":1280}'
+        # 注意：此处必须使用 local_address 配合环境变量，否则该版本会报 address 字段错误
+        warp_out=',{
+            "type": "wireguard",
+            "tag": "warp-out",
+            "server": "engage.cloudflareclient.com",
+            "server_port": 2408,
+            "local_address": ["'"$WARP_V4"'"],
+            "private_key": "'"$WARP_PRIV"'",
+            "peer_public_key": "'"$WARP_PUB"'",
+            "mtu": 1280,
+            "system_interface": false
+        }'
         default_outbound="warp-out"
     fi
 
+    # --- 4. 写入最终 JSON ---
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
   "dns": {
     "servers": [
-      { "tag": "dns-direct", "address": "8.8.8.8", "detour": "direct-out" },
-      { "tag": "dns-remote", "address": "1.1.1.1", "detour": "direct-out" }
+      { "tag": "dns-direct", "address": "8.8.8.8", "detour": "direct-out" }
     ],
     "strategy": "$ds"
   },
@@ -743,8 +773,13 @@ create_config() {
     "users": [ { "password": "$PSK" } ],
     "up_mbps": $cur_bw, "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
-    "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
-    "obfs": {"type": "salamander", "password": "$SALA_PASS"}
+    "tls": {
+      "enabled": true,
+      "alpn": ["h3"],
+      "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+      "key_path": "/etc/sing-box/certs/privkey.pem"
+    },
+    "obfs": { "type": "salamander", "password": "$SALA_PASS" }
   }],
   "outbounds": [
     { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }
@@ -752,9 +787,9 @@ create_config() {
   ],
   "route": {
     "rules": [
-      { "protocol": "dns", "outbound": "dns-direct" },
-      { "outbound": "$default_outbound" }
-    ]
+      { "protocol": "dns", "outbound": "dns-direct" }
+    ],
+    "final": "$default_outbound"
   }
 }
 EOF
@@ -1094,6 +1129,9 @@ EOF
 # ==========================================
 # 主运行逻辑
 # ==========================================
+# ==========================================
+# 主运行逻辑 (精简 Alpine 适配版)
+# ==========================================
 detect_os
 [ "$(id -u)" != "0" ] && err "请使用 root 运行" && exit 1
 install_dependencies
@@ -1105,9 +1143,27 @@ USER_PORT=$(prompt_for_port)
 optimize_system
 install_singbox "install"
 generate_cert
+
+# 生成配置
 create_config "$USER_PORT"
 create_sb_tool
 setup_service
+
+# --- 核心修复：针对 Alpine 的环境变量劫持 ---
+if [ -f /etc/init.d/sing-box ]; then
+    # 注入权限变量到启动脚本的头部
+    if ! grep -q "ENABLE_DEPRECATED_WIREGUARD_OUTBOUND" /etc/init.d/sing-box; then
+        sed -i '2i export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true' /etc/init.d/sing-box
+    fi
+    rc-update add sing-box default >/dev/null 2>&1
+    rc-service sing-box restart
+else
+    # 针对 Debian/Ubuntu 系统
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl enable sing-box >/dev/null 2>&1
+    systemctl restart sing-box
+fi
+
 get_env_data
 echo -e "\n\033[1;34m==========================================\033[0m"
 display_system_status
