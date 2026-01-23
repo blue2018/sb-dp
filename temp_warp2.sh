@@ -595,23 +595,34 @@ SYSCTL
 # 自动注册 WARP 账号（仅在开启时调用一次）
 register_warp() {
     local auth_file="/etc/sing-box/warp_auth.conf"
-    [ -f "$auth_file" ] && source "$auth_file" && return 0
+    [ -f "$auth_file" ] && { source "$auth_file" 2>/dev/null; [ -z "${WARP_PRIV:-}" ] || return 0; }
     
     info "正在申请 WARP 账号..."
+    local priv_key=$(openssl genpkey -algorithm ed25519 -outform DER | tail -c 32 | base64)
     local res=$(curl -sX POST "https://api.cloudflareclient.com/v0a1922/reg" \
         -H "Content-Type: application/json" \
-        -d '{"install_id":"","key":"'"$(openssl genpkey -algorithm ed25519 -outform DER | tail -c 32 | base64)"'","tos":"2020-04-01T00:00:00.000Z"}' 2>/dev/null)
+        -d '{"install_id":"","key":"'"$priv_key"'","tos":"2020-04-01T00:00:00.000Z"}' 2>/dev/null)
     
-    local priv_key=$(echo "$res" | jq -r '.config.interface.private_key // empty')
-    [ -z "$priv_key" ] && { err "WARP 注册失败"; return 1; }
+    # 使用更精确的 jq 路径提取 (根据你刚才返回的结构)
+    local peer_pub=$(echo "$res" | jq -r '.config.peers[0].public_key // empty')
+    local v4_addr=$(echo "$res" | jq -r '.config.interface.addresses.v4 // empty')
+    local v6_addr=$(echo "$res" | jq -r '.config.interface.addresses.v6 // empty')
 
-    cat > "$auth_file" <<EOF
+    # 只要私钥和 V4 地址拿到了，就视为成功
+    if [ -n "$priv_key" ] && [ -n "$v4_addr" ] && [ "$v4_addr" != "null" ]; then
+        cat > "$auth_file" <<EOF
 WARP_PRIV='$priv_key'
-WARP_PUB='$(echo "$res" | jq -r '.config.peers[0].public_key')'
-WARP_V4='$(echo "$res" | jq -r '.config.interface.addresses.v4')'
-WARP_V6='$(echo "$res" | jq -r '.config.interface.addresses.v6')'
+WARP_PUB='$peer_pub'
+WARP_V4='${v4_addr}/32'
+WARP_V6='${v6_addr}/128'
 EOF
-    source "$auth_file"
+        source "$auth_file"
+        succ "WARP 账号注册成功 ($WARP_V4)"
+        return 0
+    else
+        err "WARP 注册解析失败，请检查 jq 兼容性"
+        return 1
+    fi
 }
 
 # ==========================================
