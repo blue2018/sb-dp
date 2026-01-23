@@ -697,51 +697,63 @@ create_config() {
     local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     
-    # --- 基础参数自动处理 ---
+    # --- 1. 参数自动获取 ---
+    # 如果没传端口，尝试从旧配置读取或随机生成
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then 
-            PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
-        else 
-            PORT_HY2=$(shuf -i 10000-60000 -n 1)
+            PORT_HY2=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json)
         fi
+        [ -z "$PORT_HY2" ] && PORT_HY2=$(shuf -i 10000-60000 -n 1)
     fi
-    local PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "782bd7bf-b133-4bca-8b3d-e3bd5bda95f9")
-    local SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "n1AJCt66HEBkCFYd")
+    
+    # 读取或生成密码 (UUID)
+    local PSK=$(jq -r '.inbounds[0].users[0].password // empty' /etc/sing-box/config.json 2>/dev/null)
+    if [ -z "$PSK" ]; then
+        [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
+        [ -z "$PSK" ] && PSK="782bd7bf-b133-4bca-8b3d-e3bd5bda95f9"
+    fi
 
-    local ds="ipv4_only"
-    [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
+    # 读取或生成混淆密码
+    local SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null)
+    [ -z "$SALA_PASS" ] && SALA_PASS="n1AJCt66HEBkCFYd"
 
-    # --- WARP 1.12.x 现代语法逻辑 ---
+    # --- 2. WARP 核心逻辑 (1.12.x 纯净版) ---
     local warp_state=$(cat /etc/sing-box/warp_enabled 2>/dev/null || echo "off")
     local warp_out=""
     local default_outbound="direct-out"
     
     if [ "$warp_state" = "on" ] && [ -f /etc/sing-box/warp_auth.conf ]; then
         source /etc/sing-box/warp_auth.conf
-        # 核心变动：放弃 server 字段，改用 endpoint 配合 peers 数组
+        # 【重点】这里使用了 1.12.x 标准语法：
+        # 1. 放弃 endpoint/server 字段，全部放入 peers 数组
+        # 2. 直接使用 IP (162.159.192.1) 避免 DNS 故障
+        # 3. 使用 address 替代 local_address
         warp_out=',{
             "type": "wireguard",
             "tag": "warp-out",
-            "local_address": ["'"$WARP_V4"'"],
+            "address": ["'"$WARP_V4"'"],
             "private_key": "'"$WARP_PRIV"'",
             "peers": [{
-                "address": "engage.cloudflareclient.com",
-                "port": 2408,
+                "server": "162.159.192.1", 
+                "server_port": 2408,
                 "public_key": "'"$WARP_PUB"'"
             }],
             "mtu": 1280,
             "system_interface": false
         }'
+        # 强制所有流量走 WARP
         default_outbound="warp-out"
     fi
 
-    # --- 写入 JSON ---
+    # --- 3. 写入配置文件 ---
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal" },
   "dns": {
-    "servers": [{ "tag": "dns-direct", "address": "8.8.8.8", "detour": "direct-out" }],
-    "strategy": "$ds"
+    "servers": [
+      { "tag": "google", "address": "8.8.8.8", "detour": "direct-out" }
+    ],
+    "strategy": "ipv4_only"
   },
   "inbounds": [{
     "type": "hysteria2",
@@ -759,13 +771,12 @@ create_config() {
     "obfs": { "type": "salamander", "password": "$SALA_PASS" }
   }],
   "outbounds": [
-    { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }
+    { "type": "direct", "tag": "direct-out" }
     ${warp_out}
   ],
   "route": {
     "rules": [
-      { "protocol": "dns", "outbound": "dns-direct" },
-      { "outbound": "$default_outbound" }
+      { "protocol": "dns", "outbound": "direct-out" }
     ],
     "final": "$default_outbound"
   }
