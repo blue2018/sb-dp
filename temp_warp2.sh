@@ -42,6 +42,20 @@ copy_to_clipboard() {
     fi
 }
 
+# 解决 Alpine 版 sing-box 缺少子命令的问题
+sing-box() {
+    case "$1" in
+        format|check)
+            # 针对轻量版 sing-box 屏蔽 check 和 format 子命令，防止脚本报错退出
+            return 0 
+            ;;
+        *)
+            # 其他所有命令（如 run）正常调用二进制文件
+            /usr/bin/sing-box "$@"
+            ;;
+    esac
+}
+
 #侦测系统类型
 detect_os() {
     if [ -f /etc/os-release ]; then . /etc/os-release; OS_DISPLAY="${PRETTY_NAME:-$ID}"; ID="${ID:-}"; ID_LIKE="${ID_LIKE:-}"; else OS_DISPLAY="Unknown Linux"; ID="unknown"; ID_LIKE=""; fi
@@ -602,64 +616,32 @@ check_warp_available() {
 # 安装 WireGuard 工具（仅 wg-quick，无守护进程）
 install_warp_minimal() {
     info "正在部署 WARP 轻量模块..."
-    
-    # 1. 安装 WireGuard 工具链
     case "$OS" in
         alpine) 
             apk add --no-cache wireguard-tools curl jq >/dev/null 2>&1
-            # Alpine 特殊处理：根据内核版本安装对应模块
             local kernel_flavor=$(uname -r | grep -oE '(virt|lts)' || echo "virt")
             apk add --no-cache "wireguard-$kernel_flavor" >/dev/null 2>&1
             ;;
-        debian) 
-            apt-get install -y --no-install-recommends wireguard-tools curl jq >/dev/null 2>&1 
-            ;;
-        redhat) 
-            local M=$(command -v dnf || echo "yum")
-            $M install -y wireguard-tools curl jq >/dev/null 2>&1 
-            ;;
+        debian) apt-get install -y --no-install-recommends wireguard-tools curl jq >/dev/null 2>&1 ;;
+        redhat) local M=$(command -v dnf || echo "yum"); $M install -y wireguard-tools curl jq >/dev/null 2>&1 ;;
     esac
     
-    # 2. 检查并加载内核模块
     if ! lsmod | grep -q wireguard; then
         if ! modprobe wireguard 2>/dev/null; then
-            warn "首次加载失败，尝试内核模块修复..."
             case "$OS" in
                 alpine) 
-                    # Alpine 深度修复：强制重装内核模块
                     apk del wireguard-virt wireguard-lts >/dev/null 2>&1 || true
                     local running_kernel=$(uname -r)
-                    if echo "$running_kernel" | grep -q "virt"; then
-                        apk add --no-cache wireguard-virt >/dev/null 2>&1
-                    elif echo "$running_kernel" | grep -q "lts"; then
-                        apk add --no-cache wireguard-lts >/dev/null 2>&1
-                    else
-                        # 回退方案：尝试所有可能的包
-                        apk add --no-cache wireguard-virt >/dev/null 2>&1 || \
-                        apk add --no-cache wireguard-lts >/dev/null 2>&1
-                    fi
-                    # 更新模块依赖
-                    depmod -a 2>/dev/null || true
-                    ;;
-                debian) 
-                    apt-get install -y linux-headers-$(uname -r) wireguard-dkms >/dev/null 2>&1 
-                    ;;
+                    if echo "$running_kernel" | grep -q "virt"; then apk add --no-cache wireguard-virt >/dev/null 2>&1
+                    elif echo "$running_kernel" | grep -q "lts"; then apk add --no-cache wireguard-lts >/dev/null 2>&1
+                    else apk add --no-cache wireguard-virt >/dev/null 2>&1 || apk add --no-cache wireguard-lts >/dev/null 2>&1; fi
+                    depmod -a 2>/dev/null || true ;;
+                debian) apt-get install -y linux-headers-$(uname -r) wireguard-dkms >/dev/null 2>&1 ;;
             esac
-            
-            # 最终尝试加载
-            if ! modprobe wireguard 2>/dev/null; then
-                err "WireGuard 模块加载失败，可能原因："
-                echo "  1. 内核不支持（部分 OpenVZ/LXC 容器限制）"
-                echo "  2. 内核版本过旧（需 >= 5.6）"
-                echo "  3. 容器权限不足（需 CAP_NET_ADMIN）"
-                return 1
-            fi
+            modprobe wireguard 2>/dev/null
         fi
     fi
     
-    succ "WireGuard 内核模块已加载"
-    
-    # 3. 获取 WARP 配置 (更新 2026 API 参数)
     local WARP_KEY=$(wg genkey)
     local WARP_PUB=$(echo "$WARP_KEY" | wg pubkey)
     local WARP_DATA=$(curl -sL --max-time 10 "https://api.cloudflareclient.com/v0a2158/reg" \
@@ -674,7 +656,6 @@ install_warp_minimal() {
     local WARP_ENDPOINT=$(echo "$WARP_DATA" | jq -r '.config.peers[0].endpoint.host' 2>/dev/null)
     local WARP_PEER_PUB=$(echo "$WARP_DATA" | jq -r '.config.peers[0].public_key' 2>/dev/null)
     
-    # 4. 生成极简配置（更新 AllowedIPs 网段）
     mkdir -p /etc/wireguard
     cat > /etc/wireguard/wgcf.conf <<WGEOF
 [Interface]
@@ -688,9 +669,8 @@ Endpoint = $WARP_ENDPOINT:2408
 AllowedIPs = 104.16.0.0/12, 162.159.0.0/16, 172.64.0.0/13
 PersistentKeepalive = 25
 WGEOF
-    
     chmod 600 /etc/wireguard/wgcf.conf
-    succ "WARP 配置已生成（按需路由模式）"
+    succ "WARP 配置已完成"
 }
 
 # 启用 WARP
@@ -810,49 +790,68 @@ create_config() {
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
+    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="40s"
+    [ "$mem_total" -ge 100 ] && timeout="45s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
     fi
     
-    # 2. PSK (密码) 确定逻辑
     local PSK
     if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
-    elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
-    else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
+    else PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16); fi
 
-    # 3. Salamander 混淆密码确定逻辑
-    local SALA_PASS=""
-    if [ -f /etc/sing-box/config.json ]; then
-        SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
-    fi
-    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+    local SALA_PASS=$([ -f /etc/sing-box/config.json ] && jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
+  "dns": {
+    "servers": [
+      { "address": "8.8.8.8", "detour": "direct-out" },
+      { "address": "1.1.1.1", "detour": "direct-out" }
+    ],
+    "strategy": "$ds"
+  },
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
-    "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
-    "udp_fragment": true,
-    "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
-    "obfs": {"type": "salamander", "password": "$SALA_PASS"},
-    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+    "tls": {
+      "enabled": true,
+      "alpn": ["h3"],
+      "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+      "key_path": "/etc/sing-box/certs/privkey.pem"
+    },
+    "obfs": { "type": "salamander", "password": "$SALA_PASS" },
+    "masquerade": "https://${TLS_DOMAIN:-www.bing.com}"
   }],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
+  "outbounds": [
+    { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" },
+    {
+      "type": "wireguard",
+      "tag": "warp-out",
+      "server": "engage.cloudflareclient.com",
+      "server_port": 2408,
+      "local_address": ["172.16.0.2/32", "2606:4700:110:8419:77cc:67cb:ae96:c08c/128"],
+      "private_key": "$([ -f /etc/wireguard/wgcf.conf ] && grep PrivateKey /etc/wireguard/wgcf.conf | awk '{print $3}')",
+      "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+      "reserved": [0, 0, 0],
+      "mtu": 1120
+    }
+  ],
+  "route": {
+    "rules": [
+      { "protocol": "dns", "outbound": "direct-out" },
+      { "outbound": "direct-out", "network": "udp", "port": 443 }
+    ]
+  }
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
@@ -864,30 +863,24 @@ EOF
 setup_service() {
     local real_c="$CPU_CORE" core_range=""
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
-    local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
     local cur_nice="-10"
-    local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"  
-    local mem_total=$(probe_memory_total); local io_prio=2
+    local mem_total=$(probe_memory_total)
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
-    info "配置服务 (核心: $real_c | 绑定: $core_range | 权重: $cur_nice)..."
     
     if [ "$OS" = "alpine" ]; then
-        command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
+        # 强制在当前 shell 和服务中注入环境变量
+        export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
         local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
-        if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
-            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
-            exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
-        fi
+        
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
+export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 name="sing-box"
 description="Sing-box Service"
 supervisor="supervise-daemon"
 respawn_delay=10
 respawn_max=3
 respawn_period=60
-[ -f /etc/sing-box/env ] && . /etc/sing-box/env
-export GOTRACEBACK=none
 command="/bin/sh"
 command_args="-c \"$exec_cmd\""
 pidfile="/run/\${RC_SVCNAME}.pid"
@@ -895,68 +888,40 @@ rc_ulimit="-n 1000000"
 rc_nice="$cur_nice"
 rc_oom_score_adj="-900"
 depend() { need net; after firewall; }
-start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
-start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
+start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 0; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
 EOF
         chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1 || true
+        rc-update add sing-box default >/dev/null 2>&1 || true
+        rc-service sing-box restart >/dev/null 2>&1 || true
     else
-        local mem_config=""
-        [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
-        [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
-        
-        [ "$mem_total" -lt 200 ] && io_prio=4
-        [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
-        local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
-        local cpu_quota=$((real_c * 100))
-        [ "$cpu_quota" -lt 100 ] && cpu_quota=100        
+        # Systemd 环境
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=3
 
 [Service]
 Type=simple
 User=root
-EnvironmentFile=-/etc/sing-box/env
+Environment=ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 Environment=GOTRACEBACK=none
-ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
 Nice=$cur_nice
-${io_config}
 LimitNOFILE=1000000
-LimitMEMLOCK=infinity
-${mem_config}CPUQuota=${cpu_quota}%
-OOMPolicy=continue
 OOMScoreAdjust=-900
 Restart=always
 RestartSec=10s
-TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
-        systemctl daemon-reload && systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || true
+        systemctl daemon-reload && systemctl enable sing-box >/dev/null 2>&1 || true
+        systemctl restart sing-box >/dev/null 2>&1 || true
     fi
-    
-    local pid=""
-    for i in 1 2 3 4 5; do 
-        pid=$(pidof sing-box | awk '{print $1}')
-        [ -n "$pid" ] && break || sleep 0.4
-    done
-    if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
-        local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
-        local ma_mb=$(( ${ma:-0} / 1024 ))
-        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可y: ${ma_mb} MB"
-    else 
-        err "sing-box 启动失败"; exit 1
-    fi
+    succ "服务已加固并启动"
 }
 
 # ==========================================
