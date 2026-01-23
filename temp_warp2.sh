@@ -592,6 +592,28 @@ SYSCTL
 	else sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true; fi
 }
 
+# 自动注册 WARP 账号（仅在开启时调用一次）
+register_warp() {
+    local auth_file="/etc/sing-box/warp_auth.conf"
+    [ -f "$auth_file" ] && source "$auth_file" && return 0
+    
+    info "正在申请 WARP 账号..."
+    local res=$(curl -sX POST "https://api.cloudflareclient.com/v0a1922/reg" \
+        -H "Content-Type: application/json" \
+        -d '{"install_id":"","key":"'"$(openssl genpkey -algorithm ed25519 -outform DER | tail -c 32 | base64)"'","tos":"2020-04-01T00:00:00.000Z"}' 2>/dev/null)
+    
+    local priv_key=$(echo "$res" | jq -r '.config.interface.private_key // empty')
+    [ -z "$priv_key" ] && { err "WARP 注册失败"; return 1; }
+
+    cat > "$auth_file" <<EOF
+WARP_PRIV='$priv_key'
+WARP_PUB='$(echo "$res" | jq -r '.config.peers[0].public_key')'
+WARP_V4='$(echo "$res" | jq -r '.config.interface.addresses.v4')'
+WARP_V6='$(echo "$res" | jq -r '.config.interface.addresses.v6')'
+EOF
+    source "$auth_file"
+}
+
 # ==========================================
 # 安装/更新 Sing-box 内核
 # ==========================================
@@ -661,37 +683,39 @@ install_singbox() {
 # ==========================================
 create_config() {
     local PORT_HY2="${1:-}"
-	local cur_bw="${VAR_HY2_BW:-200}"
+    local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
+    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
+    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # 1. 端口确定逻辑
+    # --- 原有端口/密码逻辑开始 ---
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
     fi
-    
-    # 2. PSK (密码) 确定逻辑
     local PSK
     if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
     elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
-
-    # 3. Salamander 混淆密码确定逻辑
     local SALA_PASS=""
-    if [ -f /etc/sing-box/config.json ]; then
-        SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
-    fi
+    if [ -f /etc/sing-box/config.json ]; then SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo ""); fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+    # --- 原有逻辑结束 ---
 
-    # 4. 写入 Sing-box 配置文件
+    # WARP 变量处理
+    local warp_state=$(cat /etc/sing-box/warp_enabled 2>/dev/null || echo "off")
+    local warp_out="" warp_rule=""
+    if [ "$warp_state" = "on" ] && register_warp; then
+        warp_out=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"system_interface":false,"interface_address":["'$WARP_V4'","'$WARP_V6'"],"local_address":["'$WARP_V4'","'$WARP_V6'"],"private_key":"'$WARP_PRIV'","peer_public_key":"'$WARP_PUB'","mtu":1280}'
+        warp_rule='{"domain_suffix":["netflix.com","disney.com","googlevideo.com","youtube.com"],"outbound":"warp-out"},{"geoip":["google","telegram"],"outbound":"warp-out"},'
+    fi
+
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
@@ -707,7 +731,8 @@ create_config() {
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
+  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}${warp_out}],
+  "route": { "rules": [ ${warp_rule} {"type": "direct", "tag": "direct-out"} ] }
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
@@ -879,11 +904,15 @@ display_system_status() {
 # ==========================================
 # 管理脚本生成 (最终固化放行版)
 # ==========================================
+# ==========================================
+# 管理脚本生成 (集成 WARP 管理版)
+# ==========================================
 create_sb_tool() {
     mkdir -p /etc/sing-box
     local FINAL_SALA=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     local CORE_TMP=$(mktemp) || CORE_TMP="/tmp/core_script_$$.sh"
-    # 写入固化变量
+    
+    # 1. 写入固化变量
     cat > "$CORE_TMP" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
@@ -911,21 +940,21 @@ REAL_RTT_FACTORS='$REAL_RTT_FACTORS'
 LOSS_COMPENSATION='$LOSS_COMPENSATION'
 EOF
 
-    # 导出函数
+    # 2. 导出所有依赖函数 (包含新增的 register_warp)
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
 create_config setup_service install_singbox info err warn succ optimize_system \
-apply_userspace_adaptive_profile apply_nic_core_boost \
+apply_userspace_adaptive_profile apply_nic_core_boost register_warp \
 setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
 
     for f in "${funcs[@]}"; do
         if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
     done
 
+    # 3. 写入核心管理逻辑
     cat >> "$CORE_TMP" <<'EOF'
 detect_os; set +e
 
-# 自动从配置提取端口并放行
 apply_firewall() {
     local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
     [ -z "$port" ] && return
@@ -963,7 +992,7 @@ EOF
     mv "$CORE_TMP" "$SBOX_CORE"
     chmod 700 "$SBOX_CORE"
 
-    # 生成交互管理脚本 /usr/local/bin/sb
+    # 4. 生成交互管理脚本 /usr/local/bin/sb
     local SB_PATH="/usr/local/bin/sb"
     cat > "$SB_PATH" <<EOF
 #!/usr/bin/env bash
@@ -982,51 +1011,59 @@ while true; do
     echo "========================" 
     echo " Sing-box HY2 管理 (sb)"
     echo "------------------------------------------------------"
-    echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
+    ws=\$(cat /etc/sing-box/warp_enabled 2>/dev/null || echo "off")
+    echo -e " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | WARP: \$([[ "\$ws" == "on" ]] && echo -e "\033[1;32m已启用\033[0m" || echo -e "\033[1;31m已禁用\033[0m")"
     echo "------------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
-    echo "4. 更新内核    5. 重启服务    6. 卸载脚本"
-    echo "0. 退出"
+    echo "4. 更新内核    5. 重启服务    6. WARP 管理"
+    echo "7. 卸载脚本    0. 退出"
     echo ""  
-    read -r -p "请选择 [0-6]: " opt
+    read -r -p "请选择 [0-7]: " opt
     opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
-    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-6]$ ]]; then
+    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-7]\$ ]]; then
         echo -e "\033[1;31m输入有误 [\$opt]，请重新输入\033[0m"; sleep 1; continue
     fi
     case "\$opt" in
-        1) source "\$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
+        1) source "\$SBOX_CORE" --show-only; read -r -p \$'\n按回车键返回菜单...' ;;
         2) f="/etc/sing-box/config.json"; old=\$(md5sum \$f 2>/dev/null)
-           vi \$f; if [ "\$old" != "\$(md5sum \$f 2>/dev/null)" ]; then
-               service_ctrl restart && succ "配置已更新，网络画像与防火墙已同步刷新"
-           else info "配置未作变更"; fi
-           read -r -p $'\n按回车键返回菜单...' ;;
-        3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
-        4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
-        5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+            vi \$f; if [ "\$old" != "\$(md5sum \$f 2>/dev/null)" ]; then
+                service_ctrl restart && succ "配置已更新"
+            else info "配置未作变更"; fi
+            read -r -p \$'\n按回车键返回菜单...' ;;
+        3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p \$'\n按回车键返回菜单...' ;;
+        4) source "\$SBOX_CORE" --update-kernel; read -r -p \$'\n按回车键返回菜单...' ;;
+        5) service_ctrl restart && info "服务已重启"; read -r -p \$'\n按回车键返回菜单...' ;;
+        6) 
+            while true; do
+                curr_ws=\$(cat /etc/sing-box/warp_enabled 2>/dev/null || echo "off")
+                echo -e "\n--- WARP 出站管理 ---"
+                echo -e "当前状态: \$([[ "\$curr_ws" == "on" ]] && echo -e "\033[1;32m已启用\033[0m" || echo -e "\033[1;31m已禁用\033[0m")"
+                echo "1. 启用 WARP 解锁"
+                echo "2. 禁用 WARP 解锁"
+                echo "0. 返回主菜单"
+                read -r -p "选择 [0-2]: " wopt
+                case "\$wopt" in
+                    1) echo "on" > /etc/sing-box/warp_enabled; source "\$SBOX_CORE" --detect-only; create_config; service_ctrl restart; succ "WARP 已启用"; break ;;
+                    2) echo "off" > /etc/sing-box/warp_enabled; source "\$SBOX_CORE" --detect-only; create_config; service_ctrl restart; info "WARP 已禁用"; break ;;
+                    0) break ;;
+                esac
+            done ;;
+        7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
            if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
-               # 1. 停止并禁用所有服务
                systemctl stop sing-box 2>/dev/null; rc-service sing-box stop 2>/dev/null
-               systemctl disable zram-swap.service sing-box.service 2>/dev/null; rc-update del zram-swap sing-box 2>/dev/null
-               # 2. 清理 ZRAM 与 磁盘 Swap (单行合并逻辑)
-               grep -q "/dev/zram0" /proc/swaps && { swapoff /dev/zram0 2>/dev/null; echo 1 > /sys/block/zram0/reset 2>/dev/null; info "ZRAM 已清理"; }
-               grep -q "/swapfile" /proc/swaps && { swapoff /swapfile 2>/dev/null; rm -f /swapfile; sed -i '/\/swapfile/d' /etc/fstab 2>/dev/null; info "磁盘 Swap 已清理"; }
-               # 3. 文件一键清理 (使用大括号扩展压缩)
-               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{zram-swap,sing-box}.service /etc/init.d/{zram-swap,sing-box} /etc/sysctl.d/99-sing-box.conf
-               # 4. 系统恢复并退出
-               printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
-               sysctl -p >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "卸载完成"; exit 0
-           else info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; fi ;;
+               systemctl disable zram-swap.service sing-box.service 2>/dev/null
+               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{zram-swap,sing-box}.service /etc/sysctl.d/99-sing-box.conf
+               succ "卸载完成"; exit 0
+           fi ;;
         0) exit 0 ;;
     esac
 done
 EOF
 
-	chmod +x "$SB_PATH"
+    chmod +x "$SB_PATH"
     ln -sf "$SB_PATH" "/usr/local/bin/SB" 2>/dev/null || true
 }
-
 # ==========================================
 # 主运行逻辑
 # ==========================================
