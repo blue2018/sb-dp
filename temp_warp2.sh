@@ -681,14 +681,15 @@ JSON
     
     # 提取配置信息
     local peer_public_key=$(echo "$response" | jq -r '.config.peers[0].public_key' 2>/dev/null)
-    local peer_endpoint=$(echo "$response" | jq -r '.config.peers[0].endpoint.host' 2>/dev/null)
+    local peer_endpoint_host=$(echo "$response" | jq -r '.config.peers[0].endpoint.host' 2>/dev/null)
+    local peer_endpoint_port=$(echo "$response" | jq -r '.config.peers[0].endpoint.v4 // "2408"' 2>/dev/null | grep -oE '[0-9]+' || echo "2408")
     local ipv4_address=$(echo "$response" | jq -r '.config.interface.addresses.v4' 2>/dev/null)
     local ipv6_address=$(echo "$response" | jq -r '.config.interface.addresses.v6' 2>/dev/null)
     
     warp_log "INFO" "注册成功！"
     warp_log "INFO" "  ├─ IPv4: $ipv4_address"
     warp_log "INFO" "  ├─ IPv6: $ipv6_address"
-    warp_log "INFO" "  └─ 端点: $peer_endpoint"
+    warp_log "INFO" "  └─ 端点: ${peer_endpoint_host}:${peer_endpoint_port}"
     
     # 验证必要字段
     if [ -z "$peer_public_key" ] || [ "$peer_public_key" = "null" ]; then
@@ -702,7 +703,8 @@ JSON
 {
   "private_key": "$private_key",
   "peer_public_key": "$peer_public_key",
-  "peer_endpoint": "$peer_endpoint:2408",
+  "peer_endpoint_host": "$peer_endpoint_host",
+  "peer_endpoint_port": $peer_endpoint_port,
   "ipv4_address": "$ipv4_address",
   "ipv6_address": "$ipv6_address",
   "reserved": [0, 0, 0],
@@ -733,12 +735,13 @@ integrate_warp_outbound() {
     local warp_conf=$(cat /etc/sing-box/warp.json)
     local private_key=$(echo "$warp_conf" | jq -r '.private_key')
     local peer_public_key=$(echo "$warp_conf" | jq -r '.peer_public_key')
-    local peer_endpoint=$(echo "$warp_conf" | jq -r '.peer_endpoint')
+    local peer_endpoint_host=$(echo "$warp_conf" | jq -r '.peer_endpoint_host')
+    local peer_endpoint_port=$(echo "$warp_conf" | jq -r '.peer_endpoint_port')
     local ipv4_address=$(echo "$warp_conf" | jq -r '.ipv4_address')
     local ipv6_address=$(echo "$warp_conf" | jq -r '.ipv6_address')
     local mtu=$(echo "$warp_conf" | jq -r '.mtu')
     
-    warp_log "DEBUG" "读取配置: endpoint=$peer_endpoint, ipv4=$ipv4_address"
+    warp_log "DEBUG" "读取配置: endpoint=${peer_endpoint_host}:${peer_endpoint_port}, ipv4=$ipv4_address"
     
     # 备份原配置
     cp /etc/sing-box/config.json /etc/sing-box/config.json.bak
@@ -752,19 +755,29 @@ integrate_warp_outbound() {
         mv /tmp/config.tmp /etc/sing-box/config.json
     fi
     
-    # 构造 WARP 出站配置
+    # 构造 WARP 出站配置（使用新版 endpoint 格式）
     local warp_outbound=$(cat <<WARPOUT
 {
   "type": "wireguard",
   "tag": "warp-out",
-  "server": "$(echo $peer_endpoint | cut -d: -f1)",
-  "server_port": $(echo $peer_endpoint | cut -d: -f2),
+  "system_interface": false,
+  "interface_name": "wg0",
   "local_address": [
     "$ipv4_address/32",
     "$ipv6_address/128"
   ],
   "private_key": "$private_key",
-  "peer_public_key": "$peer_public_key",
+  "peers": [
+    {
+      "server": "$peer_endpoint_host",
+      "server_port": $peer_endpoint_port,
+      "public_key": "$peer_public_key",
+      "allowed_ips": [
+        "0.0.0.0/0",
+        "::/0"
+      ]
+    }
+  ],
   "reserved": [0, 0, 0],
   "mtu": $mtu,
   "workers": 2
@@ -953,9 +966,10 @@ check_warp_status() {
     
     # 读取配置信息
     local ipv4=$(jq -r '.ipv4_address' /etc/sing-box/warp.json 2>/dev/null)
-    local endpoint=$(jq -r '.peer_endpoint' /etc/sing-box/warp.json 2>/dev/null)
+    local endpoint_host=$(jq -r '.peer_endpoint_host' /etc/sing-box/warp.json 2>/dev/null)
+    local endpoint_port=$(jq -r '.peer_endpoint_port' /etc/sing-box/warp.json 2>/dev/null)
     
-    echo -e "\033[1;32m[WARP]\033[0m 已启用 | 虚拟IP: ${ipv4:-N/A} | 端点: ${endpoint:-N/A}"
+    echo -e "\033[1;32m[WARP]\033[0m 已启用 | 虚拟IP: ${ipv4:-N/A} | 端点: ${endpoint_host:-N/A}:${endpoint_port:-N/A}"
 }
 
 # 查看 WARP 日志
