@@ -682,9 +682,14 @@ JSON
     # 提取配置信息
     local peer_public_key=$(echo "$response" | jq -r '.config.peers[0].public_key' 2>/dev/null)
     local peer_endpoint_host=$(echo "$response" | jq -r '.config.peers[0].endpoint.host' 2>/dev/null)
-    local peer_endpoint_port=$(echo "$response" | jq -r '.config.peers[0].endpoint.v4 // "2408"' 2>/dev/null | grep -oE '[0-9]+' || echo "2408")
+    # 修复：正确提取端口（API 返回的是数组，取 v4 字段的第一个元素）
+    local peer_endpoint_port=$(echo "$response" | jq -r '.config.peers[0].endpoint.v4' 2>/dev/null | tr -d '[]" \n' | awk -F',' '{print $1}')
+    # 如果提取失败，使用默认端口
+    [ -z "$peer_endpoint_port" ] || [ "$peer_endpoint_port" = "null" ] && peer_endpoint_port="2408"
     local ipv4_address=$(echo "$response" | jq -r '.config.interface.addresses.v4' 2>/dev/null)
     local ipv6_address=$(echo "$response" | jq -r '.config.interface.addresses.v6' 2>/dev/null)
+    
+    warp_log "DEBUG" "提取的端口: raw=$(echo "$response" | jq -r '.config.peers[0].endpoint.v4' 2>/dev/null), parsed=$peer_endpoint_port"
     
     warp_log "INFO" "注册成功！"
     warp_log "INFO" "  ├─ IPv4: $ipv4_address"
@@ -697,8 +702,15 @@ JSON
         return 1
     fi
     
-    # 保存 WARP 配置
+    # 保存 WARP 配置（确保端口是纯数字）
     mkdir -p /etc/sing-box
+    
+    # 二次验证：确保端口是有效数字
+    if ! [[ "$peer_endpoint_port" =~ ^[0-9]+$ ]]; then
+        warp_log "WARN" "端口格式异常: $peer_endpoint_port，强制使用默认端口 2408"
+        peer_endpoint_port="2408"
+    fi
+    
     cat > /etc/sing-box/warp.json <<WARPJSON
 {
   "private_key": "$private_key",
@@ -732,6 +744,14 @@ integrate_warp_outbound() {
         return 1
     fi
     
+    # 验证 JSON 格式
+    if ! jq empty /etc/sing-box/warp.json 2>/dev/null; then
+        warp_log "ERROR" "WARP 配置文件格式损坏，删除后重试"
+        cat /etc/sing-box/warp.json | tee -a /var/log/warp-integration.log
+        rm -f /etc/sing-box/warp.json
+        return 1
+    fi
+    
     local warp_conf=$(cat /etc/sing-box/warp.json)
     local private_key=$(echo "$warp_conf" | jq -r '.private_key')
     local peer_public_key=$(echo "$warp_conf" | jq -r '.peer_public_key')
@@ -742,6 +762,15 @@ integrate_warp_outbound() {
     local mtu=$(echo "$warp_conf" | jq -r '.mtu')
     
     warp_log "DEBUG" "读取配置: endpoint=${peer_endpoint_host}:${peer_endpoint_port}, ipv4=$ipv4_address"
+    
+    # 验证必要字段
+    if [ -z "$private_key" ] || [ "$private_key" = "null" ] || \
+       [ -z "$peer_public_key" ] || [ "$peer_public_key" = "null" ] || \
+       [ -z "$ipv4_address" ] || [ "$ipv4_address" = "null" ]; then
+        warp_log "ERROR" "配置字段缺失，请删除 /etc/sing-box/warp.json 后重新注册"
+        warp_log "DEBUG" "private_key=$private_key, peer_public_key=$peer_public_key, ipv4=$ipv4_address"
+        return 1
+    fi
     
     # 备份原配置
     cp /etc/sing-box/config.json /etc/sing-box/config.json.bak
@@ -1415,48 +1444,25 @@ while true; do
                    *) echo -e "\033[1;31m无效选项\033[0m"; sleep 1 ;;
                esac
            done ;;
-		7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
-   if [ "${cf:-n}" = "y" ] || [ "${cf:-n}" = "Y" ]; then
-       info "正在执行深度卸载..."
-       # 停止服务
-       systemctl stop sing-box 2>/dev/null
-       rc-service sing-box stop 2>/dev/null
-       systemctl disable sing-box 2>/dev/null
-       rc-update del sing-box 2>/dev/null
-       
-       # 清理 Swap
-       grep -q "/dev/zram0" /proc/swaps && { 
-           swapoff /dev/zram0 2>/dev/null
-           echo 1 > /sys/block/zram0/reset 2>/dev/null
-       }
-       grep -q "/swapfile" /proc/swaps && { 
-           swapoff /swapfile 2>/dev/null
-           rm -f /swapfile
-           sed -i '/\/swapfile/d' /etc/fstab 2>/dev/null
-       }
-       
-       # 删除所有文件（包括 WARP 日志）
-       rm -rf /etc/sing-box \
-              /usr/bin/sing-box \
-              /usr/local/bin/{sb,SB} \
-              /etc/systemd/system/sing-box.service \
-              /etc/init.d/sing-box \
-              /etc/sysctl.d/99-sing-box.conf \
-              /var/log/warp-integration.log
-       
-       # 恢复系统配置
-       printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
-       sysctl -p >/dev/null 2>&1
-       systemctl daemon-reload 2>/dev/null
-       
-       succ "卸载完成"
-       exit 0
-   else 
-       info "已取消"
-       read -r -p "按回车返回..." 
-   fi ;;
-0) exit 0 ;;
-esac
+        7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+           if [ "${cf:-n}" = "y" ] || [ "${cf:-n}" = "Y" ]; then
+               info "正在执行深度卸载..."
+               # 1. 停止并禁用所有服务
+               systemctl stop sing-box 2>/dev/null; rc-service sing-box stop 2>/dev/null
+               systemctl disable zram-swap.service sing-box.service 2>/dev/null; rc-update del zram-swap sing-box 2>/dev/null
+               # 2. 停用 WARP
+               disable_warp
+               # 3. 清理 ZRAM 与 磁盘 Swap
+               grep -q "/dev/zram0" /proc/swaps && { swapoff /dev/zram0 2>/dev/null; echo 1 > /sys/block/zram0/reset 2>/dev/null; info "ZRAM 已清理"; }
+               grep -q "/swapfile" /proc/swaps && { swapoff /swapfile 2>/dev/null; rm -f /swapfile; sed -i '/\/swapfile/d' /etc/fstab 2>/dev/null; info "磁盘 Swap 已清理"; }
+               # 4. 文件一键清理
+               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{zram-swap,sing-box}.service /etc/init.d/{zram-swap,sing-box,wgcf} /etc/sysctl.d/99-sing-box.conf /etc/wireguard/wgcf.conf
+               # 5. 系统恢复并退出
+               printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
+               sysctl -p >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "卸载完成"; exit 0
+           else info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; fi ;;
+        0) exit 0 ;;
+    esac
 done
 SBEOF
 
