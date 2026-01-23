@@ -697,8 +697,7 @@ create_config() {
     local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     
-    # --- 1. 自动获取/生成 Hysteria2 所需参数 ---
-    # 端口处理
+    # --- 基础参数自动处理 ---
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then 
             PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
@@ -706,63 +705,42 @@ create_config() {
             PORT_HY2=$(shuf -i 10000-60000 -n 1)
         fi
     fi
-    
-    # UUID 密码处理
-    local PSK
-    if [ -f /etc/sing-box/config.json ]; then 
-        PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
-    elif [ -f /proc/sys/kernel/random/uuid ]; then 
-        PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
-    else 
-        local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"
-    fi
-    
-    # Salamander 混淆密码处理
-    local SALA_PASS=""
-    if [ -f /etc/sing-box/config.json ]; then 
-        SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
-    fi
-    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+    local PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "782bd7bf-b133-4bca-8b3d-e3bd5bda95f9")
+    local SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "n1AJCt66HEBkCFYd")
 
-    # --- 2. 策略与性能参数 ---
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-    
-    local mem_total=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    local timeout="30s"
-    [ "$mem_total" -ge 204800 ] && timeout="50s"
-    [ "$mem_total" -ge 460800 ] && timeout="60s"
 
-    # --- 3. WARP 逻辑适配 (1.12.x 兼容模式) ---
+    # --- WARP 1.12.x 现代语法逻辑 ---
     local warp_state=$(cat /etc/sing-box/warp_enabled 2>/dev/null || echo "off")
     local warp_out=""
     local default_outbound="direct-out"
     
     if [ "$warp_state" = "on" ] && [ -f /etc/sing-box/warp_auth.conf ]; then
         source /etc/sing-box/warp_auth.conf
-        # 注意：此处必须使用 local_address 配合环境变量，否则该版本会报 address 字段错误
+        # 核心变动：放弃 server 字段，改用 endpoint 配合 peers 数组
         warp_out=',{
             "type": "wireguard",
             "tag": "warp-out",
-            "server": "engage.cloudflareclient.com",
-            "server_port": 2408,
             "local_address": ["'"$WARP_V4"'"],
             "private_key": "'"$WARP_PRIV"'",
-            "peer_public_key": "'"$WARP_PUB"'",
+            "peers": [{
+                "address": "engage.cloudflareclient.com",
+                "port": 2408,
+                "public_key": "'"$WARP_PUB"'"
+            }],
             "mtu": 1280,
             "system_interface": false
         }'
         default_outbound="warp-out"
     fi
 
-    # --- 4. 写入最终 JSON ---
+    # --- 写入 JSON ---
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "fatal", "timestamp": true },
+  "log": { "level": "fatal" },
   "dns": {
-    "servers": [
-      { "tag": "dns-direct", "address": "8.8.8.8", "detour": "direct-out" }
-    ],
+    "servers": [{ "tag": "dns-direct", "address": "8.8.8.8", "detour": "direct-out" }],
     "strategy": "$ds"
   },
   "inbounds": [{
@@ -772,7 +750,6 @@ create_config() {
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
     "up_mbps": $cur_bw, "down_mbps": $cur_bw,
-    "udp_timeout": "$timeout",
     "tls": {
       "enabled": true,
       "alpn": ["h3"],
@@ -787,7 +764,8 @@ create_config() {
   ],
   "route": {
     "rules": [
-      { "protocol": "dns", "outbound": "dns-direct" }
+      { "protocol": "dns", "outbound": "dns-direct" },
+      { "outbound": "$default_outbound" }
     ],
     "final": "$default_outbound"
   }
@@ -1126,19 +1104,14 @@ EOF
     chmod +x "$SB_PATH"
     ln -sf "$SB_PATH" "/usr/local/bin/SB" 2>/dev/null || true
 }
+
 # ==========================================
 # 主运行逻辑
-# ==========================================
-# ==========================================
-# 主运行逻辑 (精简 Alpine 适配版)
 # ==========================================
 detect_os
 [ "$(id -u)" != "0" ] && err "请使用 root 运行" && exit 1
 install_dependencies
-CPU_CORE=$(get_cpu_core)
-export CPU_CORE
 get_network_info
-echo -e "-----------------------------------------------"
 USER_PORT=$(prompt_for_port)
 optimize_system
 install_singbox "install"
@@ -1149,24 +1122,14 @@ create_config "$USER_PORT"
 create_sb_tool
 setup_service
 
-# --- 核心修复：针对 Alpine 的环境变量劫持 ---
-if [ -f /etc/init.d/sing-box ]; then
-    # 注入权限变量到启动脚本的头部
-    if ! grep -q "ENABLE_DEPRECATED_WIREGUARD_OUTBOUND" /etc/init.d/sing-box; then
-        sed -i '2i export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true' /etc/init.d/sing-box
-    fi
-    rc-update add sing-box default >/dev/null 2>&1
+# 清理掉之前实验留下的环境变量（保持系统干净）
+[ -f /etc/init.d/sing-box ] && sed -i '/ENABLE_DEPRECATED_WIREGUARD_OUTBOUND/d' /etc/init.d/sing-box
+
+# 重启服务
+if command -v rc-service >/dev/null 2>&1; then
     rc-service sing-box restart
 else
-    # 针对 Debian/Ubuntu 系统
-    systemctl daemon-reload >/dev/null 2>&1
-    systemctl enable sing-box >/dev/null 2>&1
     systemctl restart sing-box
 fi
 
-get_env_data
-echo -e "\n\033[1;34m==========================================\033[0m"
-display_system_status
-echo -e "\033[1;34m------------------------------------------\033[0m"
-display_links
 info "脚本部署完毕，输入 'sb' 管理"
