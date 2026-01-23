@@ -714,17 +714,18 @@ create_config() {
     if [ -f /etc/sing-box/config.json ]; then SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo ""); fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 2. WARP 逻辑处理
+    # 2. WARP 逻辑处理 (已修正字段名)
     local warp_state=$(cat /etc/sing-box/warp_enabled 2>/dev/null || echo "off")
     local warp_out="" warp_rule=""
     WARP_V4=""; WARP_V6=""; WARP_PRIV=""; WARP_PUB=""
 
     if [ "$warp_state" = "on" ] && register_warp; then
-        warp_out=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"system_interface":false,"interface_address":["'$WARP_V4'","'$WARP_V6'"],"local_address":["'$WARP_V4'","'$WARP_V6'"],"private_key":"'$WARP_PRIV'","peer_public_key":"'$WARP_PUB'","mtu":1280}'
+        # 注意：这里将 interface_address 改为了 address，local_address 改为了 address
+        warp_out=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"system_interface":false,"address":["'$WARP_V4'","'$WARP_V6'"],"private_key":"'$WARP_PRIV'","peer_public_key":"'$WARP_PUB'","mtu":1280}'
         warp_rule='{"domain_suffix":["netflix.com","disney.com","googlevideo.com","youtube.com"],"outbound":"warp-out"},{"geoip":["google","telegram"],"outbound":"warp-out"},'
     fi
 
-    # 3. 写入配置文件
+    # 3. 写入配置文件 (确保 outbounds 结构正确)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -741,12 +742,10 @@ create_config() {
     "listen": "::",
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
-    "up_mbps": $cur_bw,
-    "down_mbps": $cur_bw,
+    "up_mbps": $cur_bw, "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
     "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
-    "obfs": {"type": "salamander", "password": "$SALA_PASS"},
-    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+    "obfs": {"type": "salamander", "password": "$SALA_PASS"}
   }],
   "outbounds": [
     { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }
@@ -1029,8 +1028,12 @@ if [ ! -f "\$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
 source "\$SBOX_CORE" --detect-only
 
 service_ctrl() {
-    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "\$1" && return
-    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "\$1" sing-box
+    if [ -x "/etc/init.d/sing-box" ]; then
+        rc-service sing-box restart
+    else
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl restart sing-box
+    fi
 }
 
 while true; do
