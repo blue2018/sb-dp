@@ -659,12 +659,13 @@ install_warp_minimal() {
     
     succ "WireGuard 内核模块已加载"
     
-    # 3. 获取 WARP 配置
+    # 3. 获取 WARP 配置 (更新 2026 API 参数)
     local WARP_KEY=$(wg genkey)
     local WARP_PUB=$(echo "$WARP_KEY" | wg pubkey)
     local WARP_DATA=$(curl -sL --max-time 10 "https://api.cloudflareclient.com/v0a2158/reg" \
         -H "Content-Type: application/json" \
-        -d "{\"install_id\":\"\",\"fcm_token\":\"\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"key\":\"$WARP_PUB\",\"type\":\"Android\",\"model\":\"PC\",\"locale\":\"en_US\"}" 2>/dev/null)
+        -H "User-Agent: okhttp/3.12.1" \
+        -d "{\"install_id\":\"\",\"fcm_token\":\"\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"key\":\"$WARP_PUB\",\"type\":\"Android\",\"model\":\"SM-G973N\",\"locale\":\"en_US\"}" 2>/dev/null)
     
     [ -z "$WARP_DATA" ] && { err "WARP 注册失败"; return 1; }
     
@@ -673,7 +674,7 @@ install_warp_minimal() {
     local WARP_ENDPOINT=$(echo "$WARP_DATA" | jq -r '.config.peers[0].endpoint.host' 2>/dev/null)
     local WARP_PEER_PUB=$(echo "$WARP_DATA" | jq -r '.config.peers[0].public_key' 2>/dev/null)
     
-    # 4. 生成极简配置（按需路由模式）
+    # 4. 生成极简配置（更新 AllowedIPs 网段）
     mkdir -p /etc/wireguard
     cat > /etc/wireguard/wgcf.conf <<WGEOF
 [Interface]
@@ -684,7 +685,7 @@ MTU = 1280
 [Peer]
 PublicKey = $WARP_PEER_PUB
 Endpoint = $WARP_ENDPOINT:2408
-AllowedIPs = 104.18.0.0/15, 162.159.0.0/16
+AllowedIPs = 104.16.0.0/12, 162.159.0.0/16, 172.64.0.0/13
 PersistentKeepalive = 25
 WGEOF
     
@@ -805,12 +806,12 @@ install_singbox() {
 # ==========================================
 create_config() {
     local PORT_HY2="${1:-}"
-	local cur_bw="${VAR_HY2_BW:-200}"
+    local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
+    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
+    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
     # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
@@ -864,7 +865,7 @@ setup_service() {
     local real_c="$CPU_CORE" core_range=""
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
-    local cur_nice="${VAR_SYSTEMD_NICE:--5}"
+    local cur_nice="-10"
     local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"  
     local mem_total=$(probe_memory_total); local io_prio=2
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
@@ -874,7 +875,7 @@ setup_service() {
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
         local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
         if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
-            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
+            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
             exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
         fi
         cat > /etc/init.d/sing-box <<EOF
@@ -892,7 +893,7 @@ command_args="-c \"$exec_cmd\""
 pidfile="/run/\${RC_SVCNAME}.pid"
 rc_ulimit="-n 1000000"
 rc_nice="$cur_nice"
-rc_oom_score_adj="-500"
+rc_oom_score_adj="-900"
 depend() { need net; after firewall; }
 start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
 start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
@@ -904,7 +905,7 @@ EOF
         [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
         
-		[ "$mem_total" -lt 200 ] && io_prio=4
+        [ "$mem_total" -lt 200 ] && io_prio=4
         [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
         local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
         local cpu_quota=$((real_c * 100))
@@ -932,7 +933,7 @@ LimitNOFILE=1000000
 LimitMEMLOCK=infinity
 ${mem_config}CPUQuota=${cpu_quota}%
 OOMPolicy=continue
-OOMScoreAdjust=-500
+OOMScoreAdjust=-900
 Restart=always
 RestartSec=10s
 TimeoutStopSec=15
@@ -945,17 +946,16 @@ EOF
     fi
     
     local pid=""
-	for i in 1 2 3 4 5; do 
+    for i in 1 2 3 4 5; do 
         pid=$(pidof sing-box | awk '{print $1}')
         [ -n "$pid" ] && break || sleep 0.4
     done
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
         local ma_mb=$(( ${ma:-0} / 1024 ))
-        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
+        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可y: ${ma_mb} MB"
     else 
-        err "sing-box 启动失败，最近日志："; [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 5 || tail -n 5 /var/log/messages 2>/dev/null; } || { journalctl -u sing-box -n 5 --no-pager 2>/dev/null; }
-        echo -e "\033[1;33m[配置自检]\033[0m"; /usr/bin/sing-box check -c /etc/sing-box/config.json || true; exit 1
+        err "sing-box 启动失败"; exit 1
     fi
 }
 
