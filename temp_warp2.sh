@@ -733,8 +733,7 @@ create_config() {
     "up_mbps": $cur_bw,
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
-    "udp_fragment": true,
-    "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
+    "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
@@ -746,7 +745,7 @@ create_config() {
     "rules": [
       { "protocol": "dns", "outbound": "dns-direct" },
       ${warp_rule}
-      { "priority": 100, "outbound": "direct-out" }
+      { "outbound": "direct-out" }
     ]
   }
 }
