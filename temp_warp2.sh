@@ -716,17 +716,15 @@ create_config() {
 
     # --- WARP 1.12.x 适配逻辑 ---
     local warp_state=$(cat /etc/sing-box/warp_enabled 2>/dev/null || echo "off")
-    local warp_out="" warp_rule=""
+    local warp_out=""
+    local default_outbound="direct-out"
     
     if [ "$warp_state" = "on" ] && [ -f /etc/sing-box/warp_auth.conf ]; then
         source /etc/sing-box/warp_auth.conf
-        # 核心修复 1: 使用 local_address 且移除 interface_address
         warp_out=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"system_interface":false,"local_address":["'$WARP_V4'","'$WARP_V6'"],"private_key":"'$WARP_PRIV'","peer_public_key":"'$WARP_PUB'","mtu":1280}'
-        # 核心修复 2: 彻底移除 geoip，改用通用的 domain_suffix
-        warp_rule='{"domain_suffix":["netflix.com","disney.com","googlevideo.com","youtube.com","google.com","google.it","gstatic.com","googleapis.com","googleusercontent.com","telegram.org","t.me"],"outbound":"warp-out"},'
+        default_outbound="warp-out"
     fi
 
-    # --- 写入 1.12.x 标准配置 ---
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -755,8 +753,7 @@ create_config() {
   "route": {
     "rules": [
       { "protocol": "dns", "outbound": "dns-direct" },
-      ${warp_rule}
-      { "outbound": "direct-out" }
+      { "outbound": "$default_outbound" }
     ]
   }
 }
