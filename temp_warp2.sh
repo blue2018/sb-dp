@@ -714,19 +714,19 @@ create_config() {
     if [ -f /etc/sing-box/config.json ]; then SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo ""); fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 1. WARP 逻辑处理 (使用 1.12.0 兼容的字段名和规则)
+    # 2. WARP 逻辑处理 (适配 v1.12.x 规范)
     local warp_state=$(cat /etc/sing-box/warp_enabled 2>/dev/null || echo "off")
     local warp_out="" warp_rule=""
-    WARP_V4=""; WARP_V6=""; WARP_PRIV=""; WARP_PUB=""
-
-    if [ "$warp_state" = "on" ] && register_warp; then
-        # 1.12.x 使用 local_address
+    
+    if [ "$warp_state" = "on" ] && [ -f /etc/sing-box/warp_auth.conf ]; then
+        source /etc/sing-box/warp_auth.conf
+        # v1.12.x 强制使用 local_address 字段
         warp_out=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"system_interface":false,"local_address":["'$WARP_V4'","'$WARP_V6'"],"private_key":"'$WARP_PRIV'","peer_public_key":"'$WARP_PUB'","mtu":1280}'
-        # 移除 geoip，改用通用的域名分流，确保不依赖本地数据库
+        # 移除 geoip (1.12 已移除)，改用 domain_suffix 进行分流
         warp_rule='{"domain_suffix":["netflix.com","disney.com","googlevideo.com","youtube.com","google.com","google.it","telegram.org","t.me","tdesktop.com"],"outbound":"warp-out"},'
     fi
 
-    # 2. 写入配置文件
+    # 3. 写入配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
