@@ -723,7 +723,7 @@ create_config() {
         # 核心修复 1: 使用 local_address 且移除 interface_address
         warp_out=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"system_interface":false,"local_address":["'$WARP_V4'","'$WARP_V6'"],"private_key":"'$WARP_PRIV'","peer_public_key":"'$WARP_PUB'","mtu":1280}'
         # 核心修复 2: 彻底移除 geoip，改用通用的 domain_suffix
-        warp_rule='{"domain_suffix":["netflix.com","disney.com","googlevideo.com","youtube.com","google.com","telegram.org","t.me"],"outbound":"warp-out"},'
+        warp_rule='{"domain_suffix":["netflix.com","disney.com","googlevideo.com","youtube.com","google.com","google.it","gstatic.com","googleapis.com","googleusercontent.com","telegram.org","t.me"],"outbound":"warp-out"},'
     fi
 
     # --- 写入 1.12.x 标准配置 ---
