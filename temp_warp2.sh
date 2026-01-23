@@ -701,7 +701,7 @@ create_config() {
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # 1. 基础逻辑
+    # --- 原有端口/密码逻辑 ---
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
@@ -714,25 +714,25 @@ create_config() {
     if [ -f /etc/sing-box/config.json ]; then SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo ""); fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 2. WARP 逻辑处理 (适配 v1.12.x 规范)
+    # --- WARP 1.12.x 适配逻辑 ---
     local warp_state=$(cat /etc/sing-box/warp_enabled 2>/dev/null || echo "off")
     local warp_out="" warp_rule=""
     
     if [ "$warp_state" = "on" ] && [ -f /etc/sing-box/warp_auth.conf ]; then
         source /etc/sing-box/warp_auth.conf
-        # v1.12.x 强制使用 local_address 字段
+        # 核心修复 1: 使用 local_address 且移除 interface_address
         warp_out=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"system_interface":false,"local_address":["'$WARP_V4'","'$WARP_V6'"],"private_key":"'$WARP_PRIV'","peer_public_key":"'$WARP_PUB'","mtu":1280}'
-        # 移除 geoip (1.12 已移除)，改用 domain_suffix 进行分流
-        warp_rule='{"domain_suffix":["netflix.com","disney.com","googlevideo.com","youtube.com","google.com","google.it","telegram.org","t.me","tdesktop.com"],"outbound":"warp-out"},'
+        # 核心修复 2: 彻底移除 geoip，改用通用的 domain_suffix
+        warp_rule='{"domain_suffix":["netflix.com","disney.com","googlevideo.com","youtube.com","google.com","telegram.org","t.me"],"outbound":"warp-out"},'
     fi
 
-    # 3. 写入配置文件
+    # --- 写入 1.12.x 标准配置 ---
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
   "dns": {
     "servers": [
-      { "tag": "dns-direct", "address": "8.8.4.4", "detour": "direct-out" },
+      { "tag": "dns-direct", "address": "8.8.8.8", "detour": "direct-out" },
       { "tag": "dns-remote", "address": "1.1.1.1", "detour": "direct-out" }
     ],
     "strategy": "$ds"
