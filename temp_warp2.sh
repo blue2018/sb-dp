@@ -724,24 +724,22 @@ create_config() {
     
     if [ "$warp_state" = "on" ] && [ -f /etc/sing-box/warp_auth.conf ]; then
         source /etc/sing-box/warp_auth.conf
-        # 【重点】这里使用了 1.12.x 标准语法：
-        # 1. 放弃 endpoint/server 字段，全部放入 peers 数组
-        # 2. 直接使用 IP (162.159.192.1) 避免 DNS 故障
-        # 3. 使用 address 替代 local_address
+        # 变动点：
+        # 1. 使用 443 或 854 端口（这些端口通常防火墙不会拦截）
+        # 2. 将 162.159.192.1 换成 Cloudflare 的备用地址
         warp_out=',{
             "type": "wireguard",
             "tag": "warp-out",
             "address": ["'"$WARP_V4"'"],
             "private_key": "'"$WARP_PRIV"'",
             "peers": [{
-                "server": "162.159.192.1", 
-                "server_port": 2408,
+                "server": "162.159.193.10", 
+                "server_port": 443,
                 "public_key": "'"$WARP_PUB"'"
             }],
             "mtu": 1280,
             "system_interface": false
         }'
-        # 强制所有流量走 WARP
         default_outbound="warp-out"
     fi
 
