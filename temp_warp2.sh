@@ -714,18 +714,19 @@ create_config() {
     if [ -f /etc/sing-box/config.json ]; then SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo ""); fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 2. WARP 逻辑处理 (已修正字段名)
+    # 1. WARP 逻辑处理 (使用 1.12.0 兼容的字段名和规则)
     local warp_state=$(cat /etc/sing-box/warp_enabled 2>/dev/null || echo "off")
     local warp_out="" warp_rule=""
     WARP_V4=""; WARP_V6=""; WARP_PRIV=""; WARP_PUB=""
 
     if [ "$warp_state" = "on" ] && register_warp; then
-        # 注意：这里将 interface_address 改为了 address，local_address 改为了 address
-        warp_out=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"system_interface":false,"address":["'$WARP_V4'","'$WARP_V6'"],"private_key":"'$WARP_PRIV'","peer_public_key":"'$WARP_PUB'","mtu":1280}'
-        warp_rule='{"domain_suffix":["netflix.com","disney.com","googlevideo.com","youtube.com"],"outbound":"warp-out"},{"geoip":["google","telegram"],"outbound":"warp-out"},'
+        # 1.12.x 使用 local_address
+        warp_out=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"system_interface":false,"local_address":["'$WARP_V4'","'$WARP_V6'"],"private_key":"'$WARP_PRIV'","peer_public_key":"'$WARP_PUB'","mtu":1280}'
+        # 移除 geoip，改用通用的域名分流，确保不依赖本地数据库
+        warp_rule='{"domain_suffix":["netflix.com","disney.com","googlevideo.com","youtube.com","google.com","google.it","telegram.org","t.me","tdesktop.com"],"outbound":"warp-out"},'
     fi
 
-    # 3. 写入配置文件 (确保 outbounds 结构正确)
+    # 2. 写入配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
