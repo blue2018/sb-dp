@@ -592,427 +592,6 @@ SYSCTL
 	else sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1 || true; fi
 }
 
-# 全局日志函数（增强版）
-warp_log() {
-    local level="$1"; shift
-    local msg="$*"
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp][$level] $msg" | tee -a /var/log/warp-integration.log
-}
-
-# 检测 WARP 状态
-check_warp_available() {
-    if [ ! -f /etc/sing-box/warp.json ]; then
-        warp_log "DEBUG" "WARP 配置文件不存在: /etc/sing-box/warp.json"
-        return 1
-    fi
-    
-    # 检查 sing-box 配置中是否已集成
-    if ! jq -e '.outbounds[] | select(.tag == "warp-out")' /etc/sing-box/config.json >/dev/null 2>&1; then
-        warp_log "DEBUG" "Sing-box 配置中未找到 warp-out 出站"
-        return 1
-    fi
-    
-    warp_log "INFO" "WARP 已集成到 Sing-box"
-    return 0
-}
-
-# 向 Cloudflare 注册 WARP 账号
-register_warp_account() {
-    warp_log "INFO" "开始向 Cloudflare 注册 WARP 账号..."
-    
-    # 生成 WireGuard 密钥对
-    local private_key=$(openssl rand -base64 32 2>/dev/null || dd if=/dev/urandom bs=32 count=1 2>/dev/null | base64)
-    warp_log "DEBUG" "生成私钥: ${private_key:0:20}..."
-    
-    # 计算公钥（简化处理，使用 wg 工具）
-    local public_key=""
-    if command -v wg >/dev/null 2>&1; then
-        public_key=$(echo "$private_key" | wg pubkey 2>/dev/null)
-        warp_log "DEBUG" "通过 wg 工具计算公钥: ${public_key:0:20}..."
-    else
-        # 如果没有 wg 工具，使用预生成的测试密钥对
-        warp_log "WARN" "未安装 wireguard-tools，使用临时密钥"
-        private_key="YKczQLdVNjKHJqRGRPd0I5Z3pCVmdlT2tRU2N6eDRGbGs="
-        public_key="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-    fi
-    
-    # 构造注册请求
-    local install_id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "00000000-0000-0000-0000-000000000000")
-    local timestamp=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-    
-    warp_log "DEBUG" "请求参数: install_id=$install_id, timestamp=$timestamp"
-    
-    local register_data=$(cat <<JSON
-{
-  "install_id": "$install_id",
-  "fcm_token": "",
-  "tos": "$timestamp",
-  "key": "$public_key",
-  "type": "Android",
-  "model": "PC",
-  "locale": "en_US"
-}
-JSON
-)
-    
-    warp_log "INFO" "发送注册请求到 Cloudflare API..."
-    local response=$(curl -sS --max-time 15 \
-        -H "Content-Type: application/json" \
-        -H "User-Agent: okhttp/3.12.1" \
-        -d "$register_data" \
-        "https://api.cloudflareclient.com/v0a2158/reg" 2>&1)
-    
-    local curl_exit=$?
-    if [ $curl_exit -ne 0 ]; then
-        warp_log "ERROR" "注册请求失败，curl 退出码: $curl_exit"
-        warp_log "DEBUG" "响应内容: ${response:0:200}"
-        return 1
-    fi
-    
-    warp_log "DEBUG" "API 响应: ${response:0:300}..."
-    
-    # 解析响应
-    if ! echo "$response" | jq -e '.config' >/dev/null 2>&1; then
-        warp_log "ERROR" "API 响应格式异常，无法解析 JSON"
-        warp_log "DEBUG" "完整响应: $response"
-        return 1
-    fi
-    
-    # 提取配置信息
-    local peer_public_key=$(echo "$response" | jq -r '.config.peers[0].public_key' 2>/dev/null)
-    local peer_endpoint_host=$(echo "$response" | jq -r '.config.peers[0].endpoint.host' 2>/dev/null)
-    # 修复：正确提取端口（API 返回的是数组，取 v4 字段的第一个元素）
-    local peer_endpoint_port=$(echo "$response" | jq -r '.config.peers[0].endpoint.v4' 2>/dev/null | tr -d '[]" \n' | awk -F',' '{print $1}')
-    # 如果提取失败，使用默认端口
-    [ -z "$peer_endpoint_port" ] || [ "$peer_endpoint_port" = "null" ] && peer_endpoint_port="2408"
-    local ipv4_address=$(echo "$response" | jq -r '.config.interface.addresses.v4' 2>/dev/null)
-    local ipv6_address=$(echo "$response" | jq -r '.config.interface.addresses.v6' 2>/dev/null)
-    
-    warp_log "DEBUG" "提取的端口: raw=$(echo "$response" | jq -r '.config.peers[0].endpoint.v4' 2>/dev/null), parsed=$peer_endpoint_port"
-    
-    warp_log "INFO" "注册成功！"
-    warp_log "INFO" "  ├─ IPv4: $ipv4_address"
-    warp_log "INFO" "  ├─ IPv6: $ipv6_address"
-    warp_log "INFO" "  └─ 端点: ${peer_endpoint_host}:${peer_endpoint_port}"
-    
-    # 验证必要字段
-    if [ -z "$peer_public_key" ] || [ "$peer_public_key" = "null" ]; then
-        warp_log "ERROR" "未获取到对等公钥"
-        return 1
-    fi
-    
-    # 保存 WARP 配置（确保端口是纯数字）
-    mkdir -p /etc/sing-box
-    
-    # 二次验证：确保端口是有效数字
-    if ! [[ "$peer_endpoint_port" =~ ^[0-9]+$ ]]; then
-        warp_log "WARN" "端口格式异常: $peer_endpoint_port，强制使用默认端口 2408"
-        peer_endpoint_port="2408"
-    fi
-    
-    cat > /etc/sing-box/warp.json <<WARPJSON
-{
-  "private_key": "$private_key",
-  "peer_public_key": "$peer_public_key",
-  "peer_endpoint_host": "$peer_endpoint_host",
-  "peer_endpoint_port": $peer_endpoint_port,
-  "ipv4_address": "$ipv4_address",
-  "ipv6_address": "$ipv6_address",
-  "reserved": [0, 0, 0],
-  "mtu": 1280
-}
-WARPJSON
-    
-    chmod 600 /etc/sing-box/warp.json
-    warp_log "INFO" "WARP 配置已保存到 /etc/sing-box/warp.json"
-    
-    # 输出配置供调试
-    warp_log "DEBUG" "完整配置内容:"
-    cat /etc/sing-box/warp.json | tee -a /var/log/warp-integration.log
-    
-    return 0
-}
-
-# 集成 WARP 到 Sing-box 配置
-integrate_warp_outbound() {
-    warp_log "INFO" "开始集成 WARP 到 Sing-box..."
-    
-    # 读取 WARP 配置
-    if [ ! -f /etc/sing-box/warp.json ]; then
-        warp_log "ERROR" "WARP 配置文件不存在，请先注册"
-        return 1
-    fi
-    
-    # 验证 JSON 格式
-    if ! jq empty /etc/sing-box/warp.json 2>/dev/null; then
-        warp_log "ERROR" "WARP 配置文件格式损坏，删除后重试"
-        cat /etc/sing-box/warp.json | tee -a /var/log/warp-integration.log
-        rm -f /etc/sing-box/warp.json
-        return 1
-    fi
-    
-    local warp_conf=$(cat /etc/sing-box/warp.json)
-    local private_key=$(echo "$warp_conf" | jq -r '.private_key')
-    local peer_public_key=$(echo "$warp_conf" | jq -r '.peer_public_key')
-    local peer_endpoint_host=$(echo "$warp_conf" | jq -r '.peer_endpoint_host')
-    local peer_endpoint_port=$(echo "$warp_conf" | jq -r '.peer_endpoint_port')
-    local ipv4_address=$(echo "$warp_conf" | jq -r '.ipv4_address')
-    local ipv6_address=$(echo "$warp_conf" | jq -r '.ipv6_address')
-    local mtu=$(echo "$warp_conf" | jq -r '.mtu')
-    
-    warp_log "DEBUG" "读取配置: endpoint=${peer_endpoint_host}:${peer_endpoint_port}, ipv4=$ipv4_address"
-    
-    # 验证必要字段
-    if [ -z "$private_key" ] || [ "$private_key" = "null" ] || \
-       [ -z "$peer_public_key" ] || [ "$peer_public_key" = "null" ] || \
-       [ -z "$ipv4_address" ] || [ "$ipv4_address" = "null" ]; then
-        warp_log "ERROR" "配置字段缺失，请删除 /etc/sing-box/warp.json 后重新注册"
-        warp_log "DEBUG" "private_key=$private_key, peer_public_key=$peer_public_key, ipv4=$ipv4_address"
-        return 1
-    fi
-    
-    # 备份原配置
-    cp /etc/sing-box/config.json /etc/sing-box/config.json.bak
-    warp_log "INFO" "已备份原配置到 config.json.bak"
-    
-    # 检查是否已存在 warp-out
-    if jq -e '.outbounds[] | select(.tag == "warp-out")' /etc/sing-box/config.json >/dev/null 2>&1; then
-        warp_log "WARN" "检测到已存在 warp-out 出站，将覆盖更新"
-        # 删除旧配置
-        jq 'del(.outbounds[] | select(.tag == "warp-out"))' /etc/sing-box/config.json > /tmp/config.tmp
-        mv /tmp/config.tmp /etc/sing-box/config.json
-    fi
-    
-    # 构造 WARP 出站配置（使用新版 endpoint 格式）
-    local warp_outbound=$(cat <<WARPOUT
-{
-  "type": "wireguard",
-  "tag": "warp-out",
-  "system_interface": false,
-  "interface_name": "wg0",
-  "local_address": [
-    "$ipv4_address/32",
-    "$ipv6_address/128"
-  ],
-  "private_key": "$private_key",
-  "peers": [
-    {
-      "server": "$peer_endpoint_host",
-      "server_port": $peer_endpoint_port,
-      "public_key": "$peer_public_key",
-      "allowed_ips": [
-        "0.0.0.0/0",
-        "::/0"
-      ]
-    }
-  ],
-  "reserved": [0, 0, 0],
-  "mtu": $mtu,
-  "workers": 2
-}
-WARPOUT
-)
-    
-    warp_log "DEBUG" "WARP 出站配置: $warp_outbound"
-    
-    # 插入 WARP 出站（放在 direct-out 之前）
-    local updated_config=$(jq --argjson warp "$warp_outbound" \
-        '.outbounds = ([.outbounds[] | select(.tag != "warp-out")] | [.[0], $warp] + .[1:])' \
-        /etc/sing-box/config.json)
-    
-    if [ -z "$updated_config" ]; then
-        warp_log "ERROR" "配置合并失败，恢复备份"
-        mv /etc/sing-box/config.json.bak /etc/sing-box/config.json
-        return 1
-    fi
-    
-    echo "$updated_config" > /etc/sing-box/config.json
-    
-    # 添加路由规则（ChatGPT/OpenAI 走 WARP）
-    warp_log "INFO" "配置路由规则: ChatGPT/OpenAI 流量 → WARP"
-    
-    local route_rule=$(cat <<ROUTE
-{
-  "rule_set": [],
-  "rules": [
-    {
-      "domain_suffix": [
-        "openai.com",
-        "chatgpt.com",
-        "ai.com",
-        "anthropic.com",
-        "claude.ai"
-      ],
-      "outbound": "warp-out"
-    },
-    {
-      "ip_cidr": [
-        "104.18.0.0/15",
-        "162.159.0.0/16"
-      ],
-      "outbound": "warp-out"
-    }
-  ]
-}
-ROUTE
-)
-    
-    updated_config=$(jq --argjson route "$route_rule" \
-        '. + {route: $route}' \
-        /etc/sing-box/config.json)
-    
-    echo "$updated_config" > /etc/sing-box/config.json
-    
-    # 验证配置语法
-    warp_log "INFO" "验证 Sing-box 配置语法..."
-    if ! /usr/bin/sing-box check -c /etc/sing-box/config.json 2>&1 | tee -a /var/log/warp-integration.log; then
-        warp_log "ERROR" "配置语法错误，恢复备份"
-        mv /etc/sing-box/config.json.bak /etc/sing-box/config.json
-        return 1
-    fi
-    
-    warp_log "INFO" "✓ 配置验证通过"
-    return 0
-}
-
-# 启用 WARP
-enable_warp() {
-    warp_log "INFO" "====== 开始启用 WARP ======"
-    
-    # 检查是否已注册
-    if [ ! -f /etc/sing-box/warp.json ]; then
-        warp_log "INFO" "首次使用，注册 WARP 账号..."
-        if ! register_warp_account; then
-            warp_log "ERROR" "账号注册失败，中止操作"
-            return 1
-        fi
-    else
-        warp_log "INFO" "检测到已存在 WARP 配置，跳过注册"
-    fi
-    
-    # 集成到配置
-    if ! integrate_warp_outbound; then
-        warp_log "ERROR" "集成失败，请查看日志: /var/log/warp-integration.log"
-        return 1
-    fi
-    
-    # 重启 sing-box
-    warp_log "INFO" "重启 Sing-box 服务..."
-    if [ "$OS" = "alpine" ]; then
-        if ! rc-service sing-box restart 2>&1 | tee -a /var/log/warp-integration.log; then
-            warp_log "ERROR" "服务重启失败"
-            return 1
-        fi
-    else
-        systemctl daemon-reload >/dev/null 2>&1
-        if ! systemctl restart sing-box 2>&1 | tee -a /var/log/warp-integration.log; then
-            warp_log "ERROR" "服务重启失败"
-            journalctl -u sing-box -n 20 --no-pager | tee -a /var/log/warp-integration.log
-            return 1
-        fi
-    fi
-    
-    # 等待服务启动
-    sleep 3
-    
-    # 验证服务状态
-    if ! pidof sing-box >/dev/null 2>&1; then
-        warp_log "ERROR" "Sing-box 进程未运行，启动失败"
-        warp_log "INFO" "最近日志:"
-        if [ "$OS" = "alpine" ]; then
-            tail -n 20 /var/log/messages 2>/dev/null | tee -a /var/log/warp-integration.log
-        else
-            journalctl -u sing-box -n 20 --no-pager | tee -a /var/log/warp-integration.log
-        fi
-        return 1
-    fi
-    
-    warp_log "INFO" "✓ Sing-box 服务运行正常"
-    
-    # 测试 WARP 连通性
-    warp_log "INFO" "测试 WARP 出站连通性..."
-    local test_result=$(timeout 10 curl -sS https://1.1.1.1/cdn-cgi/trace 2>&1 || echo "timeout")
-    
-    if echo "$test_result" | grep -q "warp="; then
-        local warp_status=$(echo "$test_result" | grep "warp=" | cut -d= -f2)
-        warp_log "INFO" "✓ WARP 状态: $warp_status"
-    else
-        warp_log "WARN" "WARP 连通性测试超时或失败"
-        warp_log "DEBUG" "测试响应: ${test_result:0:200}"
-    fi
-    
-    succ "WARP 已启用！ChatGPT/Claude 等服务将自动走 WARP 出口"
-    info "提示: 客户端直接连接 HY2 即可，无需额外配置"
-    warp_log "INFO" "====== WARP 启用完成 ======"
-    
-    return 0
-}
-
-# 禁用 WARP
-disable_warp() {
-    warp_log "INFO" "====== 开始禁用 WARP ======"
-    
-    if [ ! -f /etc/sing-box/config.json.bak ]; then
-        warp_log "WARN" "未找到备份配置，将手动移除 WARP 配置"
-    else
-        warp_log "INFO" "恢复备份配置..."
-        cp /etc/sing-box/config.json.bak /etc/sing-box/config.json
-    fi
-    
-    # 手动移除 WARP 出站和路由
-    warp_log "INFO" "清理 WARP 相关配置..."
-    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route)' \
-        /etc/sing-box/config.json > /tmp/config.clean
-    mv /tmp/config.clean /etc/sing-box/config.json
-    
-    # 重启服务
-    warp_log "INFO" "重启 Sing-box 服务..."
-    if [ "$OS" = "alpine" ]; then
-        rc-service sing-box restart >/dev/null 2>&1
-    else
-        systemctl restart sing-box >/dev/null 2>&1
-    fi
-    
-    sleep 2
-    
-    if pidof sing-box >/dev/null 2>&1; then
-        warp_log "INFO" "✓ 服务恢复正常"
-        info "WARP 已禁用，流量恢复直连"
-    else
-        warp_log "ERROR" "服务重启失败，请手动检查"
-    fi
-    
-    warp_log "INFO" "====== WARP 禁用完成 ======"
-}
-
-# 检查 WARP 状态
-check_warp_status() {
-    if ! check_warp_available; then
-        echo -e "\033[1;33m[WARP]\033[0m 未启用"
-        return
-    fi
-    
-    # 读取配置信息
-    local ipv4=$(jq -r '.ipv4_address' /etc/sing-box/warp.json 2>/dev/null)
-    local endpoint_host=$(jq -r '.peer_endpoint_host' /etc/sing-box/warp.json 2>/dev/null)
-    local endpoint_port=$(jq -r '.peer_endpoint_port' /etc/sing-box/warp.json 2>/dev/null)
-    
-    echo -e "\033[1;32m[WARP]\033[0m 已启用 | 虚拟IP: ${ipv4:-N/A} | 端点: ${endpoint_host:-N/A}:${endpoint_port:-N/A}"
-}
-
-# 查看 WARP 日志
-show_warp_logs() {
-    if [ ! -f /var/log/warp-integration.log ]; then
-        warn "日志文件不存在"
-        return
-    fi
-    
-    echo -e "\n\033[1;34m========== WARP 集成日志 (最近50行) ==========\033[0m"
-    tail -n 50 /var/log/warp-integration.log
-    echo -e "\033[1;34m===============================================\033[0m\n"
-}
-
 # ==========================================
 # 安装/更新 Sing-box 内核
 # ==========================================
@@ -1304,7 +883,6 @@ create_sb_tool() {
     mkdir -p /etc/sing-box
     local FINAL_SALA=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     local CORE_TMP=$(mktemp) || CORE_TMP="/tmp/core_script_$$.sh"
-    
     # 写入固化变量
     cat > "$CORE_TMP" <<EOF
 #!/usr/bin/env bash
@@ -1337,9 +915,8 @@ EOF
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
 create_config setup_service install_singbox info err warn succ optimize_system \
-apply_userspace_adaptive_profile apply_nic_core_boost setup_zrm_swap safe_rtt \
-check_warp_available register_warp_account integrate_warp_outbound enable_warp disable_warp \
-check_warp_status show_warp_logs warp_log)
+apply_userspace_adaptive_profile apply_nic_core_boost \
+setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
 
     for f in "${funcs[@]}"; do
         if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
@@ -1348,6 +925,7 @@ check_warp_status show_warp_logs warp_log)
     cat >> "$CORE_TMP" <<'EOF'
 detect_os; set +e
 
+# 自动从配置提取端口并放行
 apply_firewall() {
     local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
     [ -z "$port" ] && return
@@ -1385,88 +963,67 @@ EOF
     mv "$CORE_TMP" "$SBOX_CORE"
     chmod 700 "$SBOX_CORE"
 
-    # 生成管理脚本
+    # 生成交互管理脚本 /usr/local/bin/sb
     local SB_PATH="/usr/local/bin/sb"
-    cat > "$SB_PATH" <<'SBEOF'
+    cat > "$SB_PATH" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
 SBOX_CORE="/etc/sing-box/core_script.sh"
-if [ ! -f "$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
-[[ $# -gt 0 ]] && { /bin/bash "$SBOX_CORE" "$@"; exit 0; }
-source "$SBOX_CORE" --detect-only
+if [ ! -f "\$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
+[[ \$# -gt 0 ]] && { /bin/bash "\$SBOX_CORE" "\$@"; exit 0; }
+source "\$SBOX_CORE" --detect-only
 
 service_ctrl() {
-    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "$1" && return
-    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "$1" sing-box
+    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "\$1" && return
+    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "\$1" sing-box
 }
 
 while true; do
     echo "========================" 
     echo " Sing-box HY2 管理 (sb)"
     echo "------------------------------------------------------"
-    echo " Level: ${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: $([[ "$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
-    check_warp_status
+    echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "------------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
-    echo "4. 更新内核    5. 重启服务    6. WARP管理"
-    echo "7. 卸载脚本    0. 退出"
+    echo "4. 更新内核    5. 重启服务    6. 卸载脚本"
+    echo "0. 退出"
     echo ""  
-    read -r -p "请选择 [0-7]: " opt
-    opt=$(echo "$opt" | xargs echo -n 2>/dev/null || echo "$opt")
-    if [[ -z "$opt" ]] || [[ ! "$opt" =~ ^[0-7]$ ]]; then
-        echo -e "\033[1;31m输入有误 [$opt]，请重新输入\033[0m"; sleep 1; continue
+    read -r -p "请选择 [0-6]: " opt
+    opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
+    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-6]$ ]]; then
+        echo -e "\033[1;31m输入有误 [\$opt]，请重新输入\033[0m"; sleep 1; continue
     fi
-    case "$opt" in
-        1) source "$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
-        2) f="/etc/sing-box/config.json"; old=$(md5sum $f 2>/dev/null)
-           vi $f; if [ "$old" != "$(md5sum $f 2>/dev/null)" ]; then
-               service_ctrl restart && succ "配置已更新"
+    case "\$opt" in
+        1) source "\$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
+        2) f="/etc/sing-box/config.json"; old=\$(md5sum \$f 2>/dev/null)
+           vi \$f; if [ "\$old" != "\$(md5sum \$f 2>/dev/null)" ]; then
+               service_ctrl restart && succ "配置已更新，网络画像与防火墙已同步刷新"
            else info "配置未作变更"; fi
            read -r -p $'\n按回车键返回菜单...' ;;
-        3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
-        4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
-        5) service_ctrl restart && info "服务已重启"; read -r -p $'\n按回车键返回菜单...' ;;
-        6) # WARP 子菜单
-           while true; do
-               echo -e "\n========== WARP 管理 =========="
-               check_warp_status
-               echo "1. 启用 WARP（集成到 Sing-box）"
-               echo "2. 禁用 WARP"
-               echo "3. 查看集成日志"
-               echo "0. 返回主菜单"
-               echo ""
-               read -r -p "请选择: " wopt
-               case "$wopt" in
-                   1) enable_warp; read -r -p $'\n按回车继续...' ;;
-                   2) disable_warp; read -r -p $'\n按回车继续...' ;;
-                   3) show_warp_logs; read -r -p $'\n按回车继续...' ;;
-                   0|"") break ;;
-                   *) echo -e "\033[1;31m无效选项\033[0m"; sleep 1 ;;
-               esac
-           done ;;
-        7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
-           if [ "${cf:-n}" = "y" ] || [ "${cf:-n}" = "Y" ]; then
+        3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
+        4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
+        5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
+        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+           if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
                # 1. 停止并禁用所有服务
                systemctl stop sing-box 2>/dev/null; rc-service sing-box stop 2>/dev/null
                systemctl disable zram-swap.service sing-box.service 2>/dev/null; rc-update del zram-swap sing-box 2>/dev/null
-               # 2. 停用 WARP
-               disable_warp
-               # 3. 清理 ZRAM 与 磁盘 Swap
+               # 2. 清理 ZRAM 与 磁盘 Swap (单行合并逻辑)
                grep -q "/dev/zram0" /proc/swaps && { swapoff /dev/zram0 2>/dev/null; echo 1 > /sys/block/zram0/reset 2>/dev/null; info "ZRAM 已清理"; }
                grep -q "/swapfile" /proc/swaps && { swapoff /swapfile 2>/dev/null; rm -f /swapfile; sed -i '/\/swapfile/d' /etc/fstab 2>/dev/null; info "磁盘 Swap 已清理"; }
-               # 4. 文件一键清理
-               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{zram-swap,sing-box}.service /etc/init.d/{zram-swap,sing-box,wgcf} /etc/sysctl.d/99-sing-box.conf /etc/wireguard/wgcf.conf
-               # 5. 系统恢复并退出
+               # 3. 文件一键清理 (使用大括号扩展压缩)
+               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{zram-swap,sing-box}.service /etc/init.d/{zram-swap,sing-box} /etc/sysctl.d/99-sing-box.conf
+               # 4. 系统恢复并退出
                printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
                sysctl -p >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "卸载完成"; exit 0
            else info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; fi ;;
         0) exit 0 ;;
     esac
 done
-SBEOF
+EOF
 
-    chmod +x "$SB_PATH"
+	chmod +x "$SB_PATH"
     ln -sf "$SB_PATH" "/usr/local/bin/SB" 2>/dev/null || true
 }
 
