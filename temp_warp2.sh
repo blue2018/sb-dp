@@ -690,7 +690,7 @@ create_config() {
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # --- 原有端口/密码逻辑开始 ---
+    # 1. 基础逻辑
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
@@ -702,27 +702,34 @@ create_config() {
     local SALA_PASS=""
     if [ -f /etc/sing-box/config.json ]; then SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo ""); fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
-    # --- 原有逻辑结束 ---
 
-    # WARP 变量处理
+    # 2. WARP 逻辑处理
     local warp_state=$(cat /etc/sing-box/warp_enabled 2>/dev/null || echo "off")
     local warp_out="" warp_rule=""
+    WARP_V4=""; WARP_V6=""; WARP_PRIV=""; WARP_PUB=""
+
     if [ "$warp_state" = "on" ] && register_warp; then
         warp_out=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"system_interface":false,"interface_address":["'$WARP_V4'","'$WARP_V6'"],"local_address":["'$WARP_V4'","'$WARP_V6'"],"private_key":"'$WARP_PRIV'","peer_public_key":"'$WARP_PUB'","mtu":1280}'
         warp_rule='{"domain_suffix":["netflix.com","disney.com","googlevideo.com","youtube.com"],"outbound":"warp-out"},{"geoip":["google","telegram"],"outbound":"warp-out"},'
     fi
 
+    # 3. 写入配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false},
+  "dns": {
+    "servers": [
+      { "tag": "dns-direct", "address": "8.8.4.4", "detour": "direct-out" },
+      { "tag": "dns-remote", "address": "1.1.1.1", "detour": "direct-out" }
+    ],
+    "strategy": "$ds"
+  },
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
-    "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
@@ -731,8 +738,17 @@ create_config() {
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}${warp_out}],
-  "route": { "rules": [ ${warp_rule} {"type": "direct", "tag": "direct-out"} ] }
+  "outbounds": [
+    { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }
+    ${warp_out}
+  ],
+  "route": {
+    "rules": [
+      { "protocol": "dns", "outbound": "dns-direct" },
+      ${warp_rule}
+      { "priority": 100, "outbound": "direct-out" }
+    ]
+  }
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
