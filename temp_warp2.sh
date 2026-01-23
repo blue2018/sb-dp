@@ -724,9 +724,9 @@ create_config() {
     
     if [ "$warp_state" = "on" ] && [ -f /etc/sing-box/warp_auth.conf ]; then
         source /etc/sing-box/warp_auth.conf
-        # 变动点：
-        # 1. 使用 443 或 854 端口（这些端口通常防火墙不会拦截）
-        # 2. 将 162.159.192.1 换成 Cloudflare 的备用地址
+        # 针对防火墙限制的魔改：
+        # 1. 使用 443 端口：避开对 2408 端口的封锁，防火墙通常对 443 极其宽松。
+        # 2. 使用 IP 162.159.193.10：这是 Cloudflare 另一个不常用的节点，避开 DPI 常用黑名单。
         warp_out=',{
             "type": "wireguard",
             "tag": "warp-out",
