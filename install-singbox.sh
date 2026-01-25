@@ -337,8 +337,8 @@ apply_userspace_adaptive_profile() {
     export SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"
     # 针对 100M- 小鸡执行最后一道严谨校准 (Sanity Check)
     if [ "$mem_total" -lt 100 ]; then
-        local soft_line=$(( mem_total - 28 )) # 预留 28M 红线
-        [ "$soft_line" -lt 32 ] && soft_line=32 # 绝对启动底线
+        local soft_line=$(( mem_total - 23 )) # 预留 28M 红线
+        [ "$soft_line" -lt 35 ] && soft_line=35 # 绝对启动底线
         # 如果当前全局变量值超过红线，则强制钳位
         [ "$(echo "$GOMEMLIMIT" | tr -dc '0-9')" -gt "$soft_line" ] && \
         export GOMEMLIMIT="${soft_line}MiB" GOGC="100"
