@@ -703,6 +703,8 @@ create_config() {
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
     "udp_fragment": true,
+	"sniff": true,
+	"sniff_override_destination": true,
     "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
@@ -843,18 +845,23 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
+    # 1. 预处理：清理旧的 WARP 相关配置 (outbounds 和 route rules)
     jq '
     .outbounds //= [] | 
     .route //= {} | 
     .route.rules //= [] |
     .outbounds |= map(select(.tag != "warp-out")) |
-    .route.rules |= map(select(.outbound != "warp-out"))
+    .route.rules |= map(select(.outbound != "warp-out")) |
+    # 确保开启嗅探，否则无法匹配域名规则
+    .inbounds[0].sniff = true |
+    .inbounds[0].sniff_override_destination = true
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
+        # 2. 注入新的 WARP 出站和路由规则
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
@@ -864,35 +871,34 @@ apply_warp_config() {
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1280
+            "mtu": 1280,
+            "domain_strategy": "prefer_ipv4"
         }] + .outbounds |
         
         .route.rules = [
             {
                 "domain_suffix": [
-                    # 流媒体平台
                     "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxso.net",
                     "disneyplus.com", "disney-plus.net", "disneystreaming.com",
                     "hulu.com", "hulustream.com",
                     "hbo.com", "hbomax.com", "max.com",
                     "primevideo.com", "amazon.com", "amazonvideo.com",
                     "youtube.com", "googlevideo.com", "ytimg.com",
-                    
-                    # AI 服务
                     "openai.com", "chatgpt.com",
                     "anthropic.com", "claude.ai",
                     "gemini.google.com",
-                    
-                    # 测试工具（用于验证 WARP）
                     "cloudflare.com", "cloudflare-dns.com",
                     "ip.gs", "ident.me", "ipinfo.io", "ifconfig.me"
                 ],
                 "outbound": "warp-out"
             }
-        ] + (.route.rules // []) |
+        ] + .route.rules |
         
+        # 兜底：未匹配规则的流量依然走直连
         .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+        
+        succ "WARP 配置已集成并开启流量嗅探"
     fi
 }
 
