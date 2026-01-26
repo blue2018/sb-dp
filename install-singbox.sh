@@ -816,6 +816,230 @@ EOF
 }
 
 # ==========================================
+# warp管理
+# ==========================================
+# ==========================================
+# WARP 自动化管理模块 (新增)
+# ==========================================
+
+# 生成 WireGuard 密钥对
+generate_wg_keys() {
+    local priv pub
+    if command -v wg >/dev/null 2>&1; then
+        priv=$(wg genkey)
+        pub=$(echo "$priv" | wg pubkey)
+    else
+        # 纯 Shell 实现（兼容无 wg 命令环境）
+        priv=$(openssl rand -base64 32)
+        # 注意：这里的公钥生成需要 Curve25519 运算，纯 Shell 无法实现
+        # 因此必须确保系统有 openssl 或 wg 命令
+        pub=$(echo "$priv" | openssl pkey -inform PEM -outform DER 2>/dev/null | tail -c +13 | head -c 32 | base64)
+    fi
+    echo "$priv|$pub"
+}
+
+# 向 Cloudflare API 注册 WARP 账号
+register_warp_account() {
+    local keys pub_key priv_key api_resp account_id access_token ipv4 ipv6
+    
+    info "正在生成 WireGuard 密钥对..."
+    keys=$(generate_wg_keys)
+    priv_key=$(echo "$keys" | cut -d'|' -f1)
+    pub_key=$(echo "$keys" | cut -d'|' -f2)
+    
+    info "正在向 Cloudflare 注册 WARP 账号..."
+    api_resp=$(curl -sS --connect-timeout 10 --max-time 15 \
+        -H "Content-Type: application/json" \
+        -d "{\"key\":\"$pub_key\",\"install_id\":\"\",\"fcm_token\":\"\",\"warp_enabled\":true,\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000+00:00)\",\"type\":\"Linux\",\"locale\":\"en_US\"}" \
+        "https://api.cloudflareclient.com/v0a2158/reg" 2>/dev/null)
+    
+    [ -z "$api_resp" ] && { err "WARP 注册失败：API 无响应"; return 1; }
+    
+    # 解析返回数据
+    account_id=$(echo "$api_resp" | grep -oE '"id":"[^"]+' | head -n1 | cut -d'"' -f4)
+    access_token=$(echo "$api_resp" | grep -oE '"token":"[^"]+' | head -n1 | cut -d'"' -f4)
+    ipv4=$(echo "$api_resp" | grep -oE '"v4":"[0-9./]+' | head -n1 | cut -d'"' -f4)
+    ipv6=$(echo "$api_resp" | grep -oE '"v6":"[a-f0-9:/]+' | head -n1 | cut -d'"' -f4)
+    
+    [ -z "$account_id" ] && { err "WARP 注册失败：$(echo "$api_resp" | grep -oE '"message":"[^"]+' | cut -d'"' -f4)"; return 1; }
+    
+    # 保存配置到文件
+    cat > /etc/sing-box/warp_account.json <<EOF
+{
+  "account_id": "$account_id",
+  "access_token": "$access_token",
+  "private_key": "$priv_key",
+  "ipv4": "$ipv4",
+  "ipv6": "$ipv6",
+  "endpoint": "engage.cloudflareclient.com:2408",
+  "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+  "mtu": 1280,
+  "reserved": [0, 0, 0]
+}
+EOF
+    chmod 600 /etc/sing-box/warp_account.json
+    succ "WARP 账号注册成功 (ID: ${account_id:0:8}...)"
+    echo "$priv_key|$ipv4|$ipv6"
+}
+
+# 检查 WARP 状态
+check_warp_status() {
+    [ ! -f /etc/sing-box/config.json ] && echo "disabled" && return
+    
+    if jq -e '.outbounds[] | select(.tag == "warp-out")' /etc/sing-box/config.json >/dev/null 2>&1; then
+        echo "enabled"
+    else
+        echo "disabled"
+    fi
+}
+
+# 启用 WARP 出站
+enable_warp() {
+    local status=$(check_warp_status)
+    [ "$status" = "enabled" ] && { warn "WARP 已启用，无需重复操作"; return 0; }
+    
+    info "正在配置 WARP 出站..."
+    
+    # 如果没有账号信息，先注册
+    if [ ! -f /etc/sing-box/warp_account.json ]; then
+        local warp_data=$(register_warp_account)
+        [ $? -ne 0 ] && return 1
+    fi
+    
+    # 读取账号信息
+    local priv_key=$(jq -r '.private_key' /etc/sing-box/warp_account.json)
+    local ipv4=$(jq -r '.ipv4' /etc/sing-box/warp_account.json)
+    local ipv6=$(jq -r '.ipv6' /etc/sing-box/warp_account.json)
+    local endpoint=$(jq -r '.endpoint' /etc/sing-box/warp_account.json)
+    local pub_key=$(jq -r '.public_key' /etc/sing-box/warp_account.json)
+    local mtu=$(jq -r '.mtu' /etc/sing-box/warp_account.json)
+    
+    # 备份当前配置
+    cp /etc/sing-box/config.json /etc/sing-box/config.json.bak
+    
+    # 使用 jq 插入 WARP outbound
+    local new_outbound=$(cat <<EOF
+{
+  "type": "wireguard",
+  "tag": "warp-out",
+  "server": "162.159.192.1",
+  "server_port": 2408,
+  "local_address": ["$ipv4", "$ipv6"],
+  "private_key": "$priv_key",
+  "peer_public_key": "$pub_key",
+  "mtu": $mtu,
+  "reserved": [0, 0, 0]
+}
+EOF
+)
+    
+    jq --argjson warp "$new_outbound" '.outbounds += [$warp]' /etc/sing-box/config.json > /tmp/config_tmp.json
+    mv /tmp/config_tmp.json /etc/sing-box/config.json
+    
+    # 添加路由规则（流媒体走 WARP）
+    local streaming_domains='["netflix.com","disneyplus.com","hulu.com","hbomax.com","primevideo.com","youtube.com"]'
+    jq --argjson domains "$streaming_domains" '
+      .route.rules += [{
+        "domain_suffix": $domains,
+        "outbound": "warp-out"
+      }]
+    ' /etc/sing-box/config.json > /tmp/config_tmp.json
+    mv /tmp/config_tmp.json /etc/sing-box/config.json
+    
+    chmod 600 /etc/sing-box/config.json
+    
+    # 重启服务
+    if [ "$OS" = "alpine" ]; then
+        rc-service sing-box restart >/dev/null 2>&1
+    else
+        systemctl restart sing-box >/dev/null 2>&1
+    fi
+    
+    sleep 2
+    if pidof sing-box >/dev/null; then
+        succ "WARP 出站已启用并生效"
+        info "流媒体域名将自动通过 WARP 访问"
+    else
+        err "服务重启失败，已回滚配置"
+        mv /etc/sing-box/config.json.bak /etc/sing-box/config.json
+        return 1
+    fi
+}
+
+# 禁用 WARP 出站
+disable_warp() {
+    local status=$(check_warp_status)
+    [ "$status" = "disabled" ] && { warn "WARP 未启用，无需操作"; return 0; }
+    
+    info "正在禁用 WARP 出站..."
+    
+    # 备份配置
+    cp /etc/sing-box/config.json /etc/sing-box/config.json.bak
+    
+    # 删除 WARP outbound 和相关路由规则
+    jq 'del(.outbounds[] | select(.tag == "warp-out")) | 
+        del(.route.rules[] | select(.outbound == "warp-out"))' \
+        /etc/sing-box/config.json > /tmp/config_tmp.json
+    mv /tmp/config_tmp.json /etc/sing-box/config.json
+    
+    # 重启服务
+    if [ "$OS" = "alpine" ]; then
+        rc-service sing-box restart >/dev/null 2>&1
+    else
+        systemctl restart sing-box >/dev/null 2>&1
+    fi
+    
+    sleep 2
+    if pidof sing-box >/dev/null; then
+        succ "WARP 出站已禁用"
+        rm -f /etc/sing-box/config.json.bak
+    else
+        err "服务重启失败，已回滚配置"
+        mv /etc/sing-box/config.json.bak /etc/sing-box/config.json
+        return 1
+    fi
+}
+
+# WARP 管理菜单
+warp_menu() {
+    while true; do
+        local status=$(check_warp_status)
+        local status_display
+        if [ "$status" = "enabled" ]; then
+            status_display="\033[1;32m已启用 ✓\033[0m"
+        else
+            status_display="\033[1;31m未启用 ✗\033[0m"
+        fi
+        
+        echo ""
+        echo "========================================"
+        echo " WARP 流媒体解锁管理"
+        echo "========================================"
+        echo -e " 当前状态: $status_display"
+        echo "----------------------------------------"
+        echo "1. 启用 WARP 出站"
+        echo "2. 禁用 WARP 出站"
+        echo "3. 重新注册账号"
+        echo "0. 返回主菜单"
+        echo ""
+        
+        read -r -p "请选择 [0-3]: " warp_opt
+        warp_opt=$(echo "$warp_opt" | xargs echo -n 2>/dev/null || echo "$warp_opt")
+        
+        case "$warp_opt" in
+            1) enable_warp; read -r -p $'\n按回车键继续...' ;;
+            2) disable_warp; read -r -p $'\n按回车键继续...' ;;
+            3) rm -f /etc/sing-box/warp_account.json
+               info "已清除旧账号，下次启用时将自动注册"
+               read -r -p $'\n按回车键继续...' ;;
+            0) break ;;
+            *) echo -e "\033[1;31m输入有误，请重新选择\033[0m"
+               sleep 1 ;;
+        esac
+    done
+}
+
+# ==========================================
 # 信息展示模块
 # ==========================================
 get_env_data() {
@@ -916,6 +1140,7 @@ EOF
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
 create_config setup_service install_singbox info err warn succ optimize_system \
 apply_userspace_adaptive_profile apply_nic_core_boost \
+generate_wg_keys register_warp_account check_warp_status enable_warp disable_warp warp_menu \
 setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
 
     for f in "${funcs[@]}"; do
@@ -985,12 +1210,12 @@ while true; do
     echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "------------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
-    echo "4. 更新内核    5. 重启服务    6. 卸载脚本"
-    echo "0. 退出"
+    echo "4. 更新内核    5. 重启服务    6. WARP管理"
+    echo "7. 卸载脚本    0. 退出"
     echo ""  
-    read -r -p "请选择 [0-6]: " opt
+    read -r -p "请选择 [0-7]: " opt
     opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
-    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-6]$ ]]; then
+    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-7]$ ]]; then
         echo -e "\033[1;31m输入有误 [\$opt]，请重新输入\033[0m"; sleep 1; continue
     fi
     case "\$opt" in
@@ -1003,7 +1228,8 @@ while true; do
         3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+		6) warp_menu ;;
+        7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
            if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
                # 1. 停止并禁用所有服务
