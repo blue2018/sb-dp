@@ -843,24 +843,24 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 强力初始化结构：如果缺失则创建，同时清理旧的 warp 标签
-    # 使用 try-catch 思想确保即使结构极其简陋也不会报错
+    # 1. 结构初始化与清理：强制创建基础对象，移除旧的 warp 标签
+    # 同时解除 DNS 对 direct-out 的死锁，让 DNS 请求能根据路由走 WARP
     jq '
-    (.outbounds // []) as $obs |
-    (.route.rules // []) as $rules |
-    . + {
-        "outbounds": ($obs | map(select(.tag != "warp-out"))),
-        "route": {
-            "rules": ($rules | map(select(.outbound != "warp-out")))
-        }
-    }
+    .outbounds //= [] | 
+    .route //= {} | 
+    .route.rules //= [] |
+    .dns.servers |= map(if .detour == "direct-out" then del(.detour) else . end) |
+    .outbounds |= map(select(.tag != "warp-out")) |
+    .route.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
+        # 确保有账号
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 注入配置：使用最稳妥的 server/server_port 格式
+        # 2. 注入配置：使用兼容性最强的 server+port 格式
+        # 针对小鸡环境：调低 MTU (1120)，增加常用解锁域名
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
@@ -873,7 +873,14 @@ apply_warp_config() {
             "mtu": 1120
         }] + .outbounds |
         .route.rules = [
-            {"domain_suffix": ["netflix.com", "chatgpt.com", "openai.com", "cloudflare.com"], "outbound": "warp-out"}
+            {
+                "domain_suffix": [
+                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net",
+                    "disneyplus.com", "chatgpt.com", "openai.com", "anthropic.com",
+                    "cloudflare.com", "ip.gs", "ident.me"
+                ],
+                "outbound": "warp-out"
+            }
         ] + .route.rules
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
     fi
