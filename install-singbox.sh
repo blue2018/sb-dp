@@ -843,21 +843,15 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 彻底清理：不仅清标签，还要重置 DNS 逻辑，确保它不会依赖 WARP 解析
-    jq '
-    .outbounds //= [] | 
-    .route.rules //= [] |
-    .dns.servers |= map(if .detour == "direct-out" or .detour == "warp-out" then del(.detour) else . end) |
-    .outbounds |= map(select(.tag != "warp-out")) |
-    .route.rules |= map(select(.outbound != "warp-out"))
-    ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+    # 第一步：初始化结构，并强制修复 DNS 锁死问题
+    jq '.outbounds //= [] | .route.rules //= [] | .dns.servers |= map(del(.detour)) | .outbounds |= map(select(.tag != "warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 注入：换用 500 端口，并只留最核心的 Netflix
-        # 尝试避开 2408 这个被封锁的高危端口
+        # 第二步：注入极简分流配置
+        # 换用 500 端口尝试绕过母鸡对 2408 的封锁，只保留 Netflix 核心域名
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
@@ -870,10 +864,7 @@ apply_warp_config() {
             "mtu": 1100
         }] + .outbounds |
         .route.rules = [
-            {
-                "domain_suffix": ["netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net"],
-                "outbound": "warp-out"
-            }
+            {"domain_suffix": ["netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "chatgpt.com", "openai.com"], "outbound": "warp-out"}
         ] + .route.rules
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
     fi
