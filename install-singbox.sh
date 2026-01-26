@@ -843,58 +843,66 @@ register_warp_account() {
     local WARP_DIR="/etc/sing-box/warp"
     mkdir -p "$WARP_DIR" && cd "$WARP_DIR" || return 1
     
-    info "正在执行方案 A：随机化设备指纹注册..."
+    info "正在启动方案 C：Anycast 节点 + 镜像端点双路注册..."
     rm -f wgcf-account.toml wgcf-profile.conf 2>/dev/null
 
-    # 1. 自动安装必要依赖 (jq)
-    command -v jq >/dev/null 2>&1 || { 
-        info "正在安装 jq 以处理 JSON 数据..."
-        [ "$OS" = "alpine" ] && apk add --no-cache jq || apt-get install -y jq
-    }
+    # 1. 确保 jq 环境
+    command -v jq >/dev/null 2>&1 || { [ "$OS" = "alpine" ] && apk add --no-cache jq || apt-get install -y jq; }
 
-    # 2. 内置生成 WireGuard 密钥对 (不依赖 wireguard-tools)
+    # 2. 内置生成密钥
     local priv_key=$(openssl rand -base64 32)
     local pub_key=$(echo "$priv_key" | openssl pkey -inform base64 -outform DER | openssl pkey -inform DER -pubout -outform DER | tail -c 32 | base64)
-    
-    # 3. 构造随机设备指纹 (借鉴 GitHub 最佳实践)
-    local models=("Pixel 6" "iPhone 15" "SM-S911B" "MacBookPro18,2" "iPad13,4" "Redmi Note 12")
-    local random_model=${models[$RANDOM % ${#models[@]}]}
     local install_id=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 22 | head -n 1)
-    local now_time=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+    
+    # 3. 定义端点：1. Cloudflare Anycast 直连 2. 公共镜像代理
+    # 注意：直接访问 162.159.192.1 可以绕过针对域名的 WAF 策略
+    local endpoints=(
+        "https://162.159.192.1/v0a745/reg" 
+        "https://warp-reg.007888.xyz/v0a745/reg"
+    )
 
-    # 4. 执行注册请求
-    info "使用设备型号: $random_model 尝试注册..."
-    local response=$(curl -s -X POST "https://api.cloudflareclient.com/v0a745/reg" \
-        -H "User-Agent: dash/1.0.0 (Android 12; $random_model)" \
-        -H "Content-Type: application/json" \
-        -H "Accept-Encoding: gzip" \
-        -d "{
-            \"install_id\": \"$install_id\",
-            \"tos\": \"$now_time\",
-            \"key\": \"$pub_key\",
-            \"fcm_token\": \"\",
-            \"type\": \"Android\",
-            \"model\": \"$random_model\",
-            \"locale\": \"en_US\"
-        }")
-
-    # 5. 解析并保存结果
-    if echo "$response" | grep -q "token"; then
-        local token=$(echo "$response" | jq -r '.token')
-        local id=$(echo "$response" | jq -r '.id')
+    local success=false
+    for url in "${endpoints[@]}"; do
+        local host="api.cloudflareclient.com"
+        info "尝试向 $(echo $url | cut -d'/' -f3) 发送注册请求..."
         
-        cat > wgcf-account.toml <<EOF
+        # 使用 -k 忽略 IP 访问时的证书域名不匹配，并手动指定 Host Header
+        local response=$(curl -sk -X POST "$url" \
+            -H "Host: $host" \
+            -H "User-Agent: dash/1.0.0 (Android 11; Pixel 5)" \
+            -H "Content-Type: application/json" \
+            -d "{
+                \"install_id\": \"$install_id\",
+                \"tos\": \"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",
+                \"key\": \"$pub_key\",
+                \"fcm_token\": \"\",
+                \"type\": \"Android\",
+                \"locale\": \"en_US\"
+            }")
+
+        if echo "$response" | grep -q "token"; then
+            local token=$(echo "$response" | jq -r '.token')
+            local id=$(echo "$response" | jq -r '.id')
+            
+            cat > wgcf-account.toml <<EOF
 device_id = '$id'
 access_token = '$token'
 private_key = '$priv_key'
 EOF
-        # 补全后续脚本需要的 profile 格式
+            success=true
+            break
+        else
+            warn "当前端点注册未通过，尝试下一个..."
+        fi
+    done
+
+    if [ "$success" = "true" ]; then
         /usr/local/bin/wgcf generate >/dev/null 2>&1
-        succ "方案 A 注册成功 (ID: $id)"
+        succ "方案 C 注册成功！"
     else
-        local err_msg=$(echo "$response" | jq -r '.errors[0].message' 2>/dev/null || echo "403 Forbidden")
-        err "方案 A 注册失败: $err_msg"
-        info "Cloudflare 依然拦截了该请求，可能需要尝试方案 B (强制 IPv6) 或方案 C (中转端点)。"
+        err "方案 C 依然失败。机房 IP 限制极其严格。"
+        info "请尝试在本地电脑执行：wgcf register"
+        info "然后将生成的 wgcf-account.toml 放置到 $WARP_DIR 即可。"
         cd - >/dev/null; return 1
     fi
     cd - >/dev/null
