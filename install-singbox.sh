@@ -841,92 +841,101 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 结构初始化与清理：移除旧的 warp 配置
-    jq '
-    .outbounds //= [] | 
-    .route //= {} | 
-    .route.rules //= [] |
-    .outbounds |= map(select(.tag != "warp-out")) |
-    .route.rules |= map(select(.outbound != "warp-out"))
-    ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+    # 备份当前配置
+    cp "$config" "${config}.bak" 2>/dev/null || true
 
     if [ "$action" = "enable" ]; then
         # 确保有账号
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 注入配置：关键修复点
+        # 分步骤构建配置，避免复杂的 jq 嵌套导致语法错误
+        
+        # 步骤1: 移除旧的 warp 配置
+        jq 'del(.outbounds[] | select(.tag == "warp-out")) | 
+            del(.route.rules[] | select(.outbound == "warp-out"))' \
+            "$config" > "${config}.tmp1"
+        
+        # 步骤2: 添加 warp-out 到 outbounds（插入到 direct-out 之前）
         jq --arg priv "$priv" '
-        # 在 direct-out 之前插入 warp-out
-        .outbounds = ([{
-            "type": "wireguard",
-            "tag": "warp-out",
-            "server": "162.159.192.1",
-            "server_port": 2408,
-            "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
-            "private_key": $priv,
-            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1280,
-            "reserved": [0, 0, 0]
-        }] + (.outbounds | map(select(.tag == "direct-out")))) |
+            .outbounds = [
+                {
+                    "type": "wireguard",
+                    "tag": "warp-out",
+                    "server": "162.159.192.1",
+                    "server_port": 2408,
+                    "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
+                    "private_key": $priv,
+                    "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                    "mtu": 1280
+                }
+            ] + .outbounds' \
+            "${config}.tmp1" > "${config}.tmp2"
         
-        # 确保 DNS 服务器明确使用 direct-out
-        .dns.servers |= map(
-            if .address then
-                .detour = "direct-out"
-            else . end
-        ) |
+        # 步骤3: 确保 DNS 使用 direct-out
+        jq '.dns.servers |= map(. + {"detour": "direct-out"})' \
+            "${config}.tmp2" > "${config}.tmp3"
         
-        # 路由规则：WARP 域名优先，其他默认直连
-        .route.rules = [
-            {
-                "protocol": "dns",
-                "outbound": "direct-out"
-            },
-            {
-                "domain_suffix": [
-                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net",
-                    "disneyplus.com", "disney-plus.net", "disneystreaming.com",
-                    "chatgpt.com", "openai.com", "anthropic.com",
-                    "ip.gs", "ident.me", "ipinfo.io"
-                ],
-                "outbound": "warp-out"
-            },
-            {
-                "ip_cidr": [
-                    "1.1.1.1/32",
-                    "1.0.0.1/32",
-                    "162.159.192.0/24",
-                    "162.159.193.0/24"
-                ],
-                "outbound": "warp-out"
-            }
-        ] + (.route.rules // []) |
+        # 步骤4: 添加路由规则
+        jq '.route.rules = [
+                {
+                    "protocol": "dns",
+                    "outbound": "direct-out"
+                },
+                {
+                    "domain_suffix": [
+                        "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net",
+                        "disneyplus.com", "disney-plus.net", "disneystreaming.com",
+                        "chatgpt.com", "openai.com", "anthropic.com",
+                        "ip.gs", "ident.me", "ipinfo.io"
+                    ],
+                    "outbound": "warp-out"
+                },
+                {
+                    "ip_cidr": [
+                        "1.1.1.1/32",
+                        "1.0.0.1/32"
+                    ],
+                    "outbound": "warp-out"
+                }
+            ] + (.route.rules // [])' \
+            "${config}.tmp3" > "${config}.tmp4"
         
-        # 设置默认出站为 direct-out（关键！）
-        .route.final = "direct-out" |
+        # 步骤5: 设置默认出站
+        jq '.route.final = "direct-out"' \
+            "${config}.tmp4" > "${config}.tmp"
         
-        # 优化 DNS 策略
-        .dns.strategy = "prefer_ipv4"
-        ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+        # 清理临时文件
+        rm -f "${config}.tmp1" "${config}.tmp2" "${config}.tmp3" "${config}.tmp4"
         
-        succ "WARP 配置已应用（带路由隔离）"
     else
-        # 禁用时恢复默认路由
-        jq '
-        .route.final = "direct-out" |
-        if (.dns.servers | length) > 0 then
-            .dns.servers |= map(.detour = "direct-out")
-        else . end
-        ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-        
-        info "WARP 已禁用，路由已恢复"
+        # 禁用 WARP：移除 warp-out 和相关规则
+        jq 'del(.outbounds[] | select(.tag == "warp-out")) | 
+            del(.route.rules[] | select(.outbound == "warp-out")) |
+            .route.final = "direct-out" |
+            .dns.servers |= map(. + {"detour": "direct-out"})' \
+            "$config" > "${config}.tmp"
     fi
     
-    # 3. 配置验证
-    if ! /usr/bin/sing-box check -c "$config" >/dev/null 2>&1; then
-        err "配置语法错误，回滚更改"
-        [ -f "${config}.bak" ] && mv "${config}.bak" "$config"
+    # 配置验证
+    if /usr/bin/sing-box check -c "${config}.tmp" >/dev/null 2>&1; then
+        mv "${config}.tmp" "$config"
+        rm -f "${config}.bak"
+        if [ "$action" = "enable" ]; then
+            succ "WARP 配置已应用（带路由隔离）"
+        else
+            info "WARP 已禁用，路由已恢复"
+        fi
+        return 0
+    else
+        err "配置语法错误，正在回滚..."
+        # 显示详细错误信息
+        /usr/bin/sing-box check -c "${config}.tmp" 2>&1 | head -n 10
+        rm -f "${config}.tmp"
+        if [ -f "${config}.bak" ]; then
+            mv "${config}.bak" "$config"
+            warn "已恢复到原配置"
+        fi
         return 1
     fi
 }
