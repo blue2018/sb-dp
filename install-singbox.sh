@@ -838,13 +838,11 @@ register_warp() {
     fi
 }
 
-# WARP 出站配置（保持原始 WireGuard 格式）
 apply_warp_config() {
     local action="$1"
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 结构初始化与清理：移除旧的 warp 标签
     jq '
     .outbounds //= [] | 
     .route //= {} | 
@@ -854,13 +852,10 @@ apply_warp_config() {
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
-        # 确保有账号
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 注入配置：保持你原始的 WireGuard outbound 格式
         jq --arg priv "$priv" '
-        # 在 direct-out 之前插入 warp-out
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
@@ -872,20 +867,30 @@ apply_warp_config() {
             "mtu": 1280
         }] + .outbounds |
         
-        # 路由规则：关键修复 - 确保 DNS 和默认流量不走 WARP
         .route.rules = [
             {
                 "domain_suffix": [
-                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net",
+                    # 流媒体平台
+                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxso.net",
                     "disneyplus.com", "disney-plus.net", "disneystreaming.com",
-                    "chatgpt.com", "openai.com", "anthropic.com",
-                    "ip.gs", "ident.me", "ipinfo.io"
+                    "hulu.com", "hulustream.com",
+                    "hbo.com", "hbomax.com", "max.com",
+                    "primevideo.com", "amazon.com", "amazonvideo.com",
+                    "youtube.com", "googlevideo.com", "ytimg.com",
+                    
+                    # AI 服务
+                    "openai.com", "chatgpt.com",
+                    "anthropic.com", "claude.ai",
+                    "gemini.google.com",
+                    
+                    # 测试工具（用于验证 WARP）
+                    "cloudflare.com", "cloudflare-dns.com",
+                    "ip.gs", "ident.me", "ipinfo.io", "ifconfig.me"
                 ],
                 "outbound": "warp-out"
             }
         ] + (.route.rules // []) |
         
-        # 设置默认出站为 direct-out
         .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
     fi
