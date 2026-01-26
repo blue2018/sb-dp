@@ -669,49 +669,42 @@ manage_warp() {
         echo -e "\n\033[1;34m[WARP Reddit 解锁管理]\033[0m"
         echo -e "当前状态: $status"
         echo "------------------------------------------"
-        echo "1. 开启 WARP 出站 (全自动注册并分流)"
+        echo "1. 开启 WARP 出站 (全自动注册)"
         echo "2. 禁用 WARP 出站"
         echo "0. 返回主菜单"
-        echo "------------------------------------------"
         read -r -p "请选择 [0-2]: " wopt
         
         case "$wopt" in
             1)
-                info "正在向 Cloudflare 注册设备身份..."
-                # 生成私钥，并确保不含特殊转义冲突字符（虽然Base64是标准的，但我们要确保它完整）
-                local priv_key=$(openssl rand -base64 32)
-                local now_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                info "正在注册 WARP 身份..."
+                # 使用更加健壮的方式生成私钥并剔除换行
+                local priv_key=$(openssl rand -base64 32 | tr -d '[:space:]')
+                # 校验长度是否为标准的 44 位
+                if [ ${#priv_key} -ne 44 ]; then
+                    err "私钥生成异常，请检查 openssl 是否工作正常"; break
+                fi
                 
-                local auth=$(curl -skL --connect-timeout 15 --retry 3 \
-                    -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
-                    -H 'Content-Type: application/json' \
-                    -H 'User-Agent: okhttp/3.12.1' \
-                    -d "{\"install_id\":\"\",\"key\":\"$priv_key\",\"tos\":\"$now_date\",\"model\":\"PC\",\"fcm_token\":\"\"}" 2>/dev/null)
+                local auth=$(curl -skL --connect-timeout 10 -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
+                    -H 'Content-Type: application/json' -H 'User-Agent: okhttp/3.12.1' \
+                    -d "{\"key\":\"$priv_key\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"model\":\"PC\"}" 2>/dev/null)
                 
-                local acc_id=$(echo "$auth" | jq -r '.account.id // empty' 2>/dev/null)
-                
-                if [ -n "$acc_id" ] && [ "$acc_id" != "null" ]; then
-                    # 关键修复：确保 priv_key 完整写入 warp.conf
-                    echo "PRIV_KEY=$priv_key" > "$WARP_CONF"
-                    echo "ENABLED=true" >> "$WARP_CONF"
-                    
+                if echo "$auth" | grep -q "account"; then
+                    # 注册成功，写入配置
+                    printf "PRIV_KEY=%s\nENABLED=true\n" "$priv_key" > "$WARP_CONF"
                     local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
                     create_config "$cur_p"
                     setup_service
                     succ "WARP 开启成功！"
                 else
-                    err "WARP 注册失败。"
-                    echo "API 诊断信息: $auth"
+                    err "注册失败，响应: $(echo "$auth" | cut -c1-50)..."
                 fi
                 break ;;
             2)
-                if [ -f "$WARP_CONF" ]; then
-                    sed -i 's/ENABLED=true/ENABLED=false/' "$WARP_CONF"
-                    local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
-                    create_config "$cur_p"
-                    setup_service
-                    succ "WARP 已禁用。"
-                fi
+                [ -f "$WARP_CONF" ] && sed -i 's/ENABLED=true/ENABLED=false/' "$WARP_CONF"
+                local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
+                create_config "$cur_p"
+                setup_service
+                succ "WARP 已禁用"
                 break ;;
             0) break ;;
         esac
@@ -732,44 +725,48 @@ create_config() {
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
     if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
+        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null)
         else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
     fi
     
     local PSK=$(jq -r '.inbounds[0].users[0].password // empty' /etc/sing-box/config.json 2>/dev/null)
     [ -z "$PSK" ] && PSK=$(openssl rand -hex 16)
-
-    local SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
+    local SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
     # 构造 Outbounds
     local outbounds='{"type": "direct", "tag": "direct-out", "domain_strategy": "'$ds'"}'
     local route_rules='[]'
     if [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ]; then
-        local wp=$(grep "PRIV_KEY" "$WARP_CONF" | cut -d'=' -f2)
+        # 严格提取私钥，剔除可能存在的空格或换行
+        local wp=$(grep "PRIV_KEY" "$WARP_CONF" | cut -d'=' -f2 | tr -d '[:space:]')
         if [ -n "$wp" ]; then
-            # 使用旧版格式以配合环境变量
             outbounds+=', {"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32"],"private_key":"'"$wp"'","peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1280,"system_interface":false}'
             route_rules='[{"domain_suffix":["reddit.com","redditmedia.com","redditstatic.com"],"outbound":"warp-out"}]'
         fi
     fi
 
+    # 适配 1.12.x 的 DNS 规范
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
+  "dns": {
+    "servers": [
+      {"tag": "dns-direct", "address": "8.8.8.8", "detour": "direct-out"}
+    ],
+    "strategy": "$ds"
+  },
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
-    "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
     "udp_fragment": true,
-    "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
+    "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
@@ -812,18 +809,17 @@ supervisor="supervise-daemon"
 respawn_delay=10
 respawn_max=3
 respawn_period=60
-[ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
 export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 command="/bin/sh"
 command_args="-c \"$exec_cmd\""
 pidfile="/run/\${RC_SVCNAME}.pid"
 rc_ulimit="-n 1000000"
-rc_nice="$cur_nice"
-rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
-start_pre() { ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
-start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
+start_pre() { 
+    export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
+    /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1
+}
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1 || true
