@@ -662,8 +662,6 @@ install_singbox() {
 # ==========================================
 manage_warp() {
     local WARP_CONF="/etc/sing-box/warp.conf"
-    # 再次确保 jq 存在
-    command -v jq >/dev/null 2>&1 || { err "系统中缺失 jq，请手动运行 apt install jq -y"; return 1; }
 
     while true; do
         local status="\033[1;31m已禁用\033[0m"
@@ -681,41 +679,48 @@ manage_warp() {
         case "$wopt" in
             1)
                 info "正在向 Cloudflare 注册设备身份..."
-                # 使用 openssl 生成标准 WireGuard 私钥
+                # 1. 本地生成私钥
                 local priv_key=$(openssl rand -base64 32)
-                # 使用标准的 ISO 8601 时间格式
-                local now_date=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+                local now_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
                 
-                # 执行注册请求
+                # 2. 发起注册请求 (使用我们验证过的端点和 UA)
                 local auth=$(curl -skL --connect-timeout 15 --retry 3 \
                     -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
                     -H 'Content-Type: application/json' \
                     -H 'User-Agent: okhttp/3.12.1' \
                     -d "{\"install_id\":\"\",\"key\":\"$priv_key\",\"tos\":\"$now_date\",\"model\":\"PC\",\"fcm_token\":\"\"}" 2>/dev/null)
                 
-                # 尝试解析私钥
-                local priv=$(echo "$auth" | jq -r '.config.private_key // empty' 2>/dev/null)
+                # 3. 验证返回的 JSON 是否包含账号 ID
+                local acc_id=$(echo "$auth" | jq -r '.account.id // empty' 2>/dev/null)
                 
-                if [ -z "$priv" ] || [ "$priv" = "null" ]; then
-                    err "WARP 注册失败。"
-                    echo "--- 错误诊断信息 ---"
-                    echo "API 响应内容: $auth"
-                    warn "提示：如果响应内容为空，可能是服务商拦截了 UDP/TCP 2408 端口或 CF API。"
-                else
-                    echo "PRIV_KEY=$priv" > "$WARP_CONF"
+                if [ -n "$acc_id" ] && [ "$acc_id" != "null" ]; then
+                    # 注册成功：持久化配置
+                    echo "PRIV_KEY=$priv_key" > "$WARP_CONF"
                     echo "ENABLED=true" >> "$WARP_CONF"
+                    
+                    # 4. 重载配置 (读取当前端口避免冲突)
                     local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
-                    create_config "$cur_p"; setup_service
-                    succ "WARP 已开启，Reddit 流量将通过 Cloudflare 分流"
+                    create_config "$cur_p"
+                    setup_service
+                    
+                    succ "WARP 开启成功！"
+                    info "Reddit 流量现在将通过 Cloudflare 出站。"
+                else
+                    err "WARP 注册失败。"
+                    echo "API 诊断信息: $auth"
                 fi
                 break ;;
             2)
-                [ -f "$WARP_CONF" ] && sed -i 's/ENABLED=true/ENABLED=false/' "$WARP_CONF"
-                local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
-                create_config "$cur_p"; setup_service
-                succ "WARP 已禁用，已恢复原生 IP 出站"
+                if [ -f "$WARP_CONF" ]; then
+                    sed -i 's/ENABLED=true/ENABLED=false/' "$WARP_CONF"
+                    local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
+                    create_config "$cur_p"
+                    setup_service
+                    succ "WARP 已禁用，已恢复原生 IP。"
+                fi
                 break ;;
             0) break ;;
+            *) echo -e "\033[1;31m无效选项\033[0m" ;;
         esac
     done
 }
@@ -1068,7 +1073,7 @@ while true; do
     echo "4. 更新内核    5. 重启服务    6. warp管理"
     echo "7. 卸载脚本    0. 退出"
     echo ""  
-    read -r -p "请选择 [0-6]: " opt
+    read -r -p "请选择 [0-7]: " opt
     opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
     if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-6]$ ]]; then
         echo -e "\033[1;31m输入有误 [\$opt]，请重新输入\033[0m"; sleep 1; continue
