@@ -669,10 +669,10 @@ manage_warp() {
         local status="\033[1;31m已禁用\033[0m"
         [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ] && status="\033[1;32m运行中\033[0m"
         
-        echo -e "\n\033[1;34m[WARP Reddit 解锁管理]\033[0m"
+        echo -e "\n\033[1;34m[ WARP 管理]\033[0m"
         echo -e "当前状态: $status"
         echo "------------------------------------------"
-        echo "1. 开启 WARP 出站 (全自动注册并解锁Reddit)"
+        echo "1. 开启 WARP 出站"
         echo "2. 禁用 WARP 出站"
         echo "0. 返回主菜单"
         echo "------------------------------------------"
