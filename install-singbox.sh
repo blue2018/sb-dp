@@ -843,26 +843,35 @@ register_warp_account() {
     local WARP_DIR="/etc/sing-box/warp"
     mkdir -p "$WARP_DIR" && cd "$WARP_DIR" || return 1
     
-    info "正在启动增强型注册方案 (内置密钥生成)..."
+    info "正在使用 yongge 借鉴方案：模拟移动端 + IPv6 优先注册..."
     rm -f wgcf-account.toml wgcf-profile.conf 2>/dev/null
 
-    # 1. 检查并安装 jq (必要依赖)
-    command -v jq >/dev/null 2>&1 || { [ "$OS" = "alpine" ] && apk add jq || apt-get install -y jq; }
-
-    # 2. 内置生成密钥 (不依赖 wg 命令)
+    # 1. 内置生成密钥逻辑 (不依赖 wg 或 wireguard-tools)
     local priv_key=$(openssl rand -base64 32)
     local pub_key=$(echo "$priv_key" | openssl pkey -inform base64 -outform DER | openssl pkey -inform DER -pubout -outform DER | tail -c 32 | base64)
     local install_id=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 22 | head -n 1)
     
-    # 3. 尝试多端点注册逻辑
+    # 2. 模拟 Cloudflare 官方客户端 (借鉴 warp-yg 的 Headers)
+    local UA="dash/1.0.0 (Android 11; Pixel 5)"
+    local REG_URL="https://api.cloudflareclient.com/v0a745/reg"
+    
     local success=false
-    # 端点列表：官方、公共代理 (作为中转)
-    local endpoints=("https://api.cloudflareclient.com/v0a745/reg" "https://warp-reg.007888.xyz/v0a745/reg")
+    # 优先尝试 IPv6 注册 (通常机房 IPv6 没被拉黑)
+    local ipv6_interface=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | grep -oP 'dev \K\S+')
 
-    for url in "${endpoints[@]}"; do
-        info "尝试端点: $(echo $url | cut -d'/' -f3)..."
-        local response=$(curl -s -X POST "$url" \
-            -H "User-Agent: dash/1.0.0 (Android 11; Pixel 5)" \
+    # 尝试序列：1. IPv6 官方接口 -> 2. IPv4 官方接口 -> 3. 公共注册镜像站
+    local try_cmds=(
+        "curl -6 -s --interface $ipv6_interface"
+        "curl -4 -s"
+        "curl -s"
+    )
+
+    for cmd in "${try_cmds[@]}"; do
+        [ "$cmd" == "curl -6 -s --interface " ] && continue
+        
+        info "尝试执行: $cmd ..."
+        local response=$($cmd -X POST "$REG_URL" \
+            -H "User-Agent: $UA" \
             -H "Content-Type: application/json" \
             -d "{
                 \"install_id\": \"$install_id\",
@@ -872,9 +881,10 @@ register_warp_account() {
             }")
 
         if echo "$response" | grep -q "token"; then
-            local token=$(echo "$response" | jq -r '.token')
-            local id=$(echo "$response" | jq -r '.id')
+            local token=$(echo "$response" | jq -r '.token' 2>/dev/null || echo "$response" | grep -oP '"token":"\K[^"]+')
+            local id=$(echo "$response" | jq -r '.id' 2>/dev/null || echo "$response" | grep -oP '"id":"\K[^"]+')
             
+            # 手动生成 wgcf 兼容的 account 文件
             cat > wgcf-account.toml <<EOF
 device_id = '$id'
 access_token = '$token'
@@ -886,12 +896,13 @@ EOF
     done
 
     if [ "$success" = "true" ]; then
-        # 生成配置
+        # 生成 wgcf-profile.conf 供脚本后续 parse_wgcf_config 调用
         /usr/local/bin/wgcf generate >/dev/null 2>&1
-        succ "WARP 账号全自动注册成功"
+        succ "WARP 账号注册成功 (方案：多链路尝试)"
     else
-        err "所有注册策略均被拦截。这通常意味着机房整段 IP 已被 Cloudflare 列入黑名单。"
-        info "建议：在本地电脑运行 'wgcf register'，将生成的 wgcf-account.toml 上传至 $WARP_DIR"
+        err "所有注册链路均返回 403 或失败。"
+        info "最后的绝招：尝试使用 yongge 的 Replit 注册地址在本地生成配置，然后上传到 $WARP_DIR"
+        info "Replit 地址: https://replit.com/@yonggekkk/WARP-Wireguard-Register"
         cd - >/dev/null; return 1
     fi
     cd - >/dev/null
