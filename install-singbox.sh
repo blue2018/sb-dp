@@ -841,12 +841,11 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 结构初始化与清理：强制创建基础对象，移除旧的 warp 标签
+    # 1. 结构初始化与清理：移除旧的 warp 配置
     jq '
     .outbounds //= [] | 
     .route //= {} | 
     .route.rules //= [] |
-    .dns.servers |= map(if .detour == "direct-out" then del(.detour) else . end) |
     .outbounds |= map(select(.tag != "warp-out")) |
     .route.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
@@ -856,9 +855,10 @@ apply_warp_config() {
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 注入配置：使用兼容性最强的 server+port 格式
+        # 2. 注入配置：关键修复点
         jq --arg priv "$priv" '
-        .outbounds = [{
+        # 在 direct-out 之前插入 warp-out
+        .outbounds = ([{
             "type": "wireguard",
             "tag": "warp-out",
             "server": "162.159.192.1",
@@ -866,19 +866,68 @@ apply_warp_config() {
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1120
-        }] + .outbounds |
+            "mtu": 1280,
+            "reserved": [0, 0, 0]
+        }] + (.outbounds | map(select(.tag == "direct-out")))) |
+        
+        # 确保 DNS 服务器明确使用 direct-out
+        .dns.servers |= map(
+            if .address then
+                .detour = "direct-out"
+            else . end
+        ) |
+        
+        # 路由规则：WARP 域名优先，其他默认直连
         .route.rules = [
+            {
+                "protocol": "dns",
+                "outbound": "direct-out"
+            },
             {
                 "domain_suffix": [
                     "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net",
-                    "disneyplus.com", "chatgpt.com", "openai.com", "anthropic.com",
-                    "cloudflare.com", "ip.gs", "ident.me"
+                    "disneyplus.com", "disney-plus.net", "disneystreaming.com",
+                    "chatgpt.com", "openai.com", "anthropic.com",
+                    "ip.gs", "ident.me", "ipinfo.io"
+                ],
+                "outbound": "warp-out"
+            },
+            {
+                "ip_cidr": [
+                    "1.1.1.1/32",
+                    "1.0.0.1/32",
+                    "162.159.192.0/24",
+                    "162.159.193.0/24"
                 ],
                 "outbound": "warp-out"
             }
-        ] + .route.rules
+        ] + (.route.rules // []) |
+        
+        # 设置默认出站为 direct-out（关键！）
+        .route.final = "direct-out" |
+        
+        # 优化 DNS 策略
+        .dns.strategy = "prefer_ipv4"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+        
+        succ "WARP 配置已应用（带路由隔离）"
+    else
+        # 禁用时恢复默认路由
+        jq '
+        .route.final = "direct-out" |
+        if (.dns.servers | length) > 0 then
+            .dns.servers |= map(.detour = "direct-out")
+        else . end
+        ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+        
+        info "WARP 已禁用，路由已恢复"
+    fi
+    
+    # 3. 配置验证
+    if ! /usr/bin/sing-box check -c "$config" >/dev/null 2>&1; then
+        err "配置语法错误，回滚更改"
+        [ -f "${config}.bak" ] && mv "${config}.bak" "$config"
+        return 1
     fi
 }
 
