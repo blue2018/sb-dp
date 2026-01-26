@@ -844,12 +844,32 @@ register_warp() {
     fi
 }
 
-# WARP 管理逻辑
+apply_warp_config() {
+    local action="$1" # "enable" or "disable"
+    local config="/etc/sing-box/config.json"
+    local warp_data="/etc/sing-box/warp.json"
+
+    if [ "$action" = "enable" ]; then
+        [ ! -f "$warp_data" ] && register_warp || true
+        local priv=$(jq -r '.private_key' "$warp_data")
+        
+        # 1. 注入出站 (Outbound)
+        # 2. 注入路由规则 (Rule): 默认解锁主流媒体
+        jq --arg priv "$priv" '
+        .outbounds |= ([{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32","fd01:5ca1:ab1e::1/128"],"private_key":$priv,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1280}] + .) |
+        .route.rules |= ([{"domain_suffix":["netflix.com","netflix.net","nflximg.net","nflxvideo.net","disneyplus.com","hulu.com","primevideo.com"],"outbound":"warp-out"}] + .)
+        ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+    else
+        # 移除相关配置
+        jq 'del(.outbounds[] | select(.tag=="warp-out")) | del(.route.rules[] | select(.outbound=="warp-out"))' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+    fi
+}
+
 manage_warp() {
     while true; do
-        local is_warp=$(jq -r '.outbounds[] | select(.tag=="warp-out")' /etc/sing-box/config.json 2>/dev/null)
+        local is_enabled=$(jq -r '.outbounds[] | select(.tag=="warp-out")' /etc/sing-box/config.json 2>/dev/null)
         local status_text="\033[1;31m未启用 ✗\033[0m"
-        [ -n "$is_warp" ] && status_text="\033[1;32m已启用 ✔\033[0m"
+        [ -n "$is_enabled" ] && status_text="\033[1;32m已启用 ✔\033[0m"
 
         echo -e "\n========================================"
         echo -e "  WARP 流媒体解锁管理"
@@ -862,36 +882,9 @@ manage_warp() {
         echo -e "0. 返回主菜单"
         read -r -p "请选择 [0-3]: " wopt
         case "$wopt" in
-            1)
-                # 检查是否存在账号，不存在则注册
-                [ ! -f "/etc/sing-box/warp.json" ] && register_warp
-                # 修改 config.json 增加 warp 出站和路由规则
-                # 这里通过 jq 注入配置，改动最小
-                python3 -c "
-import json, sys
-with open('/etc/sing-box/config.json', 'r+') as f:
-    conf = json.load(f)
-    # 防止重复添加
-    conf['outbounds'] = [o for o in conf['outbounds'] if o['tag'] != 'warp-out']
-    warp = {
-        \"type\": \"wireguard\", \"tag\": \"warp-out\", \"server\": \"162.159.192.1\", \"server_port\": 2408,
-        \"local_address\": [\"172.16.0.2/32\", \"fd01:5ca1:ab1e::1/128\"], \"private_key\": \"YOUR_PRIVATE_KEY\",
-        \"peer_public_key\": \"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=\", \"mtu\": 1280
-    }
-    conf['outbounds'].append(warp)
-    # 插入路由：让流媒体走 WARP
-    if 'route' not in conf: conf['route'] = {\"rules\": []}
-    conf['route']['rules'] = [r for r in conf['route'].get('rules', []) if r.get('outbound') != 'warp-out']
-    conf['route']['rules'].insert(0, {\"domain_suffix\": [\"netflix.com\", \"disneyplus.com\", \"youtube.com\"], \"outbound\": \"warp-out\"})
-    f.seek(0); json.dump(conf, f, indent=2); f.truncate()
-" && succ "WARP 出站配置已应用" && service_ctrl restart
-                ;;
-            2)
-                # 移除 warp 出站逻辑
-                jq 'del(.outbounds[] | select(.tag=="warp-out")) | del(.route.rules[] | select(.outbound=="warp-out"))' /etc/sing-box/config.json > /tmp/sb_tmp && mv /tmp/sb_tmp /etc/sing-box/config.json
-                succ "WARP 出站已禁用" && service_ctrl restart
-                ;;
-            3) rm -f /etc/sing-box/warp.json && register_warp ;;
+            1) apply_warp_config "enable" && service_ctrl restart && succ "WARP 已开启并应用流媒体分流";;
+            2) apply_warp_config "disable" && service_ctrl restart && info "WARP 已禁用";;
+            3) rm -f /etc/sing-box/warp.json && register_warp && succ "账号已重置";;
             0) break ;;
         esac
     done
@@ -997,7 +990,7 @@ EOF
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
 create_config setup_service install_singbox info err warn succ optimize_system \
-apply_userspace_adaptive_profile apply_nic_core_boost register_warp manage_warp \
+apply_userspace_adaptive_profile apply_nic_core_boost register_warp apply_warp_config manage_warp \
 setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
 
     for f in "${funcs[@]}"; do
