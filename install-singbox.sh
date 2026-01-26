@@ -865,7 +865,7 @@ apply_warp_config() {
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
-            "server": "162.159.192.1",
+            "server": "162.159.193.1",
             "server_port": 2408,
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
