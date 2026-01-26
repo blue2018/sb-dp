@@ -730,7 +730,7 @@ setup_service() {
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
         local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
         if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
-            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
+            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
             exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
         fi
         cat > /etc/init.d/sing-box <<EOF
@@ -743,6 +743,7 @@ respawn_max=3
 respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
+export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 command="/bin/sh"
 command_args="-c \"$exec_cmd\""
 pidfile="/run/\${RC_SVCNAME}.pid"
@@ -760,7 +761,7 @@ EOF
         [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
         
-		[ "$mem_total" -lt 200 ] && io_prio=4
+        [ "$mem_total" -lt 200 ] && io_prio=4
         [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
         local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
         local cpu_quota=$((real_c * 100))
@@ -778,6 +779,7 @@ Type=simple
 User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
+Environment=ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
@@ -801,7 +803,7 @@ EOF
     fi
     
     local pid=""
-	for i in 1 2 3 4 5; do 
+    for i in 1 2 3 4 5; do 
         pid=$(pidof sing-box | awk '{print $1}')
         [ -n "$pid" ] && break || sleep 0.4
     done
@@ -836,114 +838,56 @@ register_warp() {
     fi
 }
 
+# WARP 出站配置（保持原始 WireGuard 格式）
 apply_warp_config() {
     local action="$1"
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 备份当前配置
-    cp "$config" "${config}.bak" 2>/dev/null || true
+    # 1. 结构初始化与清理：移除旧的 warp 标签
+    jq '
+    .outbounds //= [] | 
+    .route //= {} | 
+    .route.rules //= [] |
+    .outbounds |= map(select(.tag != "warp-out")) |
+    .route.rules |= map(select(.outbound != "warp-out"))
+    ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         # 确保有账号
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 使用新的 endpoints 配置格式（sing-box 1.11+）
-        # 注意：endpoints 是顶层字段，不在 outbounds 内
+        # 2. 注入配置：保持你原始的 WireGuard outbound 格式
         jq --arg priv "$priv" '
-            # 1. 添加 endpoints 字段（如果不存在）
-            .endpoints //= [] |
-            
-            # 2. 移除旧的 warp endpoint（如果存在）
-            .endpoints |= map(select(.tag != "warp-ep")) |
-            
-            # 3. 添加新的 WARP endpoint
-            .endpoints += [{
-                "type": "wireguard",
-                "tag": "warp-ep",
-                "system": false,
-                "mtu": 1280,
-                "address": [
-                    "172.16.0.2/32",
-                    "fd01:5ca1:ab1e::1/128"
-                ],
-                "private_key": $priv,
-                "peers": [{
-                    "address": "162.159.192.1",
-                    "port": 2408,
-                    "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-                    "allowed_ips": [
-                        "0.0.0.0/0",
-                        "::/0"
-                    ]
-                }]
-            }] |
-            
-            # 4. 添加使用 endpoint 的 direct outbound
-            .outbounds |= map(select(.tag != "warp-out")) |
-            .outbounds = [{
-                "type": "direct",
-                "tag": "warp-out",
-                "detour": "warp-ep"
-            }] + .outbounds |
-            
-            # 5. 确保 DNS 使用 direct-out
-            .dns.servers |= map(. + {"detour": "direct-out"}) |
-            
-            # 6. 配置路由规则
-            .route.rules //= [] |
-            .route.rules |= map(select(.outbound != "warp-out")) |
-            .route.rules = [
-                {
-                    "protocol": "dns",
-                    "outbound": "direct-out"
-                },
-                {
-                    "domain_suffix": [
-                        "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net",
-                        "disneyplus.com", "disney-plus.net", "disneystreaming.com",
-                        "chatgpt.com", "openai.com", "anthropic.com",
-                        "ip.gs", "ident.me", "ipinfo.io"
-                    ],
-                    "outbound": "warp-out"
-                }
-            ] + .route.rules |
-            
-            # 7. 设置默认路由
-            .route.final = "direct-out"
-        ' "$config" > "${config}.tmp"
+        # 在 direct-out 之前插入 warp-out
+        .outbounds = [{
+            "type": "wireguard",
+            "tag": "warp-out",
+            "server": "162.159.192.1",
+            "server_port": 2408,
+            "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
+            "private_key": $priv,
+            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+            "mtu": 1280
+        }] + .outbounds |
         
-    else
-        # 禁用 WARP：移除 endpoint 和 outbound
-        jq '
-            .endpoints |= map(select(.tag != "warp-ep")) |
-            .outbounds |= map(select(.tag != "warp-out")) |
-            .route.rules |= map(select(.outbound != "warp-out")) |
-            .route.final = "direct-out" |
-            .dns.servers |= map(. + {"detour": "direct-out"})
-        ' "$config" > "${config}.tmp"
-    fi
-    
-    # 配置验证
-    if /usr/bin/sing-box check -c "${config}.tmp" >/dev/null 2>&1; then
-        mv "${config}.tmp" "$config"
-        rm -f "${config}.bak"
-        if [ "$action" = "enable" ]; then
-            succ "WARP 已启用（endpoints 模式）"
-        else
-            info "WARP 已禁用"
-        fi
-        return 0
-    else
-        err "配置验证失败，详细错误："
-        /usr/bin/sing-box check -c "${config}.tmp" 2>&1 | head -n 15
-        rm -f "${config}.tmp"
-        if [ -f "${config}.bak" ]; then
-            mv "${config}.bak" "$config"
-            warn "已回滚到原配置"
-        fi
-        return 1
+        # 路由规则：关键修复 - 确保 DNS 和默认流量不走 WARP
+        .route.rules = [
+            {
+                "domain_suffix": [
+                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net",
+                    "disneyplus.com", "disney-plus.net", "disneystreaming.com",
+                    "chatgpt.com", "openai.com", "anthropic.com",
+                    "ip.gs", "ident.me", "ipinfo.io"
+                ],
+                "outbound": "warp-out"
+            }
+        ] + (.route.rules // []) |
+        
+        # 设置默认出站为 direct-out
+        .route.final = "direct-out"
+        ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
     fi
 }
 
