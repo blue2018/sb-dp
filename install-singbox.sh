@@ -843,16 +843,12 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 彻底清理并初始化 DNS 服务器
-    # 强制让 8.8.4.4 和 1.1.1.1 走 direct-out 确保解析永远畅通
+    # 1. 核心修复：增加 DNS 引导，否则域名永远解析不出
     jq '
     .outbounds //= [] | 
     .route //= {} | 
     .route.rules //= [] |
-    .dns.servers = [
-        {"address": "8.8.4.4", "detour": "direct-out"},
-        {"address": "1.1.1.1", "detour": "direct-out"}
-    ] |
+    .dns.servers = [{"address": "1.1.1.1", "detour": "direct-out"}] |
     .outbounds |= map(select(.tag != "warp-out")) |
     .route.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
@@ -861,7 +857,8 @@ apply_warp_config() {
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 注入 WARP 规则
+        # 2. 修正 Endpoint 和 MTU
+        # MTU 降到 1120 是为了穿透 LXC 容器的网卡限制
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
@@ -871,30 +868,20 @@ apply_warp_config() {
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1280
+            "mtu": 1120
         }] + .outbounds |
         
         .route.rules = [
             {
-                "protocol": "dns",
-                "outbound": "direct-out"
-            },
-            {
                 "domain_suffix": [
                     "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxso.net",
                     "disneyplus.com", "disney-plus.net", "disneystreaming.com",
-                    "hulu.com", "hulustream.com",
-                    "hbo.com", "hbomax.com", "max.com",
-                    "primevideo.com", "amazon.com", "amazonvideo.com",
-                    "youtube.com", "googlevideo.com", "ytimg.com",
-                    "openai.com", "chatgpt.com",
-                    "anthropic.com", "claude.ai",
-                    "gemini.google.com",
-                    "cloudflare.com", "ip.gs", "ident.me", "ipinfo.io"
+                    "chatgpt.com", "openai.com", "anthropic.com", "claude.ai",
+                    "cloudflare.com", "ip.gs", "ident.me"
                 ],
                 "outbound": "warp-out"
             }
-        ] + .route.rules |
+        ] + (.route.rules // []) |
         
         .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
