@@ -662,14 +662,17 @@ install_singbox() {
 # ==========================================
 manage_warp() {
     local WARP_CONF="/etc/sing-box/warp.conf"
+    # 再次确保 jq 存在
+    command -v jq >/dev/null 2>&1 || { err "系统中缺失 jq，请手动运行 apt install jq -y"; return 1; }
+
     while true; do
         local status="\033[1;31m已禁用\033[0m"
         [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ] && status="\033[1;32m运行中\033[0m"
         
-        echo -e "\n\033[1;34m[ WARP 管理]\033[0m"
+        echo -e "\n\033[1;34m[WARP Reddit 解锁管理]\033[0m"
         echo -e "当前状态: $status"
         echo "------------------------------------------"
-        echo "1. 开启 WARP 出站"
+        echo "1. 开启 WARP 出站 (全自动注册并解锁Reddit)"
         echo "2. 禁用 WARP 出站"
         echo "0. 返回主菜单"
         echo "------------------------------------------"
@@ -678,20 +681,29 @@ manage_warp() {
         case "$wopt" in
             1)
                 info "正在向 Cloudflare 注册设备身份..."
-                local priv_key=$(openssl rand -base64 32 2>/dev/null || head -c 32 /dev/urandom | base64)
-                local auth=$(curl -skL --connect-timeout 10 "https://api.cloudflareclient.com/v0a1922/reg" \
-                    -X POST \
-                    -H 'Content-Type: application/json' \
-                    -d "{\"install_id\":\"\",\"key\":\"$priv_key\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"model\":\"PC\",\"fcm_token\":\"\"}" 2>/dev/null)
+                # 使用 openssl 生成标准 WireGuard 私钥
+                local priv_key=$(openssl rand -base64 32)
+                # 使用标准的 ISO 8601 时间格式
+                local now_date=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
                 
+                # 执行注册请求
+                local auth=$(curl -skL --connect-timeout 15 --retry 3 \
+                    -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
+                    -H 'Content-Type: application/json' \
+                    -H 'User-Agent: okhttp/3.12.1' \
+                    -d "{\"install_id\":\"\",\"key\":\"$priv_key\",\"tos\":\"$now_date\",\"model\":\"PC\",\"fcm_token\":\"\"}" 2>/dev/null)
+                
+                # 尝试解析私钥
                 local priv=$(echo "$auth" | jq -r '.config.private_key // empty' 2>/dev/null)
                 
                 if [ -z "$priv" ] || [ "$priv" = "null" ]; then
-                    err "WARP 注册失败，请检查网络或确认已安装 jq"
+                    err "WARP 注册失败。"
+                    echo "--- 错误诊断信息 ---"
+                    echo "API 响应内容: $auth"
+                    warn "提示：如果响应内容为空，可能是服务商拦截了 UDP/TCP 2408 端口或 CF API。"
                 else
                     echo "PRIV_KEY=$priv" > "$WARP_CONF"
                     echo "ENABLED=true" >> "$WARP_CONF"
-                    # 读取当前端口并重载
                     local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
                     create_config "$cur_p"; setup_service
                     succ "WARP 已开启，Reddit 流量将通过 Cloudflare 分流"
@@ -1053,7 +1065,7 @@ while true; do
     echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "------------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
-    echo "4. 更新内核    5. 重启服务    6. WARP管理"
+    echo "4. 更新内核    5. 重启服务    6. warp管理"
     echo "7. 卸载脚本    0. 退出"
     echo ""  
     read -r -p "请选择 [0-6]: " opt
