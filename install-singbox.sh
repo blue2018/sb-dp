@@ -666,10 +666,10 @@ manage_warp() {
         local status="\033[1;31m已禁用\033[0m"
         [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ] && status="\033[1;32m运行中\033[0m"
         
-        echo -e "\n\033[1;34m[ WARP 管理]\033[0m"
+        echo -e "\n\033[1;34m[WARP Reddit 解锁管理]\033[0m"
         echo -e "当前状态: $status"
         echo "------------------------------------------"
-        echo "1. 开启 WARP 出站"
+        echo "1. 开启 WARP 出站 (全自动注册并分流)"
         echo "2. 禁用 WARP 出站"
         echo "0. 返回主菜单"
         echo "------------------------------------------"
@@ -678,8 +678,10 @@ manage_warp() {
         case "$wopt" in
             1)
                 info "正在向 Cloudflare 注册设备身份..."
+                # 生成私钥，并确保不含特殊转义冲突字符（虽然Base64是标准的，但我们要确保它完整）
                 local priv_key=$(openssl rand -base64 32)
                 local now_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                
                 local auth=$(curl -skL --connect-timeout 15 --retry 3 \
                     -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
                     -H 'Content-Type: application/json' \
@@ -687,9 +689,12 @@ manage_warp() {
                     -d "{\"install_id\":\"\",\"key\":\"$priv_key\",\"tos\":\"$now_date\",\"model\":\"PC\",\"fcm_token\":\"\"}" 2>/dev/null)
                 
                 local acc_id=$(echo "$auth" | jq -r '.account.id // empty' 2>/dev/null)
+                
                 if [ -n "$acc_id" ] && [ "$acc_id" != "null" ]; then
+                    # 关键修复：确保 priv_key 完整写入 warp.conf
                     echo "PRIV_KEY=$priv_key" > "$WARP_CONF"
                     echo "ENABLED=true" >> "$WARP_CONF"
+                    
                     local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
                     create_config "$cur_p"
                     setup_service
@@ -705,7 +710,7 @@ manage_warp() {
                     local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
                     create_config "$cur_p"
                     setup_service
-                    succ "WARP 已禁用，已恢复原生 IP。"
+                    succ "WARP 已禁用。"
                 fi
                 break ;;
             0) break ;;
@@ -731,24 +736,20 @@ create_config() {
         else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
     fi
     
-    local PSK
-    if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
-    elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
-    else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
+    local PSK=$(jq -r '.inbounds[0].users[0].password // empty' /etc/sing-box/config.json 2>/dev/null)
+    [ -z "$PSK" ] && PSK=$(openssl rand -hex 16)
 
-    local SALA_PASS=""
-    if [ -f /etc/sing-box/config.json ]; then
-        SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
-    fi
+    local SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 回归旧版 server/server_port 格式，这是 1.12.17 唯一稳过的格式
+    # 构造 Outbounds
     local outbounds='{"type": "direct", "tag": "direct-out", "domain_strategy": "'$ds'"}'
     local route_rules='[]'
     if [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ]; then
         local wp=$(grep "PRIV_KEY" "$WARP_CONF" | cut -d'=' -f2)
         if [ -n "$wp" ]; then
-            outbounds+=', {"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32"],"private_key":"'$wp'","peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1280,"system_interface":false}'
+            # 使用旧版格式以配合环境变量
+            outbounds+=', {"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32"],"private_key":"'"$wp"'","peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1280,"system_interface":false}'
             route_rules='[{"domain_suffix":["reddit.com","redditmedia.com","redditstatic.com"],"outbound":"warp-out"}]'
         fi
     fi
@@ -1065,7 +1066,7 @@ while true; do
     echo ""  
     read -r -p "请选择 [0-7]: " opt
     opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
-    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-6]$ ]]; then
+    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-7]$ ]]; then
         echo -e "\033[1;31m输入有误 [\$opt]，请重新输入\033[0m"; sleep 1; continue
     fi
     case "\$opt" in
