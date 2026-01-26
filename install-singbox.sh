@@ -843,28 +843,55 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 初始化结构并清理旧配置，同时移除 DNS 的 direct-out 锁定
-    jq '.outbounds //= [] | .route.rules //= [] | .dns.servers |= map(del(.detour)) | .outbounds |= map(select(.tag != "warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+    jq '
+    .outbounds //= [] | 
+    .route //= {} | 
+    .route.rules //= [] |
+    .outbounds |= map(select(.tag != "warp-out")) |
+    .route.rules |= map(select(.outbound != "warp-out"))
+    ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 写入 WARP 配置：改用 500 端口并精简分流域名
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
-            "server": "162.159.193.1",
-            "server_port": 500,
+            "server": "162.159.192.1",
+            "server_port": 2408,
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1100
+            "mtu": 1280
         }] + .outbounds |
+        
         .route.rules = [
-            {"domain_suffix": ["netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "chatgpt.com", "openai.com", "cloudflare.com", "ip.gs"], "outbound": "warp-out"}
-        ] + .route.rules
+            {
+                "domain_suffix": [
+                    # 流媒体平台
+                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxso.net",
+                    "disneyplus.com", "disney-plus.net", "disneystreaming.com",
+                    "hulu.com", "hulustream.com",
+                    "hbo.com", "hbomax.com", "max.com",
+                    "primevideo.com", "amazon.com", "amazonvideo.com",
+                    "youtube.com", "googlevideo.com", "ytimg.com",
+                    
+                    # AI 服务
+                    "openai.com", "chatgpt.com",
+                    "anthropic.com", "claude.ai",
+                    "gemini.google.com",
+                    
+                    # 测试工具（用于验证 WARP）
+                    "cloudflare.com", "cloudflare-dns.com",
+                    "ip.gs", "ident.me", "ipinfo.io", "ifconfig.me"
+                ],
+                "outbound": "warp-out"
+            }
+        ] + (.route.rules // []) |
+        
+        .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
     fi
 }
