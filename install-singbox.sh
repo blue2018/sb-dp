@@ -843,11 +843,11 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 初始化结构，清理旧标签，并解锁 DNS 限制
+    # 1. 彻底清理：不仅清标签，还要重置 DNS 逻辑，确保它不会依赖 WARP 解析
     jq '
     .outbounds //= [] | 
     .route.rules //= [] |
-    .dns.servers |= map(if .detour == "direct-out" then del(.detour) else . end) |
+    .dns.servers |= map(if .detour == "direct-out" or .detour == "warp-out" then del(.detour) else . end) |
     .outbounds |= map(select(.tag != "warp-out")) |
     .route.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
@@ -856,25 +856,22 @@ apply_warp_config() {
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 注入精简版分流列表
-        # 移除了 cloudflare.com 等可能影响节点测速的域名
+        # 2. 注入：换用 500 端口，并只留最核心的 Netflix
+        # 尝试避开 2408 这个被封锁的高危端口
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
             "server": "162.159.193.1",
-            "server_port": 2408,
+            "server_port": 500,
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1120
+            "mtu": 1100
         }] + .outbounds |
         .route.rules = [
             {
-                "domain_suffix": [
-                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net",
-                    "disneyplus.com", "chatgpt.com", "openai.com", "anthropic.com"
-                ],
+                "domain_suffix": ["netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net"],
                 "outbound": "warp-out"
             }
         ] + .route.rules
@@ -882,7 +879,7 @@ apply_warp_config() {
     fi
 }
 
-manage_warp() {
+manage_warp() {  
     while true; do
         local is_enabled=$(grep -q "warp-out" /etc/sing-box/config.json && echo "true" || echo "false")
         local status_text="\033[1;31m未启用 ✗\033[0m"
