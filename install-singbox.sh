@@ -662,7 +662,6 @@ install_singbox() {
 # ==========================================
 manage_warp() {
     local WARP_CONF="/etc/sing-box/warp.conf"
-
     while true; do
         local status="\033[1;31m已禁用\033[0m"
         [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ] && status="\033[1;32m运行中\033[0m"
@@ -679,32 +678,22 @@ manage_warp() {
         case "$wopt" in
             1)
                 info "正在向 Cloudflare 注册设备身份..."
-                # 1. 本地生成私钥
                 local priv_key=$(openssl rand -base64 32)
                 local now_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-                
-                # 2. 发起注册请求 (使用我们验证过的端点和 UA)
                 local auth=$(curl -skL --connect-timeout 15 --retry 3 \
                     -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
                     -H 'Content-Type: application/json' \
                     -H 'User-Agent: okhttp/3.12.1' \
                     -d "{\"install_id\":\"\",\"key\":\"$priv_key\",\"tos\":\"$now_date\",\"model\":\"PC\",\"fcm_token\":\"\"}" 2>/dev/null)
                 
-                # 3. 验证返回的 JSON 是否包含账号 ID
                 local acc_id=$(echo "$auth" | jq -r '.account.id // empty' 2>/dev/null)
-                
                 if [ -n "$acc_id" ] && [ "$acc_id" != "null" ]; then
-                    # 注册成功：持久化配置
                     echo "PRIV_KEY=$priv_key" > "$WARP_CONF"
                     echo "ENABLED=true" >> "$WARP_CONF"
-                    
-                    # 4. 重载配置 (读取当前端口避免冲突)
                     local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
                     create_config "$cur_p"
                     setup_service
-                    
                     succ "WARP 开启成功！"
-                    info "Reddit 流量现在将通过 Cloudflare 出站。"
                 else
                     err "WARP 注册失败。"
                     echo "API 诊断信息: $auth"
@@ -720,7 +709,6 @@ manage_warp() {
                 fi
                 break ;;
             0) break ;;
-            *) echo -e "\033[1;31m无效选项\033[0m" ;;
         esac
     done
 }
@@ -733,7 +721,6 @@ create_config() {
     local cur_bw="${VAR_HY2_BW:-200}"
     local WARP_CONF="/etc/sing-box/warp.conf"
     mkdir -p /etc/sing-box
-    
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
@@ -741,13 +728,13 @@ create_config() {
     
     # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null)
+        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
     fi
     
     # 2. PSK (密码) 确定逻辑
     local PSK
-    if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json 2>/dev/null)
+    if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
     elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
 
@@ -758,24 +745,23 @@ create_config() {
     fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 4. WARP 模块注入逻辑
-    local outbounds='[{"type":"direct","tag":"direct-out","domain_strategy":"'$ds'"}'
+    # 4. WARP 模块注入逻辑 (适配 1.12.x Endpoint 语法)
+    local outbounds='{"type": "direct", "tag": "direct-out", "domain_strategy": "'$ds'"}'
     local route_rules='[]'
     if [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ]; then
         local wp=$(grep "PRIV_KEY" "$WARP_CONF" | cut -d'=' -f2)
         if [ -n "$wp" ]; then
-            # 1.12.17 规范的 WireGuard 配置
-            outbounds+=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32"],"private_key":"'$wp'","peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1280,"system_interface":false}'
+            # 修改点：server 和 server_port 必须放入 endpoint 中
+            outbounds+=', {"type":"wireguard","tag":"warp-out","local_address":["172.16.0.2/32"],"private_key":"'$wp'","peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","endpoint":"engage.cloudflareclient.com:2408","mtu":1280,"system_interface":false}'
             route_rules='[{"domain_suffix":["reddit.com","redditmedia.com","redditstatic.com"],"outbound":"warp-out"}]'
         fi
     fi
-    outbounds+=']'
 
     # 5. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds"},
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
@@ -791,7 +777,7 @@ create_config() {
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
-  "outbounds": $outbounds,
+  "outbounds": [$outbounds],
   "route": { "rules": $route_rules, "final": "direct-out" }
 }
 EOF
