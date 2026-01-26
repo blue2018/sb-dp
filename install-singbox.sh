@@ -840,16 +840,22 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 清理旧配置
-    jq 'del(.outbounds[] | select(.tag=="warp-out")) | del(.route.rules[] | select(.outbound=="warp-out"))' "$config" > "${config}.tmp"
+    # 先清理，同时确保基础结构存在 (防止 null 错误)
+    # 这行命令会删除旧 warp，并确保 outbounds 是个数组，route.rules 也是个数组
+    jq '
+    (.outbounds // []) as $obs | 
+    (.route.rules // []) as $rules |
+    .outbounds = ($obs | map(select(.tag != "warp-out"))) |
+    .route.rules = ($rules | map(select(.outbound != "warp-out")))
+    ' "$config" > "${config}.tmp"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
-        # 注意：这里增加了 system_interface_override 防止容器环境权限问题
-        # 调低 MTU 至 1120 以适配 NAT 小鸡常见的网络抖动
+        
+        # 注入：强制使用用户态网络栈和低 MTU
         jq --arg priv "$priv" '
-        .outbounds |= ([{
+        .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
             "server": "162.159.192.1",
@@ -859,8 +865,8 @@ apply_warp_config() {
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
             "mtu": 1120,
             "system_interface_override": false
-        }] + .) |
-        .route.rules = ([{"domain_suffix":["netflix.com","netflix.net","nflximg.net","nflxvideo.net","disneyplus.com","chatgpt.com","openai.com"],"outbound":"warp-out"}] + (.route.rules // []))
+        }] + .outbounds |
+        .route.rules = [{"domain_suffix":["netflix.com","netflix.net","nflximg.net","nflxvideo.net","disneyplus.com","chatgpt.com","openai.com"],"outbound":"warp-out"}] + .route.rules
         ' "${config}.tmp" > "$config" && rm -f "${config}.tmp"
     else
         mv "${config}.tmp" "$config"
