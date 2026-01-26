@@ -844,8 +844,11 @@ register_warp_account() {
     mkdir -p "$WARP_DIR" && cd "$WARP_DIR" || return 1
     
     info "正在注册 WARP 账号..."
+    
+    # 清理旧配置（如果存在）
     rm -f wgcf-account.toml wgcf-profile.conf 2>/dev/null
     
+    # 执行注册（最多重试 3 次，因 Cloudflare API 可能偶尔超时）
     local retry=0
     while [ $retry -lt 3 ]; do
         if /usr/local/bin/wgcf register --accept-tos >/dev/null 2>&1; then
@@ -856,6 +859,7 @@ register_warp_account() {
         fi
     done
     
+    # 生成 WireGuard 配置文件
     /usr/local/bin/wgcf generate >/dev/null 2>&1 || { err "配置生成失败"; cd - >/dev/null; return 1; }
     
     [ -f wgcf-profile.conf ] && succ "WARP 账号注册成功" || { err "配置文件丢失"; cd - >/dev/null; return 1; }
