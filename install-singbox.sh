@@ -866,8 +866,7 @@ apply_warp_config() {
             "endpoint": "162.159.193.1:2408",
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
-            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1120
+            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
         }] + .outbounds |
         .route.rules = [
             {
