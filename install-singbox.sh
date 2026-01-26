@@ -691,48 +691,25 @@ create_config() {
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {
-    "servers": [
-      { "tag": "dns-direct", "address": "8.8.8.8", "detour": "direct-out" },
-      { "tag": "dns-remote", "address": "1.1.1.1", "detour": "direct-out" }
-    ],
-    "strategy": "$ds",
-    "independent_cache": true
-  },
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"warp-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
-    "sniff": true,
-    "sniff_override_destination": true,
     "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
     "udp_fragment": true,
-    "tls": {
-      "enabled": true, 
-      "alpn": ["h3"], 
-      "min_version": "1.3", 
-      "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
-      "key_path": "/etc/sing-box/certs/privkey.pem"
-    },
+	"sniff": true,
+	"sniff_override_destination": true,
+    "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
-  "outbounds": [
-    {"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"},
-    {"type": "dns", "tag": "dns-out"}
-  ],
-  "route": {
-    "rules": [
-      { "protocol": "dns", "outbound": "dns-out" }
-    ],
-    "final": "direct-out",
-    "auto_detect_interface": true
-  }
+  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
