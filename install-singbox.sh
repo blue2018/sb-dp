@@ -817,16 +817,31 @@ EOF
 
 # 注册/获取 WARP WireGuard 账号 (轻量化实现)
 register_warp() {
-    info "正在从 Cloudflare 注册 WARP 账号..."
-    local res=$(curl -sSL --connect-timeout 10 "https://api.zerotrust.com/v1/reg")
-    if [ -z "$res" ] || ! echo "$res" | grep -q "token"; then
-        err "WARP 注册失败，请检查网络"; return 1
+    local warp_conf="/etc/sing-box/warp.json"
+    [ -f "$warp_conf" ] && return 0
+    info "正在安全注册 WARP 账号 (模拟端到端加密)..."
+    
+    # 生成本地 X25519 密钥对，避免服务端生成私钥
+    local priv_key=$(openssl genpkey -algorithm x25519 -outform DER | tail -c 32 | base64)
+    local pub_key=$(echo "$priv_key" | openssl pkey -inform base64 -pubout -outform DER | tail -c 32 | base64)
+    
+    # 使用随机 User-Agent 和 延迟 模拟真实客户端行为
+    sleep $((RANDOM % 3 + 1))
+    local install_id=$(openssl rand -hex 16)
+    local reg_data=$(curl -sSL -X POST -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" \
+        -d "{\"key\":\"$pub_key\",\"install_id\":\"$install_id\",\"fcm_token\":\"\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"model\":\"PC\",\"type\":\"Linux\",\"locale\":\"en_US\"}" \
+        "https://api.cloudflareclient.com/v0a1922/reg")
+
+    if echo "$reg_data" | grep -q "id"; then
+        local id=$(echo "$reg_data" | jq -r '.id')
+        local token=$(echo "$reg_data" | jq -r '.token')
+        # 写入本地存储
+        echo "{\"private_key\":\"$priv_key\",\"id\":\"$id\",\"token\":\"$token\"}" > "$warp_conf"
+        succ "WARP 账号注册成功"
+    else
+        err "WARP 注册受限 (可能是 IP 被 Cloudflare 暂时风控)，请稍后重试"
+        return 1
     fi
-    local private_key=$(openssl genpkey -algorithm x25519 -outform DER | tail -c 32 | base64)
-    # 此处简化处理：由于直接调 API 较复杂，通常使用已有的简单脚本获取
-    # 为保持轻量，我们使用成熟的单行命令获取配置，建议预设或调用 API
-    echo "$res" > /etc/sing-box/warp.json
-    succ "WARP 账号注册成功"
 }
 
 # WARP 管理逻辑
