@@ -818,7 +818,6 @@ EOF
 # ==========================================
 # warp 出站
 # ==========================================
-# 注册逻辑：保持轻量
 register_warp() {
     local warp_conf="/etc/sing-box/warp.json"
     [ -s "$warp_conf" ] && return 0
@@ -837,41 +836,45 @@ register_warp() {
     fi
 }
 
-# 注入逻辑：强制开启用户态 WireGuard 并调整 MTU
 apply_warp_config() {
     local action="$1"
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 初始化：强制 DNS 和所有路由默认走直连，给 WARP 留出极小的生存空间
+    # 1. 结构初始化与清理：强制创建基础对象，移除旧的 warp 标签
     jq '
     .outbounds //= [] | 
+    .route //= {} | 
     .route.rules //= [] |
-    .dns.servers |= map(.detour = "direct-out") |
+    .dns.servers |= map(if .detour == "direct-out" then del(.detour) else . end) |
     .outbounds |= map(select(.tag != "warp-out")) |
     .route.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
+        # 确保有账号
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 注入：只给 Netflix 走 WARP，其他任何域名都不许碰 WARP
-        # 增加 MTU 适配和简单的系统参数
+        # 2. 注入配置：使用兼容性最强的 server+port 格式
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
-            "server": "162.159.193.1",
+            "server": "162.159.192.1",
             "server_port": 2408,
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1080
+            "mtu": 1120
         }] + .outbounds |
         .route.rules = [
             {
-                "domain_suffix": ["netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net"],
+                "domain_suffix": [
+                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net",
+                    "disneyplus.com", "chatgpt.com", "openai.com", "anthropic.com",
+                    "cloudflare.com", "ip.gs", "ident.me"
+                ],
                 "outbound": "warp-out"
             }
         ] + .route.rules
@@ -898,24 +901,17 @@ manage_warp() {
         case "$wopt" in
             1)
                 apply_warp_config "enable" && {
-                    # 彻底杀掉旧进程
-                    killall -9 sing-box 2>/dev/null
-                    sleep 1
-                    # 关键：带上兼容性环境变量启动
-                    export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
-                    nohup /usr/bin/sing-box run -c /etc/sing-box/config.json >/dev/null 2>&1 &
-                    echo -e "\033[1;32m[OK] WARP 已开启 (兼容模式)\033[0m"
+                    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart >/dev/null 2>&1
+                    pidof sing-box | xargs kill -9 >/dev/null 2>&1
+                    succ "WARP 已开启 (用户态模式)"
                 } ;;
             2)
                 apply_warp_config "disable" && {
-                    killall -9 sing-box 2>/dev/null
-                    rc-service sing-box restart >/dev/null 2>&1
-                    echo -e "\033[1;34m[INFO] WARP 已禁用\033[0m"
+                    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart >/dev/null 2>&1
+                    pidof sing-box | xargs kill -9 >/dev/null 2>&1
+                    info "WARP 已禁用"
                 } ;;
-            3)
-                rm -f /etc/sing-box/warp.json
-                register_warp
-                ;;
+            3) rm -f /etc/sing-box/warp.json && register_warp ;;
             0) break ;;
         esac
     done
