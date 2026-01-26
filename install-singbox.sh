@@ -843,25 +843,24 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 第一步：强制初始化结构，防止 null 报错
-    # 无论原来长啥样，都确保有 outbounds 和 route.rules
+    # 1. 强力初始化结构：如果缺失则创建，同时清理旧的 warp 标签
+    # 使用 try-catch 思想确保即使结构极其简陋也不会报错
     jq '
-    .outbounds //= [] | 
-    .route //= {} | 
-    .route.rules //= []
+    (.outbounds // []) as $obs |
+    (.route.rules // []) as $rules |
+    . + {
+        "outbounds": ($obs | map(select(.tag != "warp-out"))),
+        "route": {
+            "rules": ($rules | map(select(.outbound != "warp-out")))
+        }
+    }
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-
-    # 第二步：清理旧的 warp 标签
-    jq '
-    .outbounds |= map(select(.tag != "warp-out")) |
-    .route.rules |= map(select(.outbound != "warp-out"))
-    ' "$config" > "${config}.tmp"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 第三步：注入兼容性配置 (使用 server/server_port 适配旧版或稳定版)
+        # 2. 注入配置：使用最稳妥的 server/server_port 格式
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
@@ -876,9 +875,7 @@ apply_warp_config() {
         .route.rules = [
             {"domain_suffix": ["netflix.com", "chatgpt.com", "openai.com", "cloudflare.com"], "outbound": "warp-out"}
         ] + .route.rules
-        ' "${config}.tmp" > "$config" && rm -f "${config}.tmp"
-    else
-        mv "${config}.tmp" "$config"
+        ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
     fi
 }
 
