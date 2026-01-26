@@ -843,8 +843,7 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 结构初始化与清理：强制创建基础对象，移除旧的 warp 标签
-    # 同时解除 DNS 对 direct-out 的死锁，让 DNS 请求能根据路由走 WARP
+    # 1. 结构初始化：确保 dns 不锁死，并清理旧标签
     jq '
     .outbounds //= [] | 
     .route //= {} | 
@@ -855,18 +854,16 @@ apply_warp_config() {
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
-        # 确保有账号
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 注入配置：使用兼容性最强的 server+port 格式
-        # 针对小鸡环境：调低 MTU (1120)，增加常用解锁域名
+        # 2. 注入新版格式：使用 endpoint 替代 server/server_port
+        # 这是解决 FATAL 报错的关键！
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
-            "server": "162.159.193.1",
-            "server_port": 2408,
+            "endpoint": "162.159.193.1:2408",
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
