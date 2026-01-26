@@ -843,27 +843,37 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 初始化结构并清理旧配置，同时移除 DNS 的 direct-out 锁定
-    jq '.outbounds //= [] | .route.rules //= [] | .dns.servers |= map(del(.detour)) | .outbounds |= map(select(.tag != "warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+    # 1. 初始化：强制 DNS 和所有路由默认走直连，给 WARP 留出极小的生存空间
+    jq '
+    .outbounds //= [] | 
+    .route.rules //= [] |
+    .dns.servers |= map(.detour = "direct-out") |
+    .outbounds |= map(select(.tag != "warp-out")) |
+    .route.rules |= map(select(.outbound != "warp-out"))
+    ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 写入 WARP 配置：改用 500 端口并精简分流域名
+        # 2. 注入：只给 Netflix 走 WARP，其他任何域名都不许碰 WARP
+        # 增加 MTU 适配和简单的系统参数
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
             "server": "162.159.193.1",
-            "server_port": 500,
+            "server_port": 2408,
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1100
+            "mtu": 1080
         }] + .outbounds |
         .route.rules = [
-            {"domain_suffix": ["netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "chatgpt.com", "openai.com"], "outbound": "warp-out"}
+            {
+                "domain_suffix": ["netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net"],
+                "outbound": "warp-out"
+            }
         ] + .route.rules
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
     fi
