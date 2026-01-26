@@ -843,15 +843,14 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 第一步：初始化结构，并强制修复 DNS 锁死问题
+    # 初始化结构并清理旧配置，同时移除 DNS 的 direct-out 锁定
     jq '.outbounds //= [] | .route.rules //= [] | .dns.servers |= map(del(.detour)) | .outbounds |= map(select(.tag != "warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 第二步：注入极简分流配置
-        # 换用 500 端口尝试绕过母鸡对 2408 的封锁，只保留 Netflix 核心域名
+        # 写入 WARP 配置：改用 500 端口并精简分流域名
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
@@ -870,7 +869,7 @@ apply_warp_config() {
     fi
 }
 
-manage_warp() {  
+manage_warp() {
     while true; do
         local is_enabled=$(grep -q "warp-out" /etc/sing-box/config.json && echo "true" || echo "false")
         local status_text="\033[1;31m未启用 ✗\033[0m"
@@ -889,20 +888,24 @@ manage_warp() { 
         case "$wopt" in
             1)
                 apply_warp_config "enable" && {
-                    # 强杀进程，确保不卡死
-                    killall sing-box 2>/dev/null
-                    # 关键：带环境变量启动
+                    # 彻底杀掉旧进程
+                    killall -9 sing-box 2>/dev/null
+                    sleep 1
+                    # 关键：带上兼容性环境变量启动
                     export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
                     nohup /usr/bin/sing-box run -c /etc/sing-box/config.json >/dev/null 2>&1 &
-                    succ "WARP 已开启 (强制兼容模式)"
+                    echo -e "\033[1;32m[OK] WARP 已开启 (兼容模式)\033[0m"
                 } ;;
             2)
                 apply_warp_config "disable" && {
-                    killall sing-box 2>/dev/null
+                    killall -9 sing-box 2>/dev/null
                     rc-service sing-box restart >/dev/null 2>&1
-                    info "WARP 已禁用"
+                    echo -e "\033[1;34m[INFO] WARP 已禁用\033[0m"
                 } ;;
-            3) rm -f /etc/sing-box/warp.json && register_warp ;;
+            3)
+                rm -f /etc/sing-box/warp.json
+                register_warp
+                ;;
             0) break ;;
         esac
     done
