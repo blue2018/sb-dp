@@ -843,66 +843,58 @@ register_warp_account() {
     local WARP_DIR="/etc/sing-box/warp"
     mkdir -p "$WARP_DIR" && cd "$WARP_DIR" || return 1
     
-    info "正在使用 yongge 借鉴方案：模拟移动端 + IPv6 优先注册..."
+    info "正在执行方案 A：随机化设备指纹注册..."
     rm -f wgcf-account.toml wgcf-profile.conf 2>/dev/null
 
-    # 1. 内置生成密钥逻辑 (不依赖 wg 或 wireguard-tools)
+    # 1. 自动安装必要依赖 (jq)
+    command -v jq >/dev/null 2>&1 || { 
+        info "正在安装 jq 以处理 JSON 数据..."
+        [ "$OS" = "alpine" ] && apk add --no-cache jq || apt-get install -y jq
+    }
+
+    # 2. 内置生成 WireGuard 密钥对 (不依赖 wireguard-tools)
     local priv_key=$(openssl rand -base64 32)
     local pub_key=$(echo "$priv_key" | openssl pkey -inform base64 -outform DER | openssl pkey -inform DER -pubout -outform DER | tail -c 32 | base64)
+    
+    # 3. 构造随机设备指纹 (借鉴 GitHub 最佳实践)
+    local models=("Pixel 6" "iPhone 15" "SM-S911B" "MacBookPro18,2" "iPad13,4" "Redmi Note 12")
+    local random_model=${models[$RANDOM % ${#models[@]}]}
     local install_id=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 22 | head -n 1)
-    
-    # 2. 模拟 Cloudflare 官方客户端 (借鉴 warp-yg 的 Headers)
-    local UA="dash/1.0.0 (Android 11; Pixel 5)"
-    local REG_URL="https://api.cloudflareclient.com/v0a745/reg"
-    
-    local success=false
-    # 优先尝试 IPv6 注册 (通常机房 IPv6 没被拉黑)
-    local ipv6_interface=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | grep -oP 'dev \K\S+')
+    local now_time=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
 
-    # 尝试序列：1. IPv6 官方接口 -> 2. IPv4 官方接口 -> 3. 公共注册镜像站
-    local try_cmds=(
-        "curl -6 -s --interface $ipv6_interface"
-        "curl -4 -s"
-        "curl -s"
-    )
+    # 4. 执行注册请求
+    info "使用设备型号: $random_model 尝试注册..."
+    local response=$(curl -s -X POST "https://api.cloudflareclient.com/v0a745/reg" \
+        -H "User-Agent: dash/1.0.0 (Android 12; $random_model)" \
+        -H "Content-Type: application/json" \
+        -H "Accept-Encoding: gzip" \
+        -d "{
+            \"install_id\": \"$install_id\",
+            \"tos\": \"$now_time\",
+            \"key\": \"$pub_key\",
+            \"fcm_token\": \"\",
+            \"type\": \"Android\",
+            \"model\": \"$random_model\",
+            \"locale\": \"en_US\"
+        }")
 
-    for cmd in "${try_cmds[@]}"; do
-        [ "$cmd" == "curl -6 -s --interface " ] && continue
+    # 5. 解析并保存结果
+    if echo "$response" | grep -q "token"; then
+        local token=$(echo "$response" | jq -r '.token')
+        local id=$(echo "$response" | jq -r '.id')
         
-        info "尝试执行: $cmd ..."
-        local response=$($cmd -X POST "$REG_URL" \
-            -H "User-Agent: $UA" \
-            -H "Content-Type: application/json" \
-            -d "{
-                \"install_id\": \"$install_id\",
-                \"tos\": \"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",
-                \"key\": \"$pub_key\",
-                \"fcm_token\": \"\"
-            }")
-
-        if echo "$response" | grep -q "token"; then
-            local token=$(echo "$response" | jq -r '.token' 2>/dev/null || echo "$response" | grep -oP '"token":"\K[^"]+')
-            local id=$(echo "$response" | jq -r '.id' 2>/dev/null || echo "$response" | grep -oP '"id":"\K[^"]+')
-            
-            # 手动生成 wgcf 兼容的 account 文件
-            cat > wgcf-account.toml <<EOF
+        cat > wgcf-account.toml <<EOF
 device_id = '$id'
 access_token = '$token'
 private_key = '$priv_key'
 EOF
-            success=true
-            break
-        fi
-    done
-
-    if [ "$success" = "true" ]; then
-        # 生成 wgcf-profile.conf 供脚本后续 parse_wgcf_config 调用
+        # 补全后续脚本需要的 profile 格式
         /usr/local/bin/wgcf generate >/dev/null 2>&1
-        succ "WARP 账号注册成功 (方案：多链路尝试)"
+        succ "方案 A 注册成功 (ID: $id)"
     else
-        err "所有注册链路均返回 403 或失败。"
-        info "最后的绝招：尝试使用 yongge 的 Replit 注册地址在本地生成配置，然后上传到 $WARP_DIR"
-        info "Replit 地址: https://replit.com/@yonggekkk/WARP-Wireguard-Register"
+        local err_msg=$(echo "$response" | jq -r '.errors[0].message' 2>/dev/null || echo "403 Forbidden")
+        err "方案 A 注册失败: $err_msg"
+        info "Cloudflare 依然拦截了该请求，可能需要尝试方案 B (强制 IPv6) 或方案 C (中转端点)。"
         cd - >/dev/null; return 1
     fi
     cd - >/dev/null
