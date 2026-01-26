@@ -849,35 +849,52 @@ apply_warp_config() {
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 分步骤构建配置，避免复杂的 jq 嵌套导致语法错误
-        
-        # 步骤1: 移除旧的 warp 配置
-        jq 'del(.outbounds[] | select(.tag == "warp-out")) | 
-            del(.route.rules[] | select(.outbound == "warp-out"))' \
-            "$config" > "${config}.tmp1"
-        
-        # 步骤2: 添加 warp-out 到 outbounds（插入到 direct-out 之前）
+        # 使用新的 endpoints 配置格式（sing-box 1.11+）
+        # 注意：endpoints 是顶层字段，不在 outbounds 内
         jq --arg priv "$priv" '
-            .outbounds = [
-                {
-                    "type": "wireguard",
-                    "tag": "warp-out",
-                    "server": "162.159.192.1",
-                    "server_port": 2408,
-                    "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
-                    "private_key": $priv,
-                    "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-                    "mtu": 1280
-                }
-            ] + .outbounds' \
-            "${config}.tmp1" > "${config}.tmp2"
-        
-        # 步骤3: 确保 DNS 使用 direct-out
-        jq '.dns.servers |= map(. + {"detour": "direct-out"})' \
-            "${config}.tmp2" > "${config}.tmp3"
-        
-        # 步骤4: 添加路由规则
-        jq '.route.rules = [
+            # 1. 添加 endpoints 字段（如果不存在）
+            .endpoints //= [] |
+            
+            # 2. 移除旧的 warp endpoint（如果存在）
+            .endpoints |= map(select(.tag != "warp-ep")) |
+            
+            # 3. 添加新的 WARP endpoint
+            .endpoints += [{
+                "type": "wireguard",
+                "tag": "warp-ep",
+                "system": false,
+                "mtu": 1280,
+                "address": [
+                    "172.16.0.2/32",
+                    "fd01:5ca1:ab1e::1/128"
+                ],
+                "private_key": $priv,
+                "peers": [{
+                    "address": "162.159.192.1",
+                    "port": 2408,
+                    "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                    "allowed_ips": [
+                        "0.0.0.0/0",
+                        "::/0"
+                    ]
+                }]
+            }] |
+            
+            # 4. 添加使用 endpoint 的 direct outbound
+            .outbounds |= map(select(.tag != "warp-out")) |
+            .outbounds = [{
+                "type": "direct",
+                "tag": "warp-out",
+                "detour": "warp-ep"
+            }] + .outbounds |
+            
+            # 5. 确保 DNS 使用 direct-out
+            .dns.servers |= map(. + {"detour": "direct-out"}) |
+            
+            # 6. 配置路由规则
+            .route.rules //= [] |
+            .route.rules |= map(select(.outbound != "warp-out")) |
+            .route.rules = [
                 {
                     "protocol": "dns",
                     "outbound": "direct-out"
@@ -890,31 +907,22 @@ apply_warp_config() {
                         "ip.gs", "ident.me", "ipinfo.io"
                     ],
                     "outbound": "warp-out"
-                },
-                {
-                    "ip_cidr": [
-                        "1.1.1.1/32",
-                        "1.0.0.1/32"
-                    ],
-                    "outbound": "warp-out"
                 }
-            ] + (.route.rules // [])' \
-            "${config}.tmp3" > "${config}.tmp4"
-        
-        # 步骤5: 设置默认出站
-        jq '.route.final = "direct-out"' \
-            "${config}.tmp4" > "${config}.tmp"
-        
-        # 清理临时文件
-        rm -f "${config}.tmp1" "${config}.tmp2" "${config}.tmp3" "${config}.tmp4"
+            ] + .route.rules |
+            
+            # 7. 设置默认路由
+            .route.final = "direct-out"
+        ' "$config" > "${config}.tmp"
         
     else
-        # 禁用 WARP：移除 warp-out 和相关规则
-        jq 'del(.outbounds[] | select(.tag == "warp-out")) | 
-            del(.route.rules[] | select(.outbound == "warp-out")) |
+        # 禁用 WARP：移除 endpoint 和 outbound
+        jq '
+            .endpoints |= map(select(.tag != "warp-ep")) |
+            .outbounds |= map(select(.tag != "warp-out")) |
+            .route.rules |= map(select(.outbound != "warp-out")) |
             .route.final = "direct-out" |
-            .dns.servers |= map(. + {"detour": "direct-out"})' \
-            "$config" > "${config}.tmp"
+            .dns.servers |= map(. + {"detour": "direct-out"})
+        ' "$config" > "${config}.tmp"
     fi
     
     # 配置验证
@@ -922,19 +930,18 @@ apply_warp_config() {
         mv "${config}.tmp" "$config"
         rm -f "${config}.bak"
         if [ "$action" = "enable" ]; then
-            succ "WARP 配置已应用（带路由隔离）"
+            succ "WARP 已启用（endpoints 模式）"
         else
-            info "WARP 已禁用，路由已恢复"
+            info "WARP 已禁用"
         fi
         return 0
     else
-        err "配置语法错误，正在回滚..."
-        # 显示详细错误信息
-        /usr/bin/sing-box check -c "${config}.tmp" 2>&1 | head -n 10
+        err "配置验证失败，详细错误："
+        /usr/bin/sing-box check -c "${config}.tmp" 2>&1 | head -n 15
         rm -f "${config}.tmp"
         if [ -f "${config}.bak" ]; then
             mv "${config}.bak" "$config"
-            warn "已恢复到原配置"
+            warn "已回滚到原配置"
         fi
         return 1
     fi
