@@ -843,8 +843,7 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 第一步：初始化结构，并修复 DNS 锁死问题
-    # 这一行就是你提到的关键：解除 8.8.8.8 等对 direct-out 的强制绑定
+    # 1. 初始化结构，清理旧标签，并解锁 DNS 限制
     jq '
     .outbounds //= [] | 
     .route.rules //= [] |
@@ -857,8 +856,8 @@ apply_warp_config() {
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 第二步：注入配置
-        # 使用 server 格式，因为我们要配合环境变量 ENABLE_DEPRECATED_WIREGUARD_OUTBOUND 使用
+        # 2. 注入精简版分流列表
+        # 移除了 cloudflare.com 等可能影响节点测速的域名
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
@@ -874,8 +873,7 @@ apply_warp_config() {
             {
                 "domain_suffix": [
                     "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net",
-                    "disneyplus.com", "chatgpt.com", "openai.com", "anthropic.com",
-                    "cloudflare.com", "ip.gs", "ident.me"
+                    "disneyplus.com", "chatgpt.com", "openai.com", "anthropic.com"
                 ],
                 "outbound": "warp-out"
             }
