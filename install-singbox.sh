@@ -843,32 +843,36 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 核心修复：增加 DNS 引导，否则域名永远解析不出
+    # 1. 基础清理与 DNS 固化
+    # 强制 DNS 使用直连，并设置策略为 ipv4_only 防止解析出 V6 地址卡死
     jq '
     .outbounds //= [] | 
     .route //= {} | 
     .route.rules //= [] |
     .dns.servers = [{"address": "1.1.1.1", "detour": "direct-out"}] |
+    .dns.strategy = "ipv4_only" |
     .outbounds |= map(select(.tag != "warp-out")) |
     .route.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
+        # 确保 WARP 账号存在
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 修正 Endpoint 和 MTU
-        # MTU 降到 1120 是为了穿透 LXC 容器的网卡限制
+        # 2. 注入精简版 WARP 配置
+        # 去掉 IPv6 地址，MTU 降至 1120 以适应 Hy2 嵌套
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
             "server": "162.159.193.1",
             "server_port": 2408,
-            "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
+            "local_address": ["172.16.0.2/32"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1120
+            "mtu": 1120,
+            "domain_strategy": "ipv4_only"
         }] + .outbounds |
         
         .route.rules = [
@@ -877,11 +881,11 @@ apply_warp_config() {
                     "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxso.net",
                     "disneyplus.com", "disney-plus.net", "disneystreaming.com",
                     "chatgpt.com", "openai.com", "anthropic.com", "claude.ai",
-                    "cloudflare.com", "ip.gs", "ident.me"
+                    "cloudflare.com", "ip.gs", "ident.me", "ipinfo.io"
                 ],
                 "outbound": "warp-out"
             }
-        ] + (.route.rules // []) |
+        ] + .route.rules |
         
         .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
