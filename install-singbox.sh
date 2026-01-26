@@ -60,25 +60,26 @@ install_dependencies() {
     if command -v apk >/dev/null 2>&1; then PM="apk"
     elif command -v apt-get >/dev/null 2>&1; then PM="apt"
     elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then PM="yum"
-    else err "未检测到支持的包管理器"; exit 1; fi
+    else err "未检测到支持的包管理器 (apk/apt-get/yum)，请手动安装依赖"; exit 1; fi
 
     case "$PM" in
-        apk) info "检测到 Alpine，安装依赖及 WireGuard 内核支持..."
-             apk update >/dev/null 2>&1
-             # 关键：Alpine 需要安装内核模块支持
-             apk add --no-cache bash curl jq openssl iproute2 coreutils grep ca-certificates tar ethtool iptables kmod wireguard-tools \
-                || { err "apk 安装失败"; exit 1; } ;;
-        apt) info "检测到 Debian/Ubuntu，正在安装依赖..."
-             export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1
+        apk) info "检测到 Alpine 系统，正在同步仓库并安装依赖..."
+             apk update >/dev/null 2>&1 || true
+             apk add --no-cache bash curl jq openssl iproute2 coreutils grep ca-certificates tar ethtool iptables \
+                || { err "apk 安装依赖失败"; exit 1; } ;;
+        apt) info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..."
+             export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1 || true
              apt-get install -y --no-install-recommends curl jq openssl ca-certificates procps iproute2 coreutils grep tar ethtool iptables kmod \
-                || { err "apt 安装失败"; exit 1; } ;;
-        yum) info "检测到 RHEL/CentOS，正在安装依赖..."
+                || { err "apt 安装依赖失败"; exit 1; } ;;
+        yum) info "检测到 RHEL/CentOS 系统，正在安装依赖..."
              M=$(command -v dnf || echo "yum")
              $M install -y curl jq openssl ca-certificates procps-ng iproute tar ethtool iptables \
-                || { err "$M 安装失败"; exit 1; } ;;
+                || { err "$M 安装依赖失败"; exit 1; } ;;
     esac
 
+    # [优化] 针对小鸡常见的 CA 证书缺失问题进行强制刷新
     [ -f /etc/ssl/certs/ca-certificates.crt ] || update-ca-certificates 2>/dev/null || true
+    for cmd in jq curl tar; do command -v "$cmd" >/dev/null 2>&1 || { err "核心依赖 $cmd 安装失败"; exit 1; }; done
     succ "所需依赖已就绪"
 }
 
@@ -656,110 +657,41 @@ install_singbox() {
 }
 
 # ==========================================
-# warp出站
-# ==========================================
-manage_warp() {
-    local WARP_CONF="/etc/sing-box/warp.conf"
-    
-    # 检测 WireGuard 内核支持
-    if ! lsmod | grep -q wireguard; then
-        modprobe wireguard 2>/dev/null || true
-    fi
-
-    while true; do
-        local status="\033[1;31m已禁用\033[0m"
-        [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ] && status="\033[1;32m运行中\033[0m"
-        
-        echo -e "\n\033[1;34m[WARP Reddit 解锁管理]\033[0m"
-        echo -e "当前状态: $status"
-        echo "------------------------------------------"
-        echo "1. 开启 WARP 出站 (全自动注册)"
-        echo "2. 禁用 WARP 出站"
-        echo "0. 返回主菜单"
-        echo "------------------------------------------"
-        read -r -p "请选择 [0-2]: " wopt
-        
-        case "$wopt" in
-            1)
-                info "正在向 Cloudflare 注册设备身份..."
-                # 强行剔除所有可能导致 byte 40 错误的空白符
-                local priv_key=$(openssl rand -base64 32 | tr -d '[:space:]')
-                local now_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-                
-                local auth=$(curl -skL --connect-timeout 15 --retry 3 \
-                    -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
-                    -H 'Content-Type: application/json' \
-                    -H 'User-Agent: okhttp/3.12.1' \
-                    -d "{\"key\":\"$priv_key\",\"tos\":\"$now_date\",\"model\":\"PC\"}" 2>/dev/null)
-                
-                local acc_id=$(echo "$auth" | jq -r '.account.id // empty' 2>/dev/null)
-                
-                if [ -n "$acc_id" ] && [ "$acc_id" != "null" ]; then
-                    # 使用 printf 确保写入文件时不带任何多余字节
-                    printf "PRIV_KEY=%s\nENABLED=true\n" "$priv_key" > "$WARP_CONF"
-                    local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
-                    create_config "$cur_p"
-                    setup_service
-                    succ "WARP 开启成功！"
-                else
-                    err "WARP 注册失败。"
-                    echo "API 响应: $auth"
-                fi
-                break ;;
-            2)
-                if [ -f "$WARP_CONF" ]; then
-                    sed -i 's/ENABLED=true/ENABLED=false/' "$WARP_CONF"
-                    local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
-                    create_config "$cur_p"
-                    setup_service
-                    succ "WARP 已禁用。"
-                fi
-                break ;;
-            0) break ;;
-        esac
-    done
-}
-
-# ==========================================
 # 配置文件生成
 # ==========================================
 create_config() {
     local PORT_HY2="${1:-}"
-    local cur_bw="${VAR_HY2_BW:-200}"
-    local WARP_CONF="/etc/sing-box/warp.conf"
+	local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
+	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
+	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
+    # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
     fi
     
-    local PSK=$(jq -r '.inbounds[0].users[0].password // empty' /etc/sing-box/config.json 2>/dev/null)
-    [ -z "$PSK" ] && PSK=$(openssl rand -hex 16)
+    # 2. PSK (密码) 确定逻辑
+    local PSK
+    if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
+    elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
+    else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
 
-    local SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
+    # 3. Salamander 混淆密码确定逻辑
+    local SALA_PASS=""
+    if [ -f /etc/sing-box/config.json ]; then
+        SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
+    fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    local outbounds='{"type": "direct", "tag": "direct-out", "domain_strategy": "'$ds'"}'
-    local route_rules='[]'
-    if [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ]; then
-        # 核心修复：清理读出的私钥中可能的脏字符
-        local wp=$(grep "PRIV_KEY" "$WARP_CONF" | cut -d'=' -f2 | tr -d '[:space:]')
-        if [ -n "$wp" ]; then
-            # 保持 1.12.x 兼容格式
-            outbounds+=', {"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32"],"private_key":"'"$wp"'","peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1280,"system_interface":false}'
-            route_rules='[{"domain_suffix":["reddit.com","redditmedia.com","redditstatic.com"],"outbound":"warp-out"}]'
-        fi
-    fi
-
+    # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds"},
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
@@ -775,8 +707,7 @@ create_config() {
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
-  "outbounds": [$outbounds],
-  "route": { "rules": $route_rules, "final": "direct-out" }
+  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
@@ -797,10 +728,9 @@ setup_service() {
     
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
-        # 注入环境变量以支持 1.12.x 的旧版 WireGuard 语法
-        local exec_cmd="export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true; nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
+        local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
         if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
-            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
+            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
             exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
         fi
         cat > /etc/init.d/sing-box <<EOF
@@ -813,7 +743,6 @@ respawn_max=3
 respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
-export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 command="/bin/sh"
 command_args="-c \"$exec_cmd\""
 pidfile="/run/\${RC_SVCNAME}.pid"
@@ -821,10 +750,7 @@ rc_ulimit="-n 1000000"
 rc_nice="$cur_nice"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
-start_pre() { 
-    ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1
-    ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & 
-}
+start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
 start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
 EOF
         chmod +x /etc/init.d/sing-box
@@ -834,7 +760,7 @@ EOF
         [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
         
-        [ "$mem_total" -lt 200 ] && io_prio=4
+		[ "$mem_total" -lt 200 ] && io_prio=4
         [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
         local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
         local cpu_quota=$((real_c * 100))
@@ -852,8 +778,7 @@ Type=simple
 User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
-Environment=ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
-ExecStartPre=/usr/bin/env ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box check -c /etc/sing-box/config.json
+ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
@@ -876,7 +801,7 @@ EOF
     fi
     
     local pid=""
-    for i in 1 2 3 4 5; do 
+	for i in 1 2 3 4 5; do 
         pid=$(pidof sing-box | awk '{print $1}')
         [ -n "$pid" ] && break || sleep 0.4
     done
@@ -886,7 +811,7 @@ EOF
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
     else 
         err "sing-box 启动失败，最近日志："; [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 5 || tail -n 5 /var/log/messages 2>/dev/null; } || { journalctl -u sing-box -n 5 --no-pager 2>/dev/null; }
-        echo -e "\033[1;33m[配置自检]\033[0m"; ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box check -c /etc/sing-box/config.json || true; exit 1
+        echo -e "\033[1;33m[配置自检]\033[0m"; /usr/bin/sing-box check -c /etc/sing-box/config.json || true; exit 1
     fi
 }
 
@@ -990,7 +915,7 @@ EOF
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
 create_config setup_service install_singbox info err warn succ optimize_system \
-apply_userspace_adaptive_profile apply_nic_core_boost manage_warp \
+apply_userspace_adaptive_profile apply_nic_core_boost \
 setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
 
     for f in "${funcs[@]}"; do
@@ -1060,12 +985,12 @@ while true; do
     echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "------------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
-    echo "4. 更新内核    5. 重启服务    6. warp管理"
-    echo "7. 卸载脚本    0. 退出"
+    echo "4. 更新内核    5. 重启服务    6. 卸载脚本"
+    echo "0. 退出"
     echo ""  
-    read -r -p "请选择 [0-7]: " opt
+    read -r -p "请选择 [0-6]: " opt
     opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
-    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-7]$ ]]; then
+    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-6]$ ]]; then
         echo -e "\033[1;31m输入有误 [\$opt]，请重新输入\033[0m"; sleep 1; continue
     fi
     case "\$opt" in
@@ -1078,8 +1003,7 @@ while true; do
         3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-		6) manage_warp;;
-        7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
            if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
                # 1. 停止并禁用所有服务
