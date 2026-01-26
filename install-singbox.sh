@@ -840,8 +840,7 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 先清理，同时确保基础结构存在 (防止 null 错误)
-    # 这行命令会删除旧 warp，并确保 outbounds 是个数组，route.rules 也是个数组
+    # 清理旧配置
     jq '
     (.outbounds // []) as $obs | 
     (.route.rules // []) as $rules |
@@ -853,7 +852,8 @@ apply_warp_config() {
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 注入：强制使用用户态网络栈和低 MTU
+        # 移除报错的 system_interface_override
+        # 在 sing-box v1.11+ 中，只要不指定 interface_name 且 type 是 wireguard，默认就是用户态
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
@@ -863,10 +863,9 @@ apply_warp_config() {
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1120,
-            "system_interface_override": false
+            "mtu": 1120
         }] + .outbounds |
-        .route.rules = [{"domain_suffix":["netflix.com","netflix.net","nflximg.net","nflxvideo.net","disneyplus.com","chatgpt.com","openai.com"],"outbound":"warp-out"}] + .route.rules
+        .route.rules = [{"domain_suffix":["netflix.com","netflix.net","nflximg.net","nflxvideo.net","disneyplus.com","chatgpt.com","openai.com","anthropic.com","cloudflare.com"],"outbound":"warp-out"}] + .route.rules
         ' "${config}.tmp" > "$config" && rm -f "${config}.tmp"
     else
         mv "${config}.tmp" "$config"
