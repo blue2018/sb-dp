@@ -863,7 +863,7 @@ apply_warp_config() {
             "mtu": 1100
         }] + .outbounds |
         .route.rules = [
-            {"domain_suffix": ["netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "chatgpt.com", "openai.com", "ip.gs"], "outbound": "warp-out"}
+            {"domain_suffix": ["netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "chatgpt.com", "openai.com", "cloudflare.com", "ip.gs"], "outbound": "warp-out"}
         ] + .route.rules
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
     fi
