@@ -843,14 +843,25 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 清理并确保基础结构
-    jq '(.outbounds // []) as $obs | .outbounds = ($obs | map(select(.tag != "warp-out"))) | del(.route.rules[] | select(.outbound == "warp-out"))' "$config" > "${config}.tmp"
+    # 第一步：强制初始化结构，防止 null 报错
+    # 无论原来长啥样，都确保有 outbounds 和 route.rules
+    jq '
+    .outbounds //= [] | 
+    .route //= {} | 
+    .route.rules //= []
+    ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+
+    # 第二步：清理旧的 warp 标签
+    jq '
+    .outbounds |= map(select(.tag != "warp-out")) |
+    .route.rules |= map(select(.outbound != "warp-out"))
+    ' "$config" > "${config}.tmp"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 使用旧版兼容格式：server + server_port
+        # 第三步：注入兼容性配置 (使用 server/server_port 适配旧版或稳定版)
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
@@ -860,8 +871,11 @@ apply_warp_config() {
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+            "mtu": 1120
         }] + .outbounds |
-        .route.rules = [{"domain_suffix":["netflix.com","chatgpt.com","openai.com","cloudflare.com"],"outbound":"warp-out"}] + (.route.rules // [])
+        .route.rules = [
+            {"domain_suffix": ["netflix.com", "chatgpt.com", "openai.com", "cloudflare.com"], "outbound": "warp-out"}
+        ] + .route.rules
         ' "${config}.tmp" > "$config" && rm -f "${config}.tmp"
     else
         mv "${config}.tmp" "$config"
