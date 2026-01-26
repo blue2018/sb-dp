@@ -56,14 +56,14 @@ detect_os() {
 
 # 依赖安装 (容错增强版)
 install_dependencies() {
-    info "正在检查系统类型..."
+    info "正在检查系统类型并安装必要依赖..."
     if command -v apk >/dev/null 2>&1; then PM="apk"
     elif command -v apt-get >/dev/null 2>&1; then PM="apt"
     elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then PM="yum"
     else err "未检测到支持的包管理器 (apk/apt-get/yum)，请手动安装依赖"; exit 1; fi
 
     case "$PM" in
-        apk) info "检测到 Alpine 系统，正在同步仓库并安装依赖..."
+        apk) info "检测到 Alpine 系统，正在安装依赖..."
              apk update >/dev/null 2>&1 || true
              apk add --no-cache bash curl jq openssl iproute2 coreutils grep ca-certificates tar ethtool iptables \
                 || { err "apk 安装依赖失败"; exit 1; } ;;
@@ -73,13 +73,14 @@ install_dependencies() {
                 || { err "apt 安装依赖失败"; exit 1; } ;;
         yum) info "检测到 RHEL/CentOS 系统，正在安装依赖..."
              M=$(command -v dnf || echo "yum")
+             $M install -y epel-release >/dev/null 2>&1 || true
              $M install -y curl jq openssl ca-certificates procps-ng iproute tar ethtool iptables \
                 || { err "$M 安装依赖失败"; exit 1; } ;;
     esac
 
     # [优化] 针对小鸡常见的 CA 证书缺失问题进行强制刷新
     [ -f /etc/ssl/certs/ca-certificates.crt ] || update-ca-certificates 2>/dev/null || true
-    for cmd in jq curl tar; do command -v "$cmd" >/dev/null 2>&1 || { err "核心依赖 $cmd 安装失败"; exit 1; }; done
+    for cmd in jq curl tar openssl; do command -v "$cmd" >/dev/null 2>&1 || { err "核心依赖 $cmd 安装失败"; exit 1; }; done
     succ "所需依赖已就绪"
 }
 
@@ -665,10 +666,10 @@ manage_warp() {
         local status="\033[1;31m已禁用\033[0m"
         [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ] && status="\033[1;32m运行中\033[0m"
         
-        echo -e "\n\033[1;34m[WARP 出站管理]\033[0m"
+        echo -e "\n\033[1;34m[ WARP 管理]\033[0m"
         echo -e "当前状态: $status"
         echo "------------------------------------------"
-        echo "1. 开启 WARP 出站 (全自动注册并解锁Reddit)"
+        echo "1. 开启 WARP 出站"
         echo "2. 禁用 WARP 出站"
         echo "0. 返回主菜单"
         echo "------------------------------------------"
@@ -676,24 +677,33 @@ manage_warp() {
         
         case "$wopt" in
             1)
-                info "正在全自动注册 WARP 身份..."
-                local auth=$(curl -sL --connect-timeout 8 "https://api.cloudflareclient.com/v0a1922/reg" -X POST -H 'Content-Type: application/json' -d '{"install_id":"","key":"'$(openssl rand -base64 32)'","tos":"'$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'","model":"PC","fcm_token":""}' 2>/dev/null)
-                local priv=$(echo "$auth" | jq -r '.config.private_key // empty')
+                info "正在向 Cloudflare 注册设备身份..."
+                local priv_key=$(openssl rand -base64 32 2>/dev/null || head -c 32 /dev/urandom | base64)
+                local auth=$(curl -skL --connect-timeout 10 "https://api.cloudflareclient.com/v0a1922/reg" \
+                    -X POST \
+                    -H 'Content-Type: application/json' \
+                    -d "{\"install_id\":\"\",\"key\":\"$priv_key\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"model\":\"PC\",\"fcm_token\":\"\"}" 2>/dev/null)
+                
+                local priv=$(echo "$auth" | jq -r '.config.private_key // empty' 2>/dev/null)
+                
                 if [ -z "$priv" ] || [ "$priv" = "null" ]; then
-                    err "WARP 注册失败，请检查 jq 是否安装或网络能否连接 Cloudflare API"
+                    err "WARP 注册失败，请检查网络或确认已安装 jq"
                 else
                     echo "PRIV_KEY=$priv" > "$WARP_CONF"
                     echo "ENABLED=true" >> "$WARP_CONF"
-                    create_config; setup_service
+                    # 读取当前端口并重载
+                    local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
+                    create_config "$cur_p"; setup_service
                     succ "WARP 已开启，Reddit 流量将通过 Cloudflare 分流"
                 fi
                 break ;;
             2)
                 [ -f "$WARP_CONF" ] && sed -i 's/ENABLED=true/ENABLED=false/' "$WARP_CONF"
-                create_config; setup_service; succ "WARP 已禁用"
+                local cur_p=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null || echo "")
+                create_config "$cur_p"; setup_service
+                succ "WARP 已禁用，已恢复原生 IP 出站"
                 break ;;
             0) break ;;
-            *) echo -e "\033[1;31m无效选项\033[0m" ;;
         esac
     done
 }
@@ -712,43 +722,54 @@ create_config() {
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # 1. 端口与密码逻辑 (保持原样)
+    # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
+        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json 2>/dev/null)
         else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
     fi
-    local PSK; if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
+    
+    # 2. PSK (密码) 确定逻辑
+    local PSK
+    if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json 2>/dev/null)
     elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
-    local SALA_PASS=""; [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null)
+
+    # 3. Salamander 混淆密码确定逻辑
+    local SALA_PASS=""
+    if [ -f /etc/sing-box/config.json ]; then
+        SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
+    fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 2. WARP 配置检测
+    # 4. WARP 模块注入逻辑
     local outbounds='[{"type":"direct","tag":"direct-out","domain_strategy":"'$ds'"}'
     local route_rules='[]'
     if [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ]; then
         local wp=$(grep "PRIV_KEY" "$WARP_CONF" | cut -d'=' -f2)
         if [ -n "$wp" ]; then
+            # 1.12.17 规范的 WireGuard 配置
             outbounds+=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32"],"private_key":"'$wp'","peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1280,"system_interface":false}'
             route_rules='[{"domain_suffix":["reddit.com","redditmedia.com","redditstatic.com"],"outbound":"warp-out"}]'
         fi
     fi
     outbounds+=']'
 
-    # 3. 写入配置文件
+    # 5. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.8.8","detour":"direct-out"}],"strategy":"$ds"},
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds"},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
     "listen_port": $PORT_HY2,
-    "users": [{"password": "$PSK"}],
+    "users": [ { "password": "$PSK" } ],
     "ignore_client_bandwidth": false,
-    "up_mbps": $cur_bw, "down_mbps": $cur_bw,
-    "udp_timeout": "$timeout", "udp_fragment": true,
+    "up_mbps": $cur_bw,
+    "down_mbps": $cur_bw,
+    "udp_timeout": "$timeout",
+    "udp_fragment": true,
     "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
