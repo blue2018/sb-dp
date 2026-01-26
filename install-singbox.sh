@@ -818,6 +818,10 @@ EOF
 # ==========================================
 # WARP 自动化管理模块
 # ==========================================
+# ==========================================
+# WARP 自动化管理模块 (增强容错版)
+# ==========================================
+
 # 下载 wgcf 工具
 download_wgcf() {
     local WGCF_BIN="/usr/local/bin/wgcf"
@@ -844,18 +848,40 @@ register_warp_account() {
     mkdir -p "$WARP_DIR" && cd "$WARP_DIR" || return 1
     
     info "正在注册 WARP 账号..."
-    
-    # 清理旧配置（如果存在）
     rm -f wgcf-account.toml wgcf-profile.conf 2>/dev/null
     
-    # 执行注册（最多重试 3 次，因 Cloudflare API 可能偶尔超时）
     local retry=0
-    while [ $retry -lt 3 ]; do
-        if /usr/local/bin/wgcf register --accept-tos >/dev/null 2>&1; then
+    local max_retry=3
+    while [ $retry -lt $max_retry ]; do
+        # 执行注册并捕获输出
+        local reg_output=$(/usr/local/bin/wgcf register --accept-tos 2>&1)
+        local reg_code=$?
+        
+        # 关键修正：即使返回非0，也检查配置文件是否已生成
+        if [ $reg_code -eq 0 ] || [ -f wgcf-account.toml ]; then
+            # 检查是否是已知的误报错误（500 Internal Server Error 但实际成功）
+            if echo "$reg_output" | grep -qi "500 Internal Server Error"; then
+                warn "Cloudflare API 返回 500 错误，但配置文件已生成（已知问题）"
+            fi
             break
         else
             retry=$((retry + 1))
-            [ $retry -lt 3 ] && { warn "注册失败，1秒后重试 ($retry/3)..."; sleep 1; } || { err "WARP 注册失败，请稍后重试"; cd - >/dev/null; return 1; }
+            if [ $retry -lt $max_retry ]; then
+                # 增加重试间隔（避免被限流）
+                local wait_time=$((retry * 5))
+                warn "注册失败 ($retry/$max_retry)，${wait_time}秒后重试..."
+                sleep $wait_time
+            else
+                err "WARP 注册失败"
+                echo -e "\n\033[1;33m可能原因:\033[0m"
+                echo "1. Cloudflare API 限流（该 IP 段注册过于频繁）"
+                echo "2. 网络连接问题"
+                echo -e "\n\033[1;36m解决方案:\033[0m"
+                echo "• 等待 15-30 分钟后重试"
+                echo "• 或使用手动配置模式（选项 4）"
+                cd - >/dev/null
+                return 1
+            fi
         fi
     done
     
@@ -866,21 +892,67 @@ register_warp_account() {
     cd - >/dev/null
 }
 
+# 手动配置 WARP（应对 API 限流）
+manual_warp_config() {
+    local WARP_DIR="/etc/sing-box/warp"
+    mkdir -p "$WARP_DIR"
+    
+    echo ""
+    echo "========================================"
+    echo " 手动配置 WARP"
+    echo "========================================"
+    echo ""
+    echo "请在其他设备上完成以下步骤："
+    echo ""
+    echo "1. 下载 wgcf 到本地电脑："
+    echo "   Windows: https://github.com/ViRb3/wgcf/releases"
+    echo "   执行: wgcf register --accept-tos"
+    echo "   执行: wgcf generate"
+    echo ""
+    echo "2. 将生成的 wgcf-profile.conf 内容复制"
+    echo ""
+    echo "3. 按回车后粘贴完整内容，输入 EOF 结束"
+    echo ""
+    read -r -p "按回车键继续..." 
+    
+    echo ""
+    echo "请粘贴 wgcf-profile.conf 内容（粘贴后输入 EOF 并回车）："
+    echo ""
+    
+    cat > "$WARP_DIR/wgcf-profile.conf" <<'MANUAL_EOF'
+MANUAL_EOF
+    
+    # 使用 cat 读取多行输入
+    while IFS= read -r line; do
+        if [ "$line" = "EOF" ]; then
+            break
+        fi
+        echo "$line" >> "$WARP_DIR/wgcf-profile.conf"
+    done
+    
+    # 验证配置文件
+    if [ -s "$WARP_DIR/wgcf-profile.conf" ] && grep -q "PrivateKey" "$WARP_DIR/wgcf-profile.conf"; then
+        succ "手动配置已保存"
+        return 0
+    else
+        err "配置文件无效或为空"
+        rm -f "$WARP_DIR/wgcf-profile.conf"
+        return 1
+    fi
+}
+
 # 解析 WireGuard 配置并提取关键参数
 parse_wgcf_config() {
     local WARP_CONF="/etc/sing-box/warp/wgcf-profile.conf"
     [ ! -f "$WARP_CONF" ] && { err "配置文件不存在，请先注册"; return 1; }
     
-    # 提取参数（使用更健壮的解析方式）
     local priv_key=$(awk -F' *= *' '/^PrivateKey/{print $2; exit}' "$WARP_CONF" | tr -d ' \r')
     local addresses=$(awk -F' *= *' '/^Address/{print $2; exit}' "$WARP_CONF" | tr -d ' \r')
     local pub_key=$(awk -F' *= *' '/^PublicKey/{print $2; exit}' "$WARP_CONF" | tr -d ' \r')
     local endpoint=$(awk -F' *= *' '/^Endpoint/{print $2; exit}' "$WARP_CONF" | tr -d ' \r')
     
-    # 数据校验
     [ -z "$priv_key" ] || [ -z "$addresses" ] && { err "配置解析失败，关键字段缺失"; return 1; }
     
-    # 导出环境变量供后续使用
     export WARP_PRIV_KEY="$priv_key"
     export WARP_ADDRESSES="$addresses"
     export WARP_PUB_KEY="${pub_key:-bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=}"
@@ -914,15 +986,10 @@ enable_warp() {
     info "正在配置 WARP 出站..."
     cp /etc/sing-box/config.json /etc/sing-box/config.json.bak
     
-    # 提取服务器和端口
     local warp_server=$(echo "$WARP_ENDPOINT" | cut -d':' -f1)
     local warp_port=$(echo "$WARP_ENDPOINT" | cut -d':' -f2)
-    
-    # 处理地址（wgcf 格式：172.16.0.2/32, 2606:4700:110:8a36:df92:102a:9602:fa18/128）
-    # 转换为 JSON 数组格式
     local addr_array=$(echo "$WARP_ADDRESSES" | sed 's/,/\n/g' | sed 's/^[ \t]*//;s/[ \t]*$//' | jq -R . | jq -s .)
     
-    # 使用 jq 插入 WARP outbound（严格按照 Sing-box 官方文档格式）
     jq --arg priv "$WARP_PRIV_KEY" \
        --arg pub "$WARP_PUB_KEY" \
        --arg server "$warp_server" \
@@ -946,13 +1013,11 @@ enable_warp() {
     
     mv /tmp/config_tmp.json /etc/sing-box/config.json
     
-    # 添加路由配置（修正：确保 route 对象存在）
     if ! jq -e '.route' /etc/sing-box/config.json >/dev/null 2>&1; then
         jq '.route = {"rules": [], "final": "direct-out"}' /etc/sing-box/config.json > /tmp/config_tmp.json
         mv /tmp/config_tmp.json /etc/sing-box/config.json
     fi
     
-    # 添加流媒体分流规则
     jq '.route.rules += [{
       "domain_suffix": [
         "netflix.com",
@@ -979,14 +1044,12 @@ enable_warp() {
     mv /tmp/config_tmp.json /etc/sing-box/config.json
     chmod 600 /etc/sing-box/config.json
     
-    # 验证配置有效性
     if ! /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
         err "配置文件格式错误，已回滚"
         cat /etc/sing-box/config.json.bak > /etc/sing-box/config.json
         return 1
     fi
     
-    # 重启服务
     info "正在重启服务..."
     if [ "$OS" = "alpine" ]; then
         rc-service sing-box restart >/dev/null 2>&1
@@ -1019,7 +1082,6 @@ disable_warp() {
     info "正在禁用 WARP 出站..."
     cp /etc/sing-box/config.json /etc/sing-box/config.json.bak
     
-    # 删除 WARP outbound 和相关路由规则
     jq 'del(.outbounds[] | select(.tag == "warp-out")) | 
         del(.route.rules[] | select(.outbound == "warp-out"))' \
         /etc/sing-box/config.json > /tmp/config_tmp.json
@@ -1065,13 +1127,14 @@ warp_menu() {
         echo "========================================"
         echo -e " 当前状态: $status_display"
         echo "----------------------------------------"
-        echo "1. 启用 WARP 出站"
+        echo "1. 启用 WARP 出站（自动注册）"
         echo "2. 禁用 WARP 出站"
         echo "3. 重新注册账号"
+        echo "4. 手动配置模式（应对 API 限流）"
         echo "0. 返回主菜单"
         echo ""
         
-        read -r -p "请选择 [0-3]: " warp_opt
+        read -r -p "请选择 [0-4]: " warp_opt
         warp_opt=$(echo "$warp_opt" | xargs echo -n 2>/dev/null || echo "$warp_opt")
         
         case "$warp_opt" in
@@ -1079,6 +1142,10 @@ warp_menu() {
             2) disable_warp; read -r -p $'\n按回车键继续...' ;;
             3) rm -rf /etc/sing-box/warp
                info "已清除旧账号，下次启用时将自动注册"
+               read -r -p $'\n按回车键继续...' ;;
+            4) if manual_warp_config; then
+                   enable_warp
+               fi
                read -r -p $'\n按回车键继续...' ;;
             0) break ;;
             *) echo -e "\033[1;31m输入有误，请重新选择\033[0m"
