@@ -657,57 +657,104 @@ install_singbox() {
 }
 
 # ==========================================
+# warp出站
+# ==========================================
+manage_warp() {
+    local WARP_CONF="/etc/sing-box/warp.conf"
+    while true; do
+        local status="\033[1;31m已禁用\033[0m"
+        [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ] && status="\033[1;32m运行中\033[0m"
+        
+        echo -e "\n\033[1;34m[WARP 出站管理]\033[0m"
+        echo -e "当前状态: $status"
+        echo "------------------------------------------"
+        echo "1. 开启 WARP 出站 (全自动注册并解锁Reddit)"
+        echo "2. 禁用 WARP 出站"
+        echo "0. 返回主菜单"
+        echo "------------------------------------------"
+        read -r -p "请选择 [0-2]: " wopt
+        
+        case "$wopt" in
+            1)
+                info "正在全自动注册 WARP 身份..."
+                local auth=$(curl -sL --connect-timeout 8 "https://api.cloudflareclient.com/v0a1922/reg" -X POST -H 'Content-Type: application/json' -d '{"install_id":"","key":"'$(openssl rand -base64 32)'","tos":"'$(date -u +%Y-%m-%dT%H:%M:%S.000Z)'","model":"PC","fcm_token":""}' 2>/dev/null)
+                local priv=$(echo "$auth" | jq -r '.config.private_key // empty')
+                if [ -z "$priv" ] || [ "$priv" = "null" ]; then
+                    err "WARP 注册失败，请检查 jq 是否安装或网络能否连接 Cloudflare API"
+                else
+                    echo "PRIV_KEY=$priv" > "$WARP_CONF"
+                    echo "ENABLED=true" >> "$WARP_CONF"
+                    create_config; setup_service
+                    succ "WARP 已开启，Reddit 流量将通过 Cloudflare 分流"
+                fi
+                break ;;
+            2)
+                [ -f "$WARP_CONF" ] && sed -i 's/ENABLED=true/ENABLED=false/' "$WARP_CONF"
+                create_config; setup_service; succ "WARP 已禁用"
+                break ;;
+            0) break ;;
+            *) echo -e "\033[1;31m无效选项\033[0m" ;;
+        esac
+    done
+}
+
+# ==========================================
 # 配置文件生成
 # ==========================================
 create_config() {
     local PORT_HY2="${1:-}"
-	local cur_bw="${VAR_HY2_BW:-200}"
+    local cur_bw="${VAR_HY2_BW:-200}"
+    local WARP_CONF="/etc/sing-box/warp.conf"
     mkdir -p /etc/sing-box
+    
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
+    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
+    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # 1. 端口确定逻辑
+    # 1. 端口与密码逻辑 (保持原样)
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
     fi
-    
-    # 2. PSK (密码) 确定逻辑
-    local PSK
-    if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
+    local PSK; if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
     elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
-
-    # 3. Salamander 混淆密码确定逻辑
-    local SALA_PASS=""
-    if [ -f /etc/sing-box/config.json ]; then
-        SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
-    fi
+    local SALA_PASS=""; [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 4. 写入 Sing-box 配置文件
+    # 2. WARP 配置检测
+    local outbounds='[{"type":"direct","tag":"direct-out","domain_strategy":"'$ds'"}'
+    local route_rules='[]'
+    if [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ]; then
+        local wp=$(grep "PRIV_KEY" "$WARP_CONF" | cut -d'=' -f2)
+        if [ -n "$wp" ]; then
+            outbounds+=',{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32"],"private_key":"'$wp'","peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1280,"system_interface":false}'
+            route_rules='[{"domain_suffix":["reddit.com","redditmedia.com","redditstatic.com"],"outbound":"warp-out"}]'
+        fi
+    fi
+    outbounds+=']'
+
+    # 3. 写入配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
+  "dns": {"servers":[{"address":"8.8.8.8","detour":"direct-out"}],"strategy":"$ds"},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
     "listen_port": $PORT_HY2,
-    "users": [ { "password": "$PSK" } ],
+    "users": [{"password": "$PSK"}],
     "ignore_client_bandwidth": false,
-    "up_mbps": $cur_bw,
-    "down_mbps": $cur_bw,
-    "udp_timeout": "$timeout",
-    "udp_fragment": true,
+    "up_mbps": $cur_bw, "down_mbps": $cur_bw,
+    "udp_timeout": "$timeout", "udp_fragment": true,
     "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
+  "outbounds": $outbounds,
+  "route": { "rules": $route_rules, "final": "direct-out" }
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
@@ -915,7 +962,7 @@ EOF
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
 create_config setup_service install_singbox info err warn succ optimize_system \
-apply_userspace_adaptive_profile apply_nic_core_boost \
+apply_userspace_adaptive_profile apply_nic_core_boost manage_warp \
 setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
 
     for f in "${funcs[@]}"; do
@@ -985,8 +1032,8 @@ while true; do
     echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "------------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
-    echo "4. 更新内核    5. 重启服务    6. 卸载脚本"
-    echo "0. 退出"
+    echo "4. 更新内核    5. 重启服务    6. WARP管理"
+    echo "7. 卸载脚本    0. 退出"
     echo ""  
     read -r -p "请选择 [0-6]: " opt
     opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
@@ -1003,7 +1050,8 @@ while true; do
         3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+		6) manage_warp;;
+        7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
            if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
                # 1. 停止并禁用所有服务
