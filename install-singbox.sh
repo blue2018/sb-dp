@@ -843,49 +843,56 @@ register_warp_account() {
     local WARP_DIR="/etc/sing-box/warp"
     mkdir -p "$WARP_DIR" && cd "$WARP_DIR" || return 1
     
-    info "正在尝试通过边缘节点绕过风控注册..."
+    info "正在启动增强型注册方案 (内置密钥生成)..."
     rm -f wgcf-account.toml wgcf-profile.conf 2>/dev/null
-    
-    # 策略 1: 模拟官方客户端的 Headers 强制注册
-    local private_key=$(wg genkey)
-    local public_key=$(echo "$private_key" | wg pubkey)
+
+    # 1. 检查并安装 jq (必要依赖)
+    command -v jq >/dev/null 2>&1 || { [ "$OS" = "alpine" ] && apk add jq || apt-get install -y jq; }
+
+    # 2. 内置生成密钥 (不依赖 wg 命令)
+    local priv_key=$(openssl rand -base64 32)
+    local pub_key=$(echo "$priv_key" | openssl pkey -inform base64 -outform DER | openssl pkey -inform DER -pubout -outform DER | tail -c 32 | base64)
     local install_id=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 22 | head -n 1)
     
-    # 使用 curl 直接模拟底层协议请求，绕过 wgcf 可能被识别的特征
-    local response=$(curl -s -X POST "https://api.cloudflareclient.com/v0a745/reg" \
-        --interface $(ip -6 route get 2606:4700:4700::1111 | grep -oP 'dev \K\S+' || echo "") \
-        -H "User-Agent: dash/1.0.0 (Android 11; Pixel 5)" \
-        -H "Content-Type: application/json" \
-        -d "{
-            \"install_id\": \"$install_id\",
-            \"tos\": \"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",
-            \"key\": \"$public_key\",
-            \"fcm_token\": \"\"
-        }")
+    # 3. 尝试多端点注册逻辑
+    local success=false
+    # 端点列表：官方、公共代理 (作为中转)
+    local endpoints=("https://api.cloudflareclient.com/v0a745/reg" "https://warp-reg.007888.xyz/v0a745/reg")
 
-    if echo "$response" | grep -q "token"; then
-        # 提取关键信息并手动构建 wgcf-account.toml (这样脚本后续的 parse 就能正常工作)
-        local token=$(echo "$response" | jq -r '.token')
-        local id=$(echo "$response" | jq -r '.id')
-        
-        cat > wgcf-account.toml <<EOF
+    for url in "${endpoints[@]}"; do
+        info "尝试端点: $(echo $url | cut -d'/' -f3)..."
+        local response=$(curl -s -X POST "$url" \
+            -H "User-Agent: dash/1.0.0 (Android 11; Pixel 5)" \
+            -H "Content-Type: application/json" \
+            -d "{
+                \"install_id\": \"$install_id\",
+                \"tos\": \"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",
+                \"key\": \"$pub_key\",
+                \"fcm_token\": \"\"
+            }")
+
+        if echo "$response" | grep -q "token"; then
+            local token=$(echo "$response" | jq -r '.token')
+            local id=$(echo "$response" | jq -r '.id')
+            
+            cat > wgcf-account.toml <<EOF
 device_id = '$id'
 access_token = '$token'
-private_key = '$private_key'
+private_key = '$priv_key'
 EOF
-        # 补全配置文件
-        /usr/local/bin/wgcf generate >/dev/null 2>&1
-        succ "WARP 账号自动绕过注册成功"
-    else
-        # 策略 2: 如果还是失败，尝试通过 IPv6 (通常 IPv6 干净很多)
-        warn "IPv4 接口依然受限，尝试 IPv6 强制链路..."
-        if /usr/local/bin/wgcf register --accept-tos --ipv6 >/dev/null 2>&1; then
-             /usr/local/bin/wgcf generate >/dev/null 2>&1
-             succ "WARP 通过 IPv6 注册成功"
-        else
-             err "所有注册通道均被 Cloudflare 拒绝，建议更换 VPS IP 或等待风控解除"
-             cd - >/dev/null; return 1
+            success=true
+            break
         fi
+    done
+
+    if [ "$success" = "true" ]; then
+        # 生成配置
+        /usr/local/bin/wgcf generate >/dev/null 2>&1
+        succ "WARP 账号全自动注册成功"
+    else
+        err "所有注册策略均被拦截。这通常意味着机房整段 IP 已被 Cloudflare 列入黑名单。"
+        info "建议：在本地电脑运行 'wgcf register'，将生成的 wgcf-account.toml 上传至 $WARP_DIR"
+        cd - >/dev/null; return 1
     fi
     cd - >/dev/null
 }
