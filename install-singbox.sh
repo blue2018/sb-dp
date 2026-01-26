@@ -726,38 +726,33 @@ create_config() {
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
     fi
     
-    # 2. PSK (密码) 确定逻辑
     local PSK
     if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
     elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
 
-    # 3. Salamander 混淆密码确定逻辑
     local SALA_PASS=""
     if [ -f /etc/sing-box/config.json ]; then
         SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 4. WARP 模块注入逻辑 (适配 1.12.x Endpoint 语法)
+    # 回归旧版 server/server_port 格式，这是 1.12.17 唯一稳过的格式
     local outbounds='{"type": "direct", "tag": "direct-out", "domain_strategy": "'$ds'"}'
     local route_rules='[]'
     if [ -f "$WARP_CONF" ] && [ "$(grep 'ENABLED' "$WARP_CONF" | cut -d'=' -f2)" = "true" ]; then
         local wp=$(grep "PRIV_KEY" "$WARP_CONF" | cut -d'=' -f2)
         if [ -n "$wp" ]; then
-            # 修改点：server 和 server_port 必须放入 endpoint 中
-            outbounds+=', {"type":"wireguard","tag":"warp-out","local_address":["172.16.0.2/32"],"private_key":"'$wp'","peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","endpoint":"engage.cloudflareclient.com:2408","mtu":1280,"system_interface":false}'
+            outbounds+=', {"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32"],"private_key":"'$wp'","peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1280,"system_interface":false}'
             route_rules='[{"domain_suffix":["reddit.com","redditmedia.com","redditstatic.com"],"outbound":"warp-out"}]'
         fi
     fi
 
-    # 5. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -797,11 +792,15 @@ setup_service() {
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
     info "配置服务 (核心: $real_c | 绑定: $core_range | 权重: $cur_nice)..."
     
+    # 定义全局启用过时 WireGuard 的变量
+    local env_deprecated="export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true;"
+
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
-        local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
+        # 在命令前注入变量
+        local exec_cmd="$env_deprecated nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
         if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
-            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
+            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
             exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
         fi
         cat > /etc/init.d/sing-box <<EOF
@@ -814,6 +813,7 @@ respawn_max=3
 respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
+export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 command="/bin/sh"
 command_args="-c \"$exec_cmd\""
 pidfile="/run/\${RC_SVCNAME}.pid"
@@ -821,17 +821,17 @@ rc_ulimit="-n 1000000"
 rc_nice="$cur_nice"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
-start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
+start_pre() { ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
 start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1 || true
     else
+        # Systemd 也要注入
         local mem_config=""
         [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
-        
-		[ "$mem_total" -lt 200 ] && io_prio=4
+        [ "$mem_total" -lt 200 ] && io_prio=4
         [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
         local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
         local cpu_quota=$((real_c * 100))
@@ -849,7 +849,8 @@ Type=simple
 User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
-ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
+Environment=ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
+ExecStartPre=/usr/bin/env ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
 ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
@@ -867,22 +868,25 @@ TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF
-
         systemctl daemon-reload && systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || true
     fi
     
+    # 检查启动状态 (保持原样)
     local pid=""
-	for i in 1 2 3 4 5; do 
+    for i in 1 2 3 4 5; do 
         pid=$(pidof sing-box | awk '{print $1}')
         [ -n "$pid" ] && break || sleep 0.4
     done
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
         local ma_mb=$(( ${ma:-0} / 1024 ))
-        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
+        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
     else 
-        err "sing-box 启动失败，最近日志："; [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 5 || tail -n 5 /var/log/messages 2>/dev/null; } || { journalctl -u sing-box -n 5 --no-pager 2>/dev/null; }
-        echo -e "\033[1;33m[配置自检]\033[0m"; /usr/bin/sing-box check -c /etc/sing-box/config.json || true; exit 1
+        err "sing-box 启动失败，最近日志："; 
+        [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 5 || tail -n 5 /var/log/messages 2>/dev/null; } || { journalctl -u sing-box -n 5 --no-pager 2>/dev/null; }
+        echo -e "\033[1;33m[配置自检]\033[0m"
+        # 自检时也要带上环境变量
+        ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box check -c /etc/sing-box/config.json || true; exit 1
     fi
 }
 
