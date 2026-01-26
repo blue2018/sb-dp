@@ -843,10 +843,16 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
+    # 1. 彻底清理并初始化 DNS 服务器
+    # 强制让 8.8.4.4 和 1.1.1.1 走 direct-out 确保解析永远畅通
     jq '
     .outbounds //= [] | 
     .route //= {} | 
     .route.rules //= [] |
+    .dns.servers = [
+        {"address": "8.8.4.4", "detour": "direct-out"},
+        {"address": "1.1.1.1", "detour": "direct-out"}
+    ] |
     .outbounds |= map(select(.tag != "warp-out")) |
     .route.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
@@ -855,11 +861,12 @@ apply_warp_config() {
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
+        # 2. 注入 WARP 规则
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
-            "server": "162.159.192.1",
+            "server": "162.159.193.1",
             "server_port": 2408,
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
@@ -869,27 +876,25 @@ apply_warp_config() {
         
         .route.rules = [
             {
+                "protocol": "dns",
+                "outbound": "direct-out"
+            },
+            {
                 "domain_suffix": [
-                    # 流媒体平台
                     "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxso.net",
                     "disneyplus.com", "disney-plus.net", "disneystreaming.com",
                     "hulu.com", "hulustream.com",
                     "hbo.com", "hbomax.com", "max.com",
                     "primevideo.com", "amazon.com", "amazonvideo.com",
                     "youtube.com", "googlevideo.com", "ytimg.com",
-                    
-                    # AI 服务
                     "openai.com", "chatgpt.com",
                     "anthropic.com", "claude.ai",
                     "gemini.google.com",
-                    
-                    # 测试工具（用于验证 WARP）
-                    "cloudflare.com", "cloudflare-dns.com",
-                    "ip.gs", "ident.me", "ipinfo.io", "ifconfig.me"
+                    "cloudflare.com", "ip.gs", "ident.me", "ipinfo.io"
                 ],
                 "outbound": "warp-out"
             }
-        ] + (.route.rules // []) |
+        ] + .route.rules |
         
         .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
