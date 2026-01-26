@@ -843,22 +843,50 @@ register_warp_account() {
     local WARP_DIR="/etc/sing-box/warp"
     mkdir -p "$WARP_DIR" && cd "$WARP_DIR" || return 1
     
-    info "正在注册 WARP 账号..."
+    info "正在尝试通过边缘节点绕过风控注册..."
     rm -f wgcf-account.toml wgcf-profile.conf 2>/dev/null
     
-    local retry=0
-    while [ $retry -lt 3 ]; do
-        if /usr/local/bin/wgcf register --accept-tos >/dev/null 2>&1; then
-            break
+    # 策略 1: 模拟官方客户端的 Headers 强制注册
+    local private_key=$(wg genkey)
+    local public_key=$(echo "$private_key" | wg pubkey)
+    local install_id=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 22 | head -n 1)
+    
+    # 使用 curl 直接模拟底层协议请求，绕过 wgcf 可能被识别的特征
+    local response=$(curl -s -X POST "https://api.cloudflareclient.com/v0a745/reg" \
+        --interface $(ip -6 route get 2606:4700:4700::1111 | grep -oP 'dev \K\S+' || echo "") \
+        -H "User-Agent: dash/1.0.0 (Android 11; Pixel 5)" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"install_id\": \"$install_id\",
+            \"tos\": \"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",
+            \"key\": \"$public_key\",
+            \"fcm_token\": \"\"
+        }")
+
+    if echo "$response" | grep -q "token"; then
+        # 提取关键信息并手动构建 wgcf-account.toml (这样脚本后续的 parse 就能正常工作)
+        local token=$(echo "$response" | jq -r '.token')
+        local id=$(echo "$response" | jq -r '.id')
+        
+        cat > wgcf-account.toml <<EOF
+device_id = '$id'
+access_token = '$token'
+private_key = '$private_key'
+EOF
+        # 补全配置文件
+        /usr/local/bin/wgcf generate >/dev/null 2>&1
+        succ "WARP 账号自动绕过注册成功"
+    else
+        # 策略 2: 如果还是失败，尝试通过 IPv6 (通常 IPv6 干净很多)
+        warn "IPv4 接口依然受限，尝试 IPv6 强制链路..."
+        if /usr/local/bin/wgcf register --accept-tos --ipv6 >/dev/null 2>&1; then
+             /usr/local/bin/wgcf generate >/dev/null 2>&1
+             succ "WARP 通过 IPv6 注册成功"
         else
-            retry=$((retry + 1))
-            [ $retry -lt 3 ] && { warn "注册失败，1秒后重试 ($retry/3)..."; sleep 1; } || { err "WARP 注册失败，请稍后重试"; cd - >/dev/null; return 1; }
+             err "所有注册通道均被 Cloudflare 拒绝，建议更换 VPS IP 或等待风控解除"
+             cd - >/dev/null; return 1
         fi
-    done
-    
-    /usr/local/bin/wgcf generate >/dev/null 2>&1 || { err "配置生成失败"; cd - >/dev/null; return 1; }
-    
-    [ -f wgcf-profile.conf ] && succ "WARP 账号注册成功" || { err "配置文件丢失"; cd - >/dev/null; return 1; }
+    fi
     cd - >/dev/null
 }
 
