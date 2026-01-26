@@ -818,7 +818,7 @@ EOF
 # ==========================================
 # warp 出站
 # ==========================================
-# 1. 注册逻辑：保持轻量
+# 注册逻辑：保持轻量
 register_warp() {
     local warp_conf="/etc/sing-box/warp.json"
     [ -s "$warp_conf" ] && return 0
@@ -837,53 +837,38 @@ register_warp() {
     fi
 }
 
-# 2. 注入逻辑：强制开启用户态 WireGuard 并调整 MTU
+# 注入逻辑：强制开启用户态 WireGuard 并调整 MTU
 apply_warp_config() {
     local action="$1"
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 结构化清理：确保不会因为字段缺失报错，并移除旧 warp 标签
-    jq '
-    (.outbounds // []) as $obs | 
-    (.route.rules // []) as $rules |
-    .outbounds = ($obs | map(select(.tag != "warp-out"))) |
-    .route.rules = ($rules | map(select(.outbound != "warp-out")))
-    ' "$config" > "${config}.tmp"
+    # 清理并确保基础结构
+    jq '(.outbounds // []) as $obs | .outbounds = ($obs | map(select(.tag != "warp-out"))) | del(.route.rules[] | select(.outbound == "warp-out"))' "$config" > "${config}.tmp"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 注入符合 1.12.x 标准的配置
-        # 使用 endpoint 格式，并确保用户态栈稳定
+        # 使用旧版兼容格式：server + server_port
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
-            "endpoint": "162.159.192.1:2408",
+            "server": "162.159.192.1",
+            "server_port": 2408,
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1120
         }] + .outbounds |
-        .route.rules = [
-            {
-                "domain_suffix": [
-                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net",
-                    "disneyplus.com", "chatgpt.com", "openai.com", "anthropic.com",
-                    "cloudflare.com", "ip.gs", "ident.me"
-                ],
-                "outbound": "warp-out"
-            }
-        ] + .route.rules
+        .route.rules = [{"domain_suffix":["netflix.com","chatgpt.com","openai.com","cloudflare.com"],"outbound":"warp-out"}] + (.route.rules // [])
         ' "${config}.tmp" > "$config" && rm -f "${config}.tmp"
     else
         mv "${config}.tmp" "$config"
     fi
 }
 
-# 3. 菜单逻辑：彻底隔离 Systemctl，保护 SSH 不断线
+# 菜单逻辑：彻底隔离 Systemctl，保护 SSH 不断线
 manage_warp() {
     while true; do
         local is_enabled=$(grep -q "warp-out" /etc/sing-box/config.json && echo "true" || echo "false")
