@@ -843,10 +843,10 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 结构初始化：确保 dns 不锁死，并清理旧标签
+    # 第一步：初始化结构，并修复 DNS 锁死问题
+    # 这一行就是你提到的关键：解除 8.8.8.8 等对 direct-out 的强制绑定
     jq '
     .outbounds //= [] | 
-    .route //= {} | 
     .route.rules //= [] |
     .dns.servers |= map(if .detour == "direct-out" then del(.detour) else . end) |
     .outbounds |= map(select(.tag != "warp-out")) |
@@ -857,16 +857,18 @@ apply_warp_config() {
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 注入新版格式：使用 endpoint 替代 server/server_port
-        # 这是解决 FATAL 报错的关键！
+        # 第二步：注入配置
+        # 使用 server 格式，因为我们要配合环境变量 ENABLE_DEPRECATED_WIREGUARD_OUTBOUND 使用
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
-            "endpoint": "162.159.193.1:2408",
+            "server": "162.159.193.1",
+            "server_port": 2408,
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
-            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+            "mtu": 1120
         }] + .outbounds |
         .route.rules = [
             {
@@ -882,7 +884,6 @@ apply_warp_config() {
     fi
 }
 
-# 菜单逻辑：彻底隔离 Systemctl，保护 SSH 不断线
 manage_warp() {
     while true; do
         local is_enabled=$(grep -q "warp-out" /etc/sing-box/config.json && echo "true" || echo "false")
@@ -902,16 +903,17 @@ manage_warp() {
         case "$wopt" in
             1)
                 apply_warp_config "enable" && {
-                    # 优先使用 OpenRC 重启，静默处理
-                    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart >/dev/null 2>&1
-                    # 兜底：如果都没有，直接 kill 掉，母鸡的守护进程会自动拉起或由脚本重新执行
-                    pidof sing-box | xargs kill -9 >/dev/null 2>&1
-                    succ "WARP 已开启 (用户态模式)"
+                    # 强杀进程，确保不卡死
+                    killall sing-box 2>/dev/null
+                    # 关键：带环境变量启动
+                    export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
+                    nohup /usr/bin/sing-box run -c /etc/sing-box/config.json >/dev/null 2>&1 &
+                    succ "WARP 已开启 (强制兼容模式)"
                 } ;;
             2)
                 apply_warp_config "disable" && {
-                    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart >/dev/null 2>&1
-                    pidof sing-box | xargs kill -9 >/dev/null 2>&1
+                    killall sing-box 2>/dev/null
+                    rc-service sing-box restart >/dev/null 2>&1
                     info "WARP 已禁用"
                 } ;;
             3) rm -f /etc/sing-box/warp.json && register_warp ;;
