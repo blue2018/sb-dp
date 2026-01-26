@@ -1,0 +1,10 @@
+1. 快速修复 DNS (最有效)
+很多廉价小鸡（尤其是某些 NAT 机或纯 IPv6 机）默认的 DNS 极其难用。直接运行这一行命令来强制修改 DNS，不需要手动打开文件：
+```bash
+echo -e "nameserver 8.8.8.8\nnameserver 1.1.1.1" > /etc/resolv.conf
+```
+2. 检查 IPv6 优先级 (常见坑)
+如果你的小鸡支持双栈（IPv4 + IPv6），有时候系统会优先走 IPv6 去连接 GitHub，但如果 IPv6 路由不通，就会报错。你可以尝试强制使用 IPv4 看看：
+```bash
+curl -4 -fsSL https://github.com/blue2018/sb-dp/raw/refs/heads/main/install-singbox.sh
+```
