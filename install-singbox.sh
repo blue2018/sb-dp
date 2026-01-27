@@ -897,14 +897,12 @@ apply_warp_config() {
     .dns.servers //= [] |
     .dns.rules //= [] |
     .endpoints //= [] |
-    .outbounds //= [] |
     .route //= {} | 
     .route.rules //= [] |
     .dns.servers |= map(select(.tag != "warp-dns")) |
-    .dns.rules |= map(select(.outbound != "warp-out")) |
+    .dns.rules |= map(select(.outbound != "warp-ep")) |
     .endpoints |= map(select(.tag != "warp-ep")) |
-    .outbounds |= map(select(.tag != "warp-out")) |
-    .route.rules |= map(select(.outbound != "warp-out"))
+    .route.rules |= map(select(.outbound != "warp-ep"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
@@ -912,17 +910,17 @@ apply_warp_config() {
         local priv=$(jq -r '.private_key' "$warp_data")
         
         jq --arg priv "$priv" '
-        # DNS 服务器
+        # Step 1: 添加 WARP DNS 服务器
         .dns.servers = [
             {
                 "tag": "warp-dns",
                 "address": "1.1.1.1",
                 "strategy": "prefer_ipv4",
-                "detour": "warp-out"
+                "detour": "warp-ep"
             }
         ] + (.dns.servers // []) |
         
-        # DNS 路由规则
+        # Step 2: DNS 规则(域名走 WARP DNS)
         .dns.rules = [
             {
                 "domain_suffix": [
@@ -960,7 +958,7 @@ apply_warp_config() {
             }
         ] + (.dns.rules // []) |
         
-        # WireGuard endpoint
+        # Step 3: WireGuard endpoint
         .endpoints = [{
             "type": "wireguard",
             "tag": "warp-ep",
@@ -977,15 +975,7 @@ apply_warp_config() {
             }]
         }] + (.endpoints // []) |
         
-        # Outbound 桥接
-        .outbounds = [{
-            "type": "direct",
-            "tag": "warp-out",
-            "endpoint": "warp-ep",
-            "domain_strategy": "prefer_ipv4"
-        }] + (.outbounds // []) |
-        
-        # 路由规则
+        # Step 4: 路由规则(直接指向 endpoint tag)
         .route.rules = [
             {
                 "domain_suffix": [
@@ -1019,14 +1009,14 @@ apply_warp_config() {
                     "cloudflare.com",
                     "ip.gs"
                 ],
-                "outbound": "warp-out"
+                "outbound": "warp-ep"
             }
         ] + (.route.rules // []) |
         
         .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
         
-        succ "WARP 配置完成(DNS + endpoint + route 三层联动)"
+        succ "WARP 配置完成(endpoint 直连模式)"
     fi
 }
 
@@ -1041,7 +1031,7 @@ manage_warp() {
         echo -e "  WARP 流媒体解锁管理"
         echo -e "========================================"
         echo -e " 当前状态: $status_text"
-        echo -e "----------------------------------------"
+        echo -e "----------------------------------------"  
         echo -e "1. 启用 WARP 出站"
         echo -e "2. 禁用 WARP 出站"
         echo -e "3. 重新注册账号"
