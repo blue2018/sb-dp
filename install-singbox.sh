@@ -843,18 +843,17 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
+    # 清理旧的 WARP 相关配置 (包括出站和路由规则)
     jq '
-    .outbounds //= [] | 
-    .route //= {} | 
-    .route.rules //= [] |
-    .outbounds |= map(select(.tag != "warp-out")) |
-    .route.rules |= map(select(.outbound != "warp-out"))
+    del(.outbounds[] | select(.tag == "warp-out")) |
+    del(.route.rules[] | select(.outbound == "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
+        # 核心逻辑：插入 WARP 出站并强制域名路由置顶
         jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
@@ -864,18 +863,30 @@ apply_warp_config() {
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1280
+            "mtu": 1280,
+            "domain_strategy": "prefer_ipv4",
+            "udp_fragment": true
         }] + .outbounds |
         
         .route.rules = [
             {
-                "domain_suffix": ["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"],
+                "domain_suffix": [
+                    "youtube.com", "googlevideo.com", "reddit.com", "netflix.com", "netflix.net", 
+                    "nflximg.net", "nflxvideo.net", "nflxso.net", "nflxext.com", "disneyplus.com", 
+                    "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", 
+                    "oaistatic.com", "oaiusercontent.com", "anthropic.com", "claude.ai", 
+                    "gemini.google.com", "cloudflare.com", "ip.gs"
+                ],
                 "outbound": "warp-out"
             }
-        ] + (.route.rules // []) |
+        ] + .route.rules |
         
-        .route.final = "direct-out"
+        # 确保全局路由规则存在
+        .route.final = "direct-out" |
+        .route.auto_detect_interface = true
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+        
+        succ "WARP 策略路由已固化 (含流媒体/AI 域名列表)"
     fi
 }
 
