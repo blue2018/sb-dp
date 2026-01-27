@@ -820,6 +820,7 @@ EOF
 # ==========================================
 # warp 出站
 # ==========================================
+# WARP 注册函数(保持不变)
 register_warp() {
     local warp_conf="/etc/sing-box/warp.json"
     [ -s "$warp_conf" ] && return 0
@@ -834,56 +835,69 @@ register_warp() {
         echo "{\"private_key\":\"$priv_key\"}" > "$warp_conf"
         succ "WARP 账号注册成功"
     else
-        err "注册失败，母鸡 IP 可能被封锁"; return 1
+        err "注册失败,母鸡 IP 可能被封锁"; return 1
     fi
 }
 
+# 核心修复:使用 endpoint + 正确的路由规则
 apply_warp_config() {
     local action="$1"
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
+    # 1. 清理旧配置(删除所有 warp 相关的 outbound 和 endpoint)
     jq '
     .outbounds //= [] | 
+    .endpoints //= [] |
     .route //= {} | 
     .route.rules //= [] |
     .outbounds |= map(select(.tag != "warp-out")) |
-    .route.rules |= map(select(.outbound != "warp-out"))
+    .endpoints |= map(select(.tag != "warp-ep")) |
+    .route.rules |= map(select(.outbound != "warp-out" and .outbound != "warp-ep"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
+        # 2. 使用新的 endpoint 架构 + 修复路由规则顺序
         jq --arg priv "$priv" '
-        .outbounds = [{
+        # 添加 WireGuard endpoint(不是 outbound)
+        .endpoints = [{
             "type": "wireguard",
-            "tag": "warp-out",
-            "server": "162.159.192.1",
-            "server_port": 2408,
-            "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
+            "tag": "warp-ep",
+            "mtu": 1280,
+            "address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
-            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1280
-        }] + .outbounds |
+            "peers": [{
+                "address": "162.159.192.1",
+                "port": 2408,
+                "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                "allowed_ips": ["0.0.0.0/0", "::/0"]
+            }]
+        }] + (.endpoints // []) |
         
+        # 修复路由规则:必须在 DNS 解析前匹配域名
         .route.rules = [
             {
                 "domain_suffix": ["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"],
-                "outbound": "warp-out"
+                "outbound": "warp-ep"
             }
         ] + (.route.rules // []) |
         
+        # 确保 final 是 direct
         .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+        
+        succ "WARP endpoint 已配置(domain_suffix 规则优先级已提升)"
     fi
 }
 
-
-
+# WARP 管理菜单(保持不变)
 manage_warp() {
     while true; do
-        local is_enabled=$(grep -q "warp-out" /etc/sing-box/config.json && echo "true" || echo "false")
+        # 修正检测逻辑:检查 endpoint 而非 outbound
+        local is_enabled=$(grep -q '"tag"[[:space:]]*:[[:space:]]*"warp-ep"' /etc/sing-box/config.json && echo "true" || echo "false")
         local status_text="\033[1;31m未启用 ✗\033[0m"
         [ "$is_enabled" = "true" ] && status_text="\033[1;32m已启用 ✔\033[0m"
 
@@ -901,13 +915,20 @@ manage_warp() {
             1)
                 apply_warp_config "enable" && {
                     [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart >/dev/null 2>&1
-                    pidof sing-box | xargs kill -9 >/dev/null 2>&1
-                    succ "WARP 已开启 (用户态模式)"
+                    systemctl restart sing-box >/dev/null 2>&1 || pidof sing-box | xargs kill -9 >/dev/null 2>&1
+                    sleep 2
+                    # 验证启动状态
+                    if pidof sing-box >/dev/null 2>&1; then
+                        succ "WARP 已启用并生效 (endpoint 模式)"
+                    else
+                        err "sing-box 启动失败,请检查日志"
+                        [ "$OS" != "alpine" ] && journalctl -u sing-box -n 10 --no-pager
+                    fi
                 } ;;
             2)
                 apply_warp_config "disable" && {
                     [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart >/dev/null 2>&1
-                    pidof sing-box | xargs kill -9 >/dev/null 2>&1
+                    systemctl restart sing-box >/dev/null 2>&1 || pidof sing-box | xargs kill -9 >/dev/null 2>&1
                     info "WARP 已禁用"
                 } ;;
             3) rm -f /etc/sing-box/warp.json && register_warp ;;
