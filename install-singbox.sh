@@ -865,8 +865,6 @@ EOF
 # ==========================================
 # warp 出站
 # ==========================================
-# WARP 注册函数(保持不变)
-# WARP 注册(不变)
 register_warp() {
     local warp_conf="/etc/sing-box/warp.json"
     [ -s "$warp_conf" ] && return 0
@@ -881,149 +879,81 @@ register_warp() {
         echo "{\"private_key\":\"$priv_key\"}" > "$warp_conf"
         succ "WARP 账号注册成功"
     else
-        err "注册失败,母鸡 IP 可能被封锁"; return 1
+        err "注册失败"; return 1
     fi
 }
 
-# 核心修复:针对容器环境的配置
 apply_warp_config() {
     local action="$1"
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 清理旧配置
+    # 清理
     jq '
-    .dns //= {} |
-    .dns.servers //= [] |
-    .dns.rules //= [] |
-    .endpoints //= [] |
+    .outbounds //= [] |
     .route //= {} | 
     .route.rules //= [] |
-    .dns.servers |= map(select(.tag != "warp-dns")) |
-    .dns.rules |= map(select(.outbound != "warp-ep")) |
-    .endpoints |= map(select(.tag != "warp-ep")) |
-    .route.rules |= map(select(.outbound != "warp-ep"))
+    .outbounds |= map(select(.tag != "warp" and .tag != "warp-IPv4" and .tag != "warp-IPv6")) |
+    .route.rules |= map(select(.outbound != "warp" and .outbound != "warp-IPv4" and .outbound != "warp-IPv6"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
+        # 使用稳定的旧版 WireGuard outbound
         jq --arg priv "$priv" '
-        # Step 1: 添加 WARP DNS 服务器
-        .dns.servers = [
+        .outbounds = [
             {
-                "tag": "warp-dns",
-                "address": "1.1.1.1",
-                "strategy": "prefer_ipv4",
-                "detour": "warp-ep"
-            }
-        ] + (.dns.servers // []) |
-        
-        # Step 2: DNS 规则(域名走 WARP DNS)
-        .dns.rules = [
+                "type": "direct",
+                "tag": "warp-IPv4",
+                "detour": "warp",
+                "domain_strategy": "ipv4_only"
+            },
             {
-                "domain_suffix": [
-                    "youtube.com",
-                    "googlevideo.com",
-                    "ytimg.com",
-                    "ggpht.com",
-                    "youtu.be",
-                    "reddit.com",
-                    "redditstatic.com",
-                    "redd.it",
-                    "redditmedia.com",
-                    "netflix.com",
-                    "netflix.net",
-                    "nflxext.com",
-                    "nflximg.net",
-                    "nflxvideo.net",
-                    "nflxso.net",
-                    "disneyplus.com",
-                    "disney-plus.net",
-                    "disneystreaming.com",
-                    "dssott.com",
-                    "openai.com",
-                    "chatgpt.com",
-                    "oaistatic.com",
-                    "oaiusercontent.com",
-                    "anthropic.com",
-                    "claude.ai",
-                    "gemini.google.com",
-                    "bard.google.com",
-                    "cloudflare.com",
-                    "ip.gs"
-                ],
-                "server": "warp-dns"
+                "type": "direct",
+                "tag": "warp-IPv6",
+                "detour": "warp",
+                "domain_strategy": "ipv6_only"
+            },
+            {
+                "type": "wireguard",
+                "tag": "warp",
+                "server": "162.159.192.1",
+                "server_port": 2408,
+                "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
+                "private_key": $priv,
+                "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                "mtu": 1280
             }
-        ] + (.dns.rules // []) |
+        ] + (.outbounds // []) |
         
-        # Step 3: WireGuard endpoint
-        .endpoints = [{
-            "type": "wireguard",
-            "tag": "warp-ep",
-            "system": false,
-            "mtu": 1280,
-            "address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
-            "private_key": $priv,
-            "peers": [{
-                "address": "162.159.192.1",
-                "port": 2408,
-                "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-                "allowed_ips": ["0.0.0.0/0", "::/0"],
-                "persistent_keepalive_interval": 30
-            }]
-        }] + (.endpoints // []) |
-        
-        # Step 4: 路由规则(直接指向 endpoint tag)
         .route.rules = [
             {
                 "domain_suffix": [
-                    "youtube.com",
-                    "googlevideo.com",
-                    "ytimg.com",
-                    "ggpht.com",
-                    "youtu.be",
-                    "reddit.com",
-                    "redditstatic.com",
-                    "redd.it",
-                    "redditmedia.com",
-                    "netflix.com",
-                    "netflix.net",
-                    "nflxext.com",
-                    "nflximg.net",
-                    "nflxvideo.net",
-                    "nflxso.net",
-                    "disneyplus.com",
-                    "disney-plus.net",
-                    "disneystreaming.com",
-                    "dssott.com",
-                    "openai.com",
-                    "chatgpt.com",
-                    "oaistatic.com",
-                    "oaiusercontent.com",
-                    "anthropic.com",
-                    "claude.ai",
-                    "gemini.google.com",
-                    "bard.google.com",
-                    "cloudflare.com",
-                    "ip.gs"
+                    "youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com", "youtu.be",
+                    "reddit.com", "redditstatic.com", "redd.it", "redditmedia.com",
+                    "netflix.com", "netflix.net", "nflxext.com", "nflximg.net", "nflxvideo.net", "nflxso.net",
+                    "disneyplus.com", "disney-plus.net", "disneystreaming.com", "dssott.com",
+                    "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com",
+                    "anthropic.com", "claude.ai",
+                    "gemini.google.com", "bard.google.com",
+                    "cloudflare.com", "ip.gs"
                 ],
-                "outbound": "warp-ep"
+                "outbound": "warp-IPv4"
             }
         ] + (.route.rules // []) |
         
         .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
         
-        succ "WARP 配置完成(endpoint 直连模式)"
+        succ "WARP 配置完成(稳定 outbound 模式)"
     fi
 }
 
-# WARP 管理菜单
 manage_warp() {
     while true; do
-        local is_enabled=$(jq -e '.outbounds[]? | select(.tag == "warp-out")' /etc/sing-box/config.json >/dev/null 2>&1 && echo "true" || echo "false")
+        local is_enabled=$(jq -e '.outbounds[]? | select(.tag == "warp")' /etc/sing-box/config.json >/dev/null 2>&1 && echo "true" || echo "false")
         local status_text="\033[1;31m未启用 ✗\033[0m"
         [ "$is_enabled" = "true" ] && status_text="\033[1;32m已启用 ✔\033[0m"
 
@@ -1031,46 +961,22 @@ manage_warp() {
         echo -e "  WARP 流媒体解锁管理"
         echo -e "========================================"
         echo -e " 当前状态: $status_text"
-        echo -e "----------------------------------------"  
-        echo -e "1. 启用 WARP 出站"
-        echo -e "2. 禁用 WARP 出站"
-        echo -e "3. 重新注册账号"
-        echo -e "4. 查看运行日志"
-        echo -e "5. 手动测试运行"
-        echo -e "0. 返回主菜单"
-        read -r -p "请选择 [0-5]: " wopt
+        echo -e "----------------------------------------"
+        echo -e "1. 启用 WARP"
+        echo -e "2. 禁用 WARP"
+        echo -e "3. 重新注册"
+        echo -e "0. 返回"
+        read -r -p "选择 [0-3]: " wopt
         case "$wopt" in
             1)
                 apply_warp_config "enable" && {
-                    info "重启 sing-box 服务..."
-                    if [ -x "/etc/init.d/sing-box" ]; then
-                        rc-service sing-box restart 2>&1 | tail -5
-                    else
-                        systemctl restart sing-box 2>&1 | tail -5
-                    fi
-                    sleep 3
-                    
-                    if pidof sing-box >/dev/null 2>&1; then
-                        succ "WARP 已启用(endpoint + outbound 桥接模式)"
-                        info "测试: curl --socks5 127.0.0.1:10011 https://www.youtube.com -I"
-                    else
-                        err "启动失败!请选择选项 5 手动测试"
-                    fi
+                    rc-service sing-box restart 2>&1
+                    sleep 2
+                    pidof sing-box >/dev/null && succ "WARP 已启用" || err "启动失败"
                 } ;;
             2)
-                apply_warp_config "disable" && {
-                    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart || systemctl restart sing-box
-                    info "WARP 已禁用"
-                } ;;
-            3) 
-                rm -f /etc/sing-box/warp.json && register_warp ;;
-            4)
-                echo -e "\n--- 最近 30 行日志 ---"
-                tail -30 /var/log/messages | grep -E "sing-box|warp|ERROR|FATAL" || \
-                logread | tail -30 | grep -E "sing-box|warp" ;;
-            5)
-                echo -e "\n--- 手动测试(Ctrl+C 退出) ---"
-                /usr/bin/sing-box run -c /etc/sing-box/config.json ;;
+                apply_warp_config "disable" && rc-service sing-box restart && info "WARP 已禁用" ;;
+            3) rm -f /etc/sing-box/warp.json && register_warp ;;
             0) break ;;
         esac
     done
