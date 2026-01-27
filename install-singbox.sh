@@ -843,21 +843,24 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 清理旧的 WARP 相关配置 (包括出站和路由规则)
+    # 1. 彻底清理旧配置
     jq '
     del(.outbounds[] | select(.tag == "warp-out")) |
-    del(.route.rules[] | select(.outbound == "warp-out"))
+    del(.route.rules[] | select(.outbound == "warp-out")) |
+    del(.route.rules[] | select(.outbound == "dns-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 核心逻辑：插入 WARP 出站并强制域名路由置顶
+        # 2. 注入优化后的配置：添加 detour 和强制 sniffing
         jq --arg priv "$priv" '
+        # 在 outbounds 最前面插入 warp-out，并设置 detour 绕行
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
+            "detour": "direct-out",
             "server": "162.159.192.1",
             "server_port": 2408,
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
@@ -868,7 +871,9 @@ apply_warp_config() {
             "udp_fragment": true
         }] + .outbounds |
         
+        # 配置路由规则
         .route.rules = [
+            { "protocol": "dns", "outbound": "direct-out" },
             {
                 "domain_suffix": [
                     "youtube.com", "googlevideo.com", "reddit.com", "netflix.com", "netflix.net", 
@@ -881,12 +886,14 @@ apply_warp_config() {
             }
         ] + .route.rules |
         
-        # 确保全局路由规则存在
-        .route.final = "direct-out" |
+        # 开启流量嗅探，这是解决域名无法访问的关键
+        .inbounds[0].sniff = true |
+        .inbounds[0].sniff_override_destination = true |
+        
         .route.auto_detect_interface = true
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
         
-        succ "WARP 策略路由已固化 (含流媒体/AI 域名列表)"
+        succ "WARP 配置已修复：强制绕行模式 + 流量嗅探已开启"
     fi
 }
 
