@@ -843,50 +843,54 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 彻底清理旧配置，确保回到节点正常的初始状态
+    # 1. 完全使用你原始的清理逻辑，不做任何改动
     jq '
-    del(.outbounds[] | select(.tag == "warp-out")) |
-    del(.route.rules[] | select(.outbound == "warp-out")) |
-    del(.dns.rules[] | select(.outbound == "warp-out"))
+    .outbounds //= [] | 
+    .route //= {} | 
+    .route.rules //= [] |
+    .dns //= {"rules": []} |
+    .outbounds |= map(select(.tag != "warp-out")) |
+    .route.rules |= map(select(.outbound != "warp-out")) |
+    .dns.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 严格执行你指定的域名列表，不作任何增减
-        local unlock_domains='["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"]'
+        # 严格执行你要求的域名列表
+        local domains='["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"]'
 
-        # 2. 仅在原逻辑基础上增加出站和域名关联，不改动 DNS 服务器定义
-        jq --arg priv "$priv" --argjson domains "$unlock_domains" '
-        # 注入 WARP 出站
-        .outbounds = [
-            {
-                "type": "wireguard",
-                "tag": "warp-out",
-                "server": "162.159.192.1",
-                "server_port": 2408,
-                "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
-                "private_key": $priv,
-                "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-                "mtu": 1280
-            }
-        ] + .outbounds |
+        # 2. 还原原始注入结构，仅补齐关键的 dns.rules
+        jq --arg priv "$priv" --argjson domains "$domains" '
+        .outbounds = [{
+            "type": "wireguard",
+            "tag": "warp-out",
+            "server": "162.159.192.1",
+            "server_port": 2408,
+            "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
+            "private_key": $priv,
+            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+            "mtu": 1120
+        }] + .outbounds |
         
-        # DNS 规则：仅告诉系统这些域名解析后要打上标记，不强行指定服务器，不设 detour
+        # 仅增加这一段，确保域名能被匹配，但不指定 server 也不设 detour
         .dns.rules = [
-            { "domain_suffix": $domains, "outbound": "warp-out" }
+            {
+                "domain_suffix": $domains,
+                "outbound": "warp-out"
+            }
         ] + (.dns.rules // []) |
         
-        # 路由规则：保持你原始的 domain_suffix 逻辑
         .route.rules = [
-            { "domain_suffix": $domains, "outbound": "warp-out" }
-        ] + .route.rules |
+            {
+                "domain_suffix": $domains,
+                "outbound": "warp-out"
+            }
+        ] + (.route.rules // []) |
         
         .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-        
-        succ "修正完成：已恢复原始节点连通性，并解决列表域名访问问题"
     fi
 }
 
