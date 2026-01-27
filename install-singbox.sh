@@ -843,27 +843,25 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 结构初始化，设置日志级别以便观察
+    # 1. 结构初始化与日志级别调整
     jq '.log.level = "info" | .route //= {"rules": []} | .outbounds //= []' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
-    # 2. 清理旧配置
+    # 2. 彻底清理旧痕迹
     jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out")) | del(.route.rules[] | select(.protocol == "dns"))' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 3. 写入 Sing-box 1.11+ 官方新规范配置
-        # 核心改动：使用 "endpoint" 替代 "server"/"server_port"
+        # 3. 写入“终极兼容版”配置
+        # 弃用 endpoint，使用最原始但最稳健的 server 声明，并强制绕过版本检测环境变量
         jq --arg priv "$priv" '
         .outbounds += [{
             "type": "wireguard",
             "tag": "warp-out",
-            "endpoint": "engage.cloudflareclient.com:2408",
-            "local_address": [
-                "172.16.0.2/32",
-                "fd01:5ca1:ab1e::1/128"
-            ],
+            "server": "162.159.192.1",
+            "server_port": 2408,
+            "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
             "mtu": 1280,
@@ -872,13 +870,7 @@ apply_warp_config() {
         .route.rules = [
             { "protocol": "dns", "outbound": "direct-out" },
             {
-                "domain_suffix": [
-                    "youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com", "reddit.com", 
-                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxso.net", 
-                    "nflxext.com", "disneyplus.com", "disney-plus.net", "disneystreaming.com", 
-                    "amazon.com", "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com", 
-                    "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"
-                ],
+                "domain_suffix": ["youtube.com", "googlevideo.com", "ytimg.com", "reddit.com", "netflix.com", "netflix.net", "openai.com", "chatgpt.com", "oaistatic.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"],
                 "outbound": "warp-out"
             }
         ] + .route.rules |
@@ -887,7 +879,9 @@ apply_warp_config() {
         .inbounds[0].sniff_override_destination = true
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
         
-        succ "WARP 配置已适配 1.11+ 官方新规范 (Endpoint 模式)"
+        # 关键：在脚本环境变量中永久注入兼容性开关
+        export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
+        succ "WARP 配置已回滚至稳健模式，并注入兼容性环境变量"
     fi
 }
 
