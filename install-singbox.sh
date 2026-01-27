@@ -822,12 +822,11 @@ EOF
 # ==========================================
 register_warp() {
     local warp_conf="/etc/sing-box/warp.json"
-    # 如果配置文件存在且非空，跳过注册（避免频繁重置 IP）
     [ -s "$warp_conf" ] && return 0
     
-    info "正在为容器环境注册 WARP 账号 (自动获取动态 IP)..."
+    info "正在为容器环境注册 WARP 账号..."
     
-    # 依赖检查 (需要 python3 或 od 来计算 reserved，由于 alpine 自带 python3 或 od 有限，这里用纯 bash+od 方案)
+    # 生成注册所需参数
     local priv_key=$(openssl rand -base64 32)
     local install_id=$(openssl rand -hex 16)
     local tos_date=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
@@ -837,33 +836,44 @@ register_warp() {
         -d "{\"key\":\"$priv_key\",\"install_id\":\"$install_id\",\"tos\":\"$tos_date\",\"type\":\"Linux\",\"locale\":\"en_US\"}" \
         "https://api.cloudflareclient.com/v0a1922/reg" 2>/dev/null)
 
-    # 提取关键信息
+    # 提取 ID 以验证注册是否成功
     local id=$(echo "$reg_data" | jq -r '.id // empty')
     
     if [ -n "$id" ]; then
-        # 1. 提取服务端分配的动态 IP
-        local v4=$(echo "$reg_data" | jq -r '.config.interface.addresses.v4 // "172.16.0.2/32"')
+        # 1. 提取 IP (不设置回退值，获取不到即视为失败)
+        local v4=$(echo "$reg_data" | jq -r '.config.interface.addresses.v4 // empty')
         local v6=$(echo "$reg_data" | jq -r '.config.interface.addresses.v6 // empty')
         
-        # 2. 提取并计算 Reserved (关键步骤：Base64 -> Hex -> Decimal Array)
-        # client_id 是 base64 字符串，解码后是 3 个字节
+        if [ -z "$v4" ] && [ -z "$v6" ]; then
+            err "注册成功但未获取到有效 IP，可能是 Cloudflare 接口限制"
+            return 1
+        fi
+
+        # 2. 提取并计算 Reserved 字段 (纯 Shell 方案，兼容 Alpine/Busybox)
         local client_id=$(echo "$reg_data" | jq -r '.config.client_id // empty')
         local reserved_json="[]"
+        
         if [ -n "$client_id" ]; then
-            # 尝试计算 reserved，如果环境不支持则留空（旧版 sing-box 会忽略，新版最好有）
-            if command -v od >/dev/null 2>&1; then
-                local hex_bytes=$(echo "$client_id" | base64 -d 2>/dev/null | od -An -t x1 | tr -d '\n')
-                # 将 hex 转换为 JSON 数组 [12, 34, 56]
-                local r1=$(echo $hex_bytes | awk '{print strtonum("0x"$1)}')
-                local r2=$(echo $hex_bytes | awk '{print strtonum("0x"$2)}')
-                local r3=$(echo $hex_bytes | awk '{print strtonum("0x"$3)}')
-                if [[ "$r1" =~ ^[0-9]+$ ]]; then
-                    reserved_json="[$r1, $r2, $r3]"
+            # base64 解码 -> 转为 hex 字符串 (例如: 1a 2b 3c)
+            # 使用 od -An -t x1 输出 hex 字节，tr 清理换行
+            local hex_str=$(echo "$client_id" | base64 -d 2>/dev/null | od -An -t x1 | tr -d '\n')
+            
+            # 将 hex 字符串转为数组
+            local dec_list=()
+            for hex_byte in $hex_str; do
+                # 使用 printf 将 hex 转十进制，兼容性最好
+                if [ -n "$hex_byte" ]; then
+                    dec_list+=($(printf "%d" "0x$hex_byte"))
                 fi
+            done
+            
+            # 只有当解析出 3 个字节时才认为是有效的 reserved
+            if [ ${#dec_list[@]} -ge 3 ]; then
+                reserved_json="[${dec_list[0]}, ${dec_list[1]}, ${dec_list[2]}]"
             fi
         fi
 
-        # 3. 保存完整配置到 warp.json
+        # 3. 写入配置文件
         cat > "$warp_conf" <<EOF
 {
   "private_key": "$priv_key",
@@ -873,9 +883,9 @@ register_warp() {
   "client_id": "$client_id"
 }
 EOF
-        succ "WARP 账号注册成功 (IP: $v4)"
+        succ "WARP 账号注册成功 (IPv4: ${v4:-N/A} | Reserved: $reserved_json)"
     else
-        err "WARP 注册失败，接口返回异常 (可能是 IP 被 CF 暂时拉黑，请稍后重试)"
+        err "WARP 注册接口请求失败，请检查服务器网络连接"
         return 1
     fi
 }
@@ -885,9 +895,7 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # --- 步骤 1: 先清理旧的 warp 相关配置 (保证幂等性) ---
-    # 移除 outbounds 中的 warp-out
-    # 移除 route.rules 中指向 warp-out 的规则
+    # --- 步骤 1: 清理旧配置 (确保幂等性) ---
     jq '
     .outbounds //= [] | 
     .route //= {} | 
@@ -896,46 +904,43 @@ apply_warp_config() {
     .route.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
-    # --- 步骤 2: 如果是启用操作，注入新配置 ---
+    # --- 步骤 2: 启用逻辑 ---
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         
         if [ ! -f "$warp_data" ]; then
-            err "无法找到 WARP 配置文件"
+            err "WARP 配置文件读取失败"
             return 1
         fi
 
-        # 读取注册好的动态数据
+        # 读取配置
         local priv=$(jq -r '.private_key' "$warp_data")
         local v4=$(jq -r '.local_address_v4' "$warp_data")
         local v6=$(jq -r '.local_address_v6' "$warp_data")
         local reserved=$(jq -r '.reserved | tojson' "$warp_data")
         
-        # 构建 local_address 数组
-        local addr_json="[\"$v4\"]"
-        if [ -n "$v6" ] && [ "$v6" != "null" ]; then
-            addr_json="[\"$v4\", \"$v6\"]"
+        # 严格校验：如果没有有效 IP，禁止启用，防止断流
+        if [ -z "$v4" ] && [ -z "$v6" ]; then
+             err "无效的 WARP IP 配置，请尝试重新注册 (选项3)"
+             return 1
         fi
 
-        # 定义用户指定的域名列表
-        local unlock_domains='[
-            "youtube.com", "reddit.com", 
-            "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxso.net",
-            "disneyplus.com", "disney-plus.net", "disneystreaming.com", 
-            "amazon.com", "primevideo.com", "amazonvideo.com",
-            "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com",
-            "anthropic.com", "claude.ai", 
-            "gemini.google.com", "bard.google.com",
-            "cloudflare.com", "ip.gs", "ipinfo.io", "ifconfig.me"
-        ]'
+        # 构建 local_address 数组
+        local addr_json="[]"
+        if [ -n "$v4" ] && [ "$v4" != "null" ]; then addr_json="[\"$v4\"]"; fi
+        if [ -n "$v6" ] && [ "$v6" != "null" ]; then 
+            if [ "$addr_json" == "[]" ]; then addr_json="[\"$v6\"]"; else addr_json="[\"$v4\", \"$v6\"]"; fi
+        fi
 
-        # 使用 jq 动态注入 outbound 和 routing rule
+        # --- 用户指定域名列表 ---
+        local unlock_domains='["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"]'
+
+        # 注入配置
         jq --arg priv "$priv" \
            --argjson addr "$addr_json" \
            --argjson rsv "$reserved" \
            --argjson domains "$unlock_domains" '
         
-        # 1. 添加 WARP 出站对象
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
@@ -948,7 +953,6 @@ apply_warp_config() {
             "mtu": 1280
         }] + .outbounds |
         
-        # 2. 添加路由规则
         .route.rules = [
             {
                 "domain_suffix": $domains,
@@ -956,7 +960,6 @@ apply_warp_config() {
             }
         ] + (.route.rules // []) |
         
-        # 3. 确保默认兜底规则存在
         .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
     fi
