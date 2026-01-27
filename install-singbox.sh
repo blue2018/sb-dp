@@ -843,22 +843,21 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 彻底清理：删除旧的 WARP 出站、路由和专属 DNS 服务器
+    # 1. 彻底清理旧配置，确保回到节点正常的初始状态
     jq '
     del(.outbounds[] | select(.tag == "warp-out")) |
     del(.route.rules[] | select(.outbound == "warp-out")) |
-    del(.dns.servers[] | select(.tag == "dns-warp-server")) |
-    del(.dns.rules[] | select(.server == "dns-warp-server"))
+    del(.dns.rules[] | select(.outbound == "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 统一分流域名列表
+        # 严格执行你指定的域名列表，不作任何增减
         local unlock_domains='["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"]'
 
-        # 2. 注入解耦后的新逻辑
+        # 2. 仅在原逻辑基础上增加出站和域名关联，不改动 DNS 服务器定义
         jq --arg priv "$priv" --argjson domains "$unlock_domains" '
         # 注入 WARP 出站
         .outbounds = [
@@ -870,29 +869,24 @@ apply_warp_config() {
                 "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
                 "private_key": $priv,
                 "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-                "mtu": 1280,
-                "udp_fragment": true
+                "mtu": 1280
             }
         ] + .outbounds |
         
-        # 修正：移除 detour 防止启动死锁，仅保留服务器定义
-        .dns.servers = (.dns.servers + [
-            { "tag": "dns-warp-server", "address": "8.8.4.4" }
-        ]) |
-        
-        # 注入 DNS 规则：置顶确保匹配
+        # DNS 规则：仅告诉系统这些域名解析后要打上标记，不强行指定服务器，不设 detour
         .dns.rules = [
-            { "domain_suffix": $domains, "server": "dns-warp-server" }
+            { "domain_suffix": $domains, "outbound": "warp-out" }
         ] + (.dns.rules // []) |
         
-        # 注入路由规则：置顶确保匹配 (增加 DNS 流量的强制分流)
+        # 路由规则：保持你原始的 domain_suffix 逻辑
         .route.rules = [
-            { "domain_suffix": $domains, "outbound": "warp-out" },
-            { "server": "dns-warp-server", "outbound": "warp-out" }
-        ] + .route.rules
+            { "domain_suffix": $domains, "outbound": "warp-out" }
+        ] + .route.rules |
+        
+        .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
         
-        succ "WARP 物理分家逻辑已应用：已修复连接死锁并强制对齐"
+        succ "修正完成：已恢复原始节点连通性，并解决列表域名访问问题"
     fi
 }
 
