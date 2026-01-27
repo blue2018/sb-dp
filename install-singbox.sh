@@ -691,45 +691,23 @@ create_config() {
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {
-    "servers": [
-      {"tag": "dns-remote", "address": "https://8.8.8.8/dns-query", "detour": "direct-out"},
-      {"tag": "dns-direct", "address": "local", "detour": "direct-out"}
-    ],
-    "rules": [
-      {"outbound": "any", "server": "dns-remote"}
-    ],
-    "strategy": "$ds"
-  },
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
-    "sniff": true,
-    "sniff_override_destination": true,
     "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
     "udp_fragment": true,
-    "tls": {
-      "enabled": true,
-      "alpn": ["h3"],
-      "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-      "key_path": "/etc/sing-box/certs/privkey.pem"
-    },
+    "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
-  "outbounds": [
-    {"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}
-  ],
-  "route": {
-    "rules": [],
-    "final": "direct-out"
-  }
+  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
@@ -865,51 +843,37 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 清理旧规则 (保持逻辑简洁)
     jq '
-    del(.outbounds[] | select(.tag == "warp-out")) |
-    del(.route.rules[] | select(.outbound == "warp-out" or .tag == "dns-rule"))
+    .outbounds //= [] | 
+    .route //= {} | 
+    .route.rules //= [] |
+    .outbounds |= map(select(.tag != "warp-out")) |
+    .route.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 插入新配置：
-        # 1. 增加 DNS 强制直连规则
-        # 2. 增加 WARP 出站
-        # 3. 增加 域名分流规则
         jq --arg priv "$priv" '
-        .outbounds = [
-            {
-                "type": "wireguard",
-                "tag": "warp-out",
-                "detour": "direct-out",
-                "server": "162.159.192.1",
-                "server_port": 2408,
-                "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
-                "private_key": $priv,
-                "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-                "mtu": 1280
-            }
-        ] + .outbounds |
+        .outbounds = [{
+            "type": "wireguard",
+            "tag": "warp-out",
+            "server": "162.159.192.1",
+            "server_port": 2408,
+            "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
+            "private_key": $priv,
+            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+            "mtu": 1280
+        }] + .outbounds |
         
         .route.rules = [
             {
-                "protocol": "dns",
-                "outbound": "direct-out",
-                "tag": "dns-rule"
-            },
-            {
-                "domain_suffix": [
-                    "youtube.com", "googlevideo.com", "reddit.com", "netflix.com", 
-                    "netflix.net", "disneyplus.com", "disneystreaming.com", 
-                    "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", 
-                    "gemini.google.com", "ip.gs", "cloudflare.com"
-                ],
+                "domain_suffix": ["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"],
                 "outbound": "warp-out"
             }
-        ] + .route.rules |
+        ] + (.route.rules // []) |
+        
         .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
     fi
