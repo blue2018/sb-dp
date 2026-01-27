@@ -877,41 +877,33 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 先清理旧配置 (确保干净)
+    # --- 步骤 1: 深度清理旧配置 (包含路由规则和 DNS 规则) ---
     jq '
-    .outbounds //= [] | 
-    .route //= {} | 
-    .route.rules //= [] |
+    .outbounds //= [] | .route //= {} | .route.rules //= [] | .dns //= {} | .dns.rules //= [] |
     .outbounds |= map(select(.tag != "warp-out")) |
-    .route.rules |= map(select(.outbound != "warp-out"))
+    .route.rules |= map(select(.outbound != "warp-out")) |
+    .dns.rules |= map(select(.server != "warp-dns"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
-    # 2. 启用逻辑
     if [ "$action" = "enable" ]; then
         register_warp || return 1
-        
-        if [ ! -f "$warp_data" ]; then err "配置文件丢失"; return 1; fi
+        [ ! -f "$warp_data" ] && return 1
 
-        # 读取变量，注意这里不做任何 Shell 数组处理，全部交给 jq
         local priv=$(jq -r '.private_key' "$warp_data")
         local v4=$(jq -r '.local_address_v4' "$warp_data")
         local v6=$(jq -r '.local_address_v6' "$warp_data")
-        local reserved=$(jq -r '.reserved | tojson' "$warp_data")
+        local rsv=$(jq -r '.reserved | tojson' "$warp_data")
 
-        # 您的定制域名列表
+        # 你的定制域名列表
         local unlock_domains='["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"]'
 
-        # 3. 使用 jq 进行安全注入
-        # 关键修复：在 jq 内部构造 local_address 数组，自动丢弃 null 或空值，防止 Service 崩溃
-        jq --arg priv "$priv" \
-           --arg v4 "$v4" \
-           --arg v6 "$v6" \
-           --argjson rsv "$reserved" \
-           --argjson domains "$unlock_domains" '
+        # --- 步骤 2: 使用 jq 构建高优先级路由与 DNS 联动 ---
+        jq --arg priv "$priv" --arg v4 "$v4" --arg v6 "$v6" --argjson rsv "$rsv" --argjson domains "$unlock_domains" '
         
-        # 构造清洗后的 IP 数组
+        # A. 构造 IP 数组并强制处理掩码
         ([$v4, $v6] | map(select(. != null and . != ""))) as $clean_ips |
 
+        # B. 注入 WARP 出站 (增加 udp_over_tcp 探测和策略优化)
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
@@ -921,17 +913,26 @@ apply_warp_config() {
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
             "reserved": (if $rsv != [] then $rsv else null end),
-            "mtu": 1280
+            "mtu": 1280,
+            "domain_strategy": "prefer_ipv4"
         }] + .outbounds |
+
+        # C. 注入 DNS 规则：确保列表中的域名解析也走 direct，防止解析死锁
+        .dns.rules = [
+            { "domain": $domains, "server": "dns-direct" }
+        ] + (.dns.rules // []) |
         
+        # D. 注入路由规则：必须放在最前面
         .route.rules = [
             {
-                "domain_suffix": $domains,
+                "domain": $domains,
                 "outbound": "warp-out"
             }
         ] + (.route.rules // []) |
-        
-        .route.final = "direct-out"
+
+        # E. 关键设置：增加嗅探，防止流量无法识别
+        .route.sniff = true |
+        .route.sniff_override_destination = true
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
     fi
 }
