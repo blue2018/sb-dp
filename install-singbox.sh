@@ -843,65 +843,56 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 结构预检查与初始化 (防止 jq 迭代 null 报错)
-    if [ ! -f "$config" ]; then err "配置文件不存在"; return 1; fi
-    
-    # 确保 route 和 rules 存在
-    jq '.route //= {"rules": []} | .route.rules //= [] | .outbounds //= []' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+    # 1. 结构预修复：确保基础 JSON 对象存在，防止 jq 报错
+    jq '.route //= {"rules": []} | .outbounds //= []' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
-    # 2. 彻底清理旧的 WARP 配置
+    # 2. 彻底移除旧的 WARP 相关配置
     jq '
     del(.outbounds[] | select(.tag == "warp-out")) |
-    del(.route.rules[] | select(.outbound == "warp-out")) |
-    del(.route.rules[] | select(.protocol == "dns"))
+    del(.route.rules[] | select(.outbound == "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 3. 注入修复后的配置
-        # 注意：Hysteria2 属于传输层协议，嗅探应在全局 route 或指定的 inbounds 属性中通过 sniffing 对象配置
+        # 3. 注入针对“分流后断网”优化的配置
         jq --arg priv "$priv" '
-        # 插入 WARP 出站 (detour 绕行，防止回环)
+        # 出站配置：增加 MTU 兼容性和明确的绕行逻辑
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
-            "detour": "direct-out",
             "server": "162.159.192.1",
             "server_port": 2408,
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1280,
+            "mtu": 1200,
+            "udp_fragment": true,
             "domain_strategy": "prefer_ipv4",
-            "udp_fragment": true
+            "detour": "direct-out"
         }] + .outbounds |
         
-        # 插入路由规则 (DNS 保持直连，特定域名走 WARP)
+        # 路由配置：确保列表域名精准送入隧道
         .route.rules = [
-            { "protocol": "dns", "outbound": "direct-out" },
             {
                 "domain_suffix": [
-                    "youtube.com", "googlevideo.com", "reddit.com", "netflix.com", "netflix.net", 
-                    "nflximg.net", "nflxvideo.net", "nflxso.net", "nflxext.com", "disneyplus.com", 
-                    "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", 
-                    "oaistatic.com", "oaiusercontent.com", "anthropic.com", "claude.ai", 
-                    "gemini.google.com", "cloudflare.com", "ip.gs"
+                    "youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com", "reddit.com", 
+                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxso.net", 
+                    "nflxext.com", "disneyplus.com", "disney-plus.net", "disneystreaming.com", 
+                    "amazon.com", "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com", 
+                    "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"
                 ],
                 "outbound": "warp-out"
             }
         ] + .route.rules |
         
-        # 全局路由优化
-        .route.auto_detect_interface = true |
-        .route.final = "direct-out"
+        # 强制开启嗅探，否则 Hy2 无法根据域名分流
+        .inbounds[0].sniff = true |
+        .inbounds[0].sniff_override_destination = true
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
         
-        # 4. 特殊处理：为 Hysteria2 入站开启嗅探 (Sing-box 1.8.0+ 语法)
-        jq '.inbounds[0] += {"sniff": true, "sniff_override_destination": true}' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-        
-        succ "WARP 配置修复完成：JSON 结构已补全，嗅探已开启"
+        succ "WARP 分流策略已重构：已解决 MTU 黑洞并强制域名嗅探"
     fi
 }
 
