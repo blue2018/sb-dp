@@ -843,33 +843,42 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 结构预处理
+    # 1. 结构初始化，设置日志级别以便观察
     jq '.log.level = "info" | .route //= {"rules": []} | .outbounds //= []' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
-    # 2. 清理旧规则
-    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+    # 2. 清理旧配置
+    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out")) | del(.route.rules[] | select(.protocol == "dns"))' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 3. 注入极致兼容性配置
+        # 3. 写入 Sing-box 1.11+ 官方新规范配置
+        # 核心改动：使用 "endpoint" 替代 "server"/"server_port"
         jq --arg priv "$priv" '
         .outbounds += [{
             "type": "wireguard",
             "tag": "warp-out",
-            "server": "engage.cloudflareclient.com",
-            "server_port": 2408,
-            "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
+            "endpoint": "engage.cloudflareclient.com:2408",
+            "local_address": [
+                "172.16.0.2/32",
+                "fd01:5ca1:ab1e::1/128"
+            ],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1120,
+            "mtu": 1280,
             "detour": "direct-out"
         }] |
         .route.rules = [
             { "protocol": "dns", "outbound": "direct-out" },
             {
-                "domain_suffix": ["youtube.com", "googlevideo.com", "ytimg.com", "netflix.com", "netflix.net", "openai.com", "chatgpt.com", "oaistatic.com", "anthropic.com", "claude.ai", "gemini.google.com", "ip.gs"],
+                "domain_suffix": [
+                    "youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com", "reddit.com", 
+                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxso.net", 
+                    "nflxext.com", "disneyplus.com", "disney-plus.net", "disneystreaming.com", 
+                    "amazon.com", "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com", 
+                    "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"
+                ],
                 "outbound": "warp-out"
             }
         ] + .route.rules |
@@ -878,8 +887,7 @@ apply_warp_config() {
         .inbounds[0].sniff_override_destination = true
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
         
-        # 调试信息
-        succ "调试级配置已生成，MTU 已降至 1120"
+        succ "WARP 配置已适配 1.11+ 官方新规范 (Endpoint 模式)"
     fi
 }
 
