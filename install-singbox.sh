@@ -730,7 +730,7 @@ setup_service() {
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
         local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
         if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
-            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
+            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
             exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
         fi
         cat > /etc/init.d/sing-box <<EOF
@@ -743,7 +743,6 @@ respawn_max=3
 respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
-export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 command="/bin/sh"
 command_args="-c \"$exec_cmd\""
 pidfile="/run/\${RC_SVCNAME}.pid"
@@ -761,7 +760,7 @@ EOF
         [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
         
-        [ "$mem_total" -lt 200 ] && io_prio=4
+		[ "$mem_total" -lt 200 ] && io_prio=4
         [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
         local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
         local cpu_quota=$((real_c * 100))
@@ -779,7 +778,6 @@ Type=simple
 User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
-Environment=ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
@@ -803,7 +801,7 @@ EOF
     fi
     
     local pid=""
-    for i in 1 2 3 4 5; do 
+	for i in 1 2 3 4 5; do 
         pid=$(pidof sing-box | awk '{print $1}')
         [ -n "$pid" ] && break || sleep 0.4
     done
@@ -815,118 +813,6 @@ EOF
         err "sing-box 启动失败，最近日志："; [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 5 || tail -n 5 /var/log/messages 2>/dev/null; } || { journalctl -u sing-box -n 5 --no-pager 2>/dev/null; }
         echo -e "\033[1;33m[配置自检]\033[0m"; /usr/bin/sing-box check -c /etc/sing-box/config.json || true; exit 1
     fi
-}
-
-# ==========================================
-# warp 出站
-# ==========================================
-register_warp() {
-    local warp_conf="/etc/sing-box/warp.json"
-    [ -s "$warp_conf" ] && return 0
-    info "正在为容器环境注册 WARP 账号..."
-    local priv_key=$(openssl rand -base64 32)
-    local install_id=$(openssl rand -hex 16)
-    local reg_data=$(curl -sSL -X POST -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" \
-        -d "{\"key\":\"$priv_key\",\"install_id\":\"$install_id\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"type\":\"Linux\"}" \
-        "https://api.cloudflareclient.com/v0a1922/reg" 2>/dev/null)
-
-    if echo "$reg_data" | grep -q "id"; then
-        echo "{\"private_key\":\"$priv_key\"}" > "$warp_conf"
-        succ "WARP 账号注册成功"
-    else
-        err "注册失败，母鸡 IP 可能被封锁"; return 1
-    fi
-}
-
-apply_warp_config() {
-    local action="$1"
-    local config="/etc/sing-box/config.json"
-    local warp_data="/etc/sing-box/warp.json"
-
-    # 1. 初始化基础结构
-    jq '.log.level = "info" | .route //= {"rules": []} | .outbounds //= []' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-
-    # 2. 清理旧 WARP 配置
-    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out")) | del(.route.rules[] | select(.protocol == "dns"))' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-
-    if [ "$action" = "enable" ]; then
-        register_warp || return 1
-        local priv=$(jq -r '.private_key' "$warp_data")
-        
-        # 3. 写入兼容版配置 (回归 server/server_port 格式)
-        jq --arg priv "$priv" '
-        .outbounds += [{
-            "type": "wireguard",
-            "tag": "warp-out",
-            "server": "162.159.192.1",
-            "server_port": 2408,
-            "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
-            "private_key": $priv,
-            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1280,
-            "detour": "direct-out"
-        }] |
-        .route.rules = [
-            { "protocol": "dns", "outbound": "direct-out" },
-            {
-                "domain": ["google.com", "github.com", "bing.com"],
-                "domain_suffix": [
-                    "youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com", "reddit.com", 
-                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxso.net", 
-                    "nflxext.com", "disneyplus.com", "disney-plus.net", "disneystreaming.com", 
-                    "amazon.com", "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com", 
-                    "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"
-                ],
-                "outbound": "warp-out"
-            }
-        ] + .route.rules |
-        .route.auto_detect_interface = true |
-        .inbounds[0].sniff = true |
-        .inbounds[0].sniff_override_destination = true
-        ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-        
-        succ "WARP 配置已回滚至兼容模式 (Server 格式)"
-    fi
-}
-
-manage_warp() {
-    while true; do
-        local is_enabled=$(grep -q "warp-out" /etc/sing-box/config.json && echo "true" || echo "false")
-        local status_text="\033[1;31m未启用 ✗\033[0m"
-        [ "$is_enabled" = "true" ] && status_text="\033[1;32m已启用 ✔\033[0m"
-
-        echo -e "\n========================================"
-        echo -e "  WARP 流媒体解锁管理 (冷启动模式)"
-        echo -e "========================================"
-        echo -e " 当前状态: $status_text"
-        echo -e "----------------------------------------"
-        echo -e "1. 启用 WARP 出站"
-        echo -e "2. 禁用 WARP 出站"
-        echo -e "3. 重新注册账号"
-        echo -e "0. 返回主菜单"
-        read -r -p "请选择 [0-3]: " wopt
-        case "$wopt" in
-            1|2)
-                local act="enable"; [ "$wopt" = "2" ] && act="disable"
-                
-                # --- 第一步：彻底停服，释放端口 ---
-                info "正在彻底停止服务并清理残留进程..."
-                systemctl stop sing-box >/dev/null 2>&1
-                [ -x "/etc/init.d/sing-box" ] && rc-service sing-box stop >/dev/null 2>&1
-                pidof sing-box | xargs kill -9 >/dev/null 2>&1
-                sleep 1.5 # 关键：等待内核释放 UDP 端口和网卡接口
-                
-                # --- 第二步：修改配置 ---
-                apply_warp_config "$act" && {
-                    # --- 第三步：通过 setup_service 重新初始化系统优化与启动 ---
-                    info "配置已更新，正在执行冷启动..."
-                    setup_service 
-                    succ "操作完成！WARP 已${act/enable/启用}${act/disable/禁用}，服务已重绑定端口"
-                } ;;
-            3) rm -f /etc/sing-box/warp.json && register_warp ;;
-            0) break ;;
-        esac
-    done
 }
 
 # ==========================================
@@ -1029,7 +915,7 @@ EOF
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
 create_config setup_service install_singbox info err warn succ optimize_system \
-apply_userspace_adaptive_profile apply_nic_core_boost register_warp apply_warp_config manage_warp \
+apply_userspace_adaptive_profile apply_nic_core_boost \
 setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
 
     for f in "${funcs[@]}"; do
@@ -1099,12 +985,12 @@ while true; do
     echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "------------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
-    echo "4. 更新内核    5. 重启服务    6. WARP 管理"
-    echo "7. 卸载脚本    0. 退出"
+    echo "4. 更新内核    5. 重启服务    6. 卸载脚本"
+    echo "0. 退出"
     echo ""  
-    read -r -p "请选择 [0-7]: " opt
+    read -r -p "请选择 [0-6]: " opt
     opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
-    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-7]$ ]]; then
+    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-6]$ ]]; then
         echo -e "\033[1;31m输入有误 [\$opt]，请重新输入\033[0m"; sleep 1; continue
     fi
     case "\$opt" in
@@ -1117,8 +1003,7 @@ while true; do
         3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-		6) manage_warp ;;
-        7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
            if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
                # 1. 停止并禁用所有服务
@@ -1137,6 +1022,7 @@ while true; do
     esac
 done
 EOF
+
 	chmod +x "$SB_PATH"
     ln -sf "$SB_PATH" "/usr/local/bin/SB" 2>/dev/null || true
 }
