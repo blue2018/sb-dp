@@ -875,9 +875,9 @@ apply_warp_config() {
             }
         ] + .outbounds |
         
-        # 注入 DNS 专用服务器：显式指定 detour 走 warp-out
+        # 修正：移除 detour 防止启动死锁，仅保留服务器定义
         .dns.servers = (.dns.servers + [
-            { "tag": "dns-warp-server", "address": "8.8.4.4", "detour": "warp-out" }
+            { "tag": "dns-warp-server", "address": "8.8.4.4" }
         ]) |
         
         # 注入 DNS 规则：置顶确保匹配
@@ -885,13 +885,14 @@ apply_warp_config() {
             { "domain_suffix": $domains, "server": "dns-warp-server" }
         ] + (.dns.rules // []) |
         
-        # 注入路由规则：置顶确保匹配
+        # 注入路由规则：置顶确保匹配 (增加 DNS 流量的强制分流)
         .route.rules = [
-            { "domain_suffix": $domains, "outbound": "warp-out" }
+            { "domain_suffix": $domains, "outbound": "warp-out" },
+            { "server": "dns-warp-server", "outbound": "warp-out" }
         ] + .route.rules
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
         
-        succ "WARP 物理分家逻辑已应用：解析与传输已强制对齐"
+        succ "WARP 物理分家逻辑已应用：已修复连接死锁并强制对齐"
     fi
 }
 
