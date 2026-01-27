@@ -691,23 +691,45 @@ create_config() {
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
+  "dns": {
+    "servers": [
+      {"tag": "dns-remote", "address": "https://8.8.8.8/dns-query", "detour": "direct-out"},
+      {"tag": "dns-direct", "address": "local", "detour": "direct-out"}
+    ],
+    "rules": [
+      {"outbound": "any", "server": "dns-remote"}
+    ],
+    "strategy": "$ds"
+  },
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
+    "sniff": true,
+    "sniff_override_destination": true,
     "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
     "udp_fragment": true,
-    "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
+    "tls": {
+      "enabled": true,
+      "alpn": ["h3"],
+      "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+      "key_path": "/etc/sing-box/certs/privkey.pem"
+    },
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
+  "outbounds": [
+    {"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}
+  ],
+  "route": {
+    "rules": [],
+    "final": "direct-out"
+  }
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
@@ -843,23 +865,26 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 清理所有 WARP 相关配置
+    # 清理旧规则 (保持逻辑简洁)
     jq '
     del(.outbounds[] | select(.tag == "warp-out")) |
-    del(.route.rules[] | select(.outbound == "warp-out"))
+    del(.route.rules[] | select(.outbound == "warp-out" or .tag == "dns-rule"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 写入 WARP 配置
-        # 移除了 detour，加入了更稳健的路由判断
+        # 插入新配置：
+        # 1. 增加 DNS 强制直连规则
+        # 2. 增加 WARP 出站
+        # 3. 增加 域名分流规则
         jq --arg priv "$priv" '
         .outbounds = [
             {
                 "type": "wireguard",
                 "tag": "warp-out",
+                "detour": "direct-out",
                 "server": "162.159.192.1",
                 "server_port": 2408,
                 "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
@@ -871,9 +896,9 @@ apply_warp_config() {
         
         .route.rules = [
             {
+                "protocol": "dns",
                 "outbound": "direct-out",
-                "port": [53],
-                "description": "DNS bypass"
+                "tag": "dns-rule"
             },
             {
                 "domain_suffix": [
@@ -883,15 +908,84 @@ apply_warp_config() {
                     "gemini.google.com", "ip.gs", "cloudflare.com"
                 ],
                 "outbound": "warp-out"
-            },
-            {
-                "protocol": ["quic", "http"],
-                "domain_suffix": ["google.com"],
-                "outbound": "warp-out"
             }
-        ] + .route.rules
+        ] + .route.rules |
+        .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
     fi
+}
+
+create_config() {
+    local PORT_HY2="${1:-}"
+    local cur_bw="${VAR_HY2_BW:-200}"
+    mkdir -p /etc/sing-box
+    local ds="ipv4_only"
+    [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
+    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
+    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
+    
+    if [ -z "$PORT_HY2" ]; then
+        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
+        else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
+    fi
+    
+    local PSK
+    if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
+    elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
+    else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
+
+    local SALA_PASS=""
+    if [ -f /etc/sing-box/config.json ]; then
+        SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
+    fi
+    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+
+    # 关键改动：添加 sniff 开启域名解析识别，优化 DNS 设置
+    cat > "/etc/sing-box/config.json" <<EOF
+{
+  "log": { "level": "fatal", "timestamp": true },
+  "dns": {
+    "servers": [
+      {"tag": "dns-remote", "address": "https://8.8.8.8/dns-query", "detour": "direct-out"},
+      {"tag": "dns-direct", "address": "local", "detour": "direct-out"}
+    ],
+    "rules": [
+      {"outbound": "any", "server": "dns-remote"}
+    ],
+    "strategy": "$ds"
+  },
+  "inbounds": [{
+    "type": "hysteria2",
+    "tag": "hy2-in",
+    "listen": "::",
+    "listen_port": $PORT_HY2,
+    "users": [ { "password": "$PSK" } ],
+    "sniff": true,
+    "sniff_override_destination": true,
+    "ignore_client_bandwidth": false,
+    "up_mbps": $cur_bw,
+    "down_mbps": $cur_bw,
+    "udp_timeout": "$timeout",
+    "udp_fragment": true,
+    "tls": {
+      "enabled": true,
+      "alpn": ["h3"],
+      "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+      "key_path": "/etc/sing-box/certs/privkey.pem"
+    },
+    "obfs": {"type": "salamander", "password": "$SALA_PASS"},
+    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+  }],
+  "outbounds": [
+    {"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}
+  ],
+  "route": {
+    "rules": [],
+    "final": "direct-out"
+  }
+}
+EOF
+    chmod 600 "/etc/sing-box/config.json"
 }
 
 manage_warp() {
