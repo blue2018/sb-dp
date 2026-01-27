@@ -856,7 +856,7 @@ apply_warp_config() {
         local priv=$(jq -r '.private_key' "$warp_data")
         
         # 统一分流域名列表
-        local unlock_domains='["netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "youtube.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "cloudflare-dns.com", "ip.gs"]'
+        local unlock_domains='["reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "youtube.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "cloudflare-dns.com", "ip.gs"]'
 
         # 2. 注入解耦后的新逻辑
         jq --arg priv "$priv" --argjson domains "$unlock_domains" '
