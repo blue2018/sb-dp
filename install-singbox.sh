@@ -659,39 +659,68 @@ install_singbox() {
 # ==========================================
 # 配置文件生成
 # ==========================================
+# 完整替换 create_config 函数
 create_config() {
     local PORT_HY2="${1:-}"
-	local cur_bw="${VAR_HY2_BW:-200}"
+    local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
+    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
+    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # 1. 端口确定逻辑
+    # 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
-        else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
+        if [ -f /etc/sing-box/config.json ]; then 
+            PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
+        else 
+            PORT_HY2=$(shuf -i 10000-60000 -n 1)
+        fi
     fi
     
-    # 2. PSK (密码) 确定逻辑
+    # PSK (密码) 确定逻辑
     local PSK
-    if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
-    elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
-    else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
+    if [ -f /etc/sing-box/config.json ]; then 
+        PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
+    elif [ -f /proc/sys/kernel/random/uuid ]; then 
+        PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
+    else 
+        local s=$(openssl rand -hex 16)
+        PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"
+    fi
 
-    # 3. Salamander 混淆密码确定逻辑
+    # Salamander 混淆密码确定逻辑
     local SALA_PASS=""
     if [ -f /etc/sing-box/config.json ]; then
         SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 4. 写入 Sing-box 配置文件
+    # 写入 Sing-box 配置文件（修复所有警告）
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
+  "dns": {
+    "servers": [
+      {
+        "tag": "google",
+        "address": "https://8.8.8.8/dns-query",
+        "address_resolver": "local",
+        "strategy": "$ds"
+      },
+      {
+        "tag": "local",
+        "address": "1.1.1.1",
+        "strategy": "$ds",
+        "detour": "direct-out"
+      }
+    ],
+    "rules": [],
+    "strategy": "$ds",
+    "independent_cache": false,
+    "disable_cache": false,
+    "disable_expire": false
+  },
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
@@ -703,11 +732,27 @@ create_config() {
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
     "udp_fragment": true,
-    "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
+    "tls": {
+      "enabled": true, 
+      "alpn": ["h3"], 
+      "min_version": "1.3", 
+      "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
+      "key_path": "/etc/sing-box/certs/privkey.pem"
+    },
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
+  "outbounds": [
+    {
+      "type": "direct", 
+      "tag": "direct-out", 
+      "domain_strategy": "$ds"
+    }
+  ],
+  "route": {
+    "rules": [],
+    "final": "direct-out"
+  }
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
@@ -821,6 +866,7 @@ EOF
 # warp 出站
 # ==========================================
 # WARP 注册函数(保持不变)
+# WARP 注册(不变)
 register_warp() {
     local warp_conf="/etc/sing-box/warp.json"
     [ -s "$warp_conf" ] && return 0
@@ -839,33 +885,86 @@ register_warp() {
     fi
 }
 
-# 核心修复:使用 endpoint + 正确的路由规则
+# 核心修复:针对容器环境的配置
 apply_warp_config() {
     local action="$1"
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 清理旧配置(删除所有 warp 相关的 outbound 和 endpoint)
+    # 清理旧配置
     jq '
-    .outbounds //= [] | 
+    .dns //= {} |
+    .dns.servers //= [] |
+    .dns.rules //= [] |
     .endpoints //= [] |
+    .outbounds //= [] |
     .route //= {} | 
     .route.rules //= [] |
-    .outbounds |= map(select(.tag != "warp-out")) |
+    .dns.servers |= map(select(.tag != "warp-dns")) |
+    .dns.rules |= map(select(.outbound != "warp-out")) |
     .endpoints |= map(select(.tag != "warp-ep")) |
-    .route.rules |= map(select(.outbound != "warp-out" and .outbound != "warp-ep"))
+    .outbounds |= map(select(.tag != "warp-out")) |
+    .route.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 使用新的 endpoint 架构 + 修复路由规则顺序
         jq --arg priv "$priv" '
-        # 添加 WireGuard endpoint(不是 outbound)
+        # DNS 服务器
+        .dns.servers = [
+            {
+                "tag": "warp-dns",
+                "address": "1.1.1.1",
+                "strategy": "prefer_ipv4",
+                "detour": "warp-out"
+            }
+        ] + (.dns.servers // []) |
+        
+        # DNS 路由规则
+        .dns.rules = [
+            {
+                "domain_suffix": [
+                    "youtube.com",
+                    "googlevideo.com",
+                    "ytimg.com",
+                    "ggpht.com",
+                    "youtu.be",
+                    "reddit.com",
+                    "redditstatic.com",
+                    "redd.it",
+                    "redditmedia.com",
+                    "netflix.com",
+                    "netflix.net",
+                    "nflxext.com",
+                    "nflximg.net",
+                    "nflxvideo.net",
+                    "nflxso.net",
+                    "disneyplus.com",
+                    "disney-plus.net",
+                    "disneystreaming.com",
+                    "dssott.com",
+                    "openai.com",
+                    "chatgpt.com",
+                    "oaistatic.com",
+                    "oaiusercontent.com",
+                    "anthropic.com",
+                    "claude.ai",
+                    "gemini.google.com",
+                    "bard.google.com",
+                    "cloudflare.com",
+                    "ip.gs"
+                ],
+                "server": "warp-dns"
+            }
+        ] + (.dns.rules // []) |
+        
+        # WireGuard endpoint
         .endpoints = [{
             "type": "wireguard",
             "tag": "warp-ep",
+            "system": false,
             "mtu": 1280,
             "address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
@@ -873,31 +972,68 @@ apply_warp_config() {
                 "address": "162.159.192.1",
                 "port": 2408,
                 "public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-                "allowed_ips": ["0.0.0.0/0", "::/0"]
+                "allowed_ips": ["0.0.0.0/0", "::/0"],
+                "persistent_keepalive_interval": 30
             }]
         }] + (.endpoints // []) |
         
-        # 修复路由规则:必须在 DNS 解析前匹配域名
+        # Outbound 桥接
+        .outbounds = [{
+            "type": "direct",
+            "tag": "warp-out",
+            "endpoint": "warp-ep",
+            "domain_strategy": "prefer_ipv4"
+        }] + (.outbounds // []) |
+        
+        # 路由规则
         .route.rules = [
             {
-                "domain_suffix": ["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"],
-                "outbound": "warp-ep"
+                "domain_suffix": [
+                    "youtube.com",
+                    "googlevideo.com",
+                    "ytimg.com",
+                    "ggpht.com",
+                    "youtu.be",
+                    "reddit.com",
+                    "redditstatic.com",
+                    "redd.it",
+                    "redditmedia.com",
+                    "netflix.com",
+                    "netflix.net",
+                    "nflxext.com",
+                    "nflximg.net",
+                    "nflxvideo.net",
+                    "nflxso.net",
+                    "disneyplus.com",
+                    "disney-plus.net",
+                    "disneystreaming.com",
+                    "dssott.com",
+                    "openai.com",
+                    "chatgpt.com",
+                    "oaistatic.com",
+                    "oaiusercontent.com",
+                    "anthropic.com",
+                    "claude.ai",
+                    "gemini.google.com",
+                    "bard.google.com",
+                    "cloudflare.com",
+                    "ip.gs"
+                ],
+                "outbound": "warp-out"
             }
         ] + (.route.rules // []) |
         
-        # 确保 final 是 direct
         .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
         
-        succ "WARP endpoint 已配置(domain_suffix 规则优先级已提升)"
+        succ "WARP 配置完成(DNS + endpoint + route 三层联动)"
     fi
 }
 
-# WARP 管理菜单(保持不变)
+# WARP 管理菜单
 manage_warp() {
     while true; do
-        # 修正检测逻辑:检查 endpoint 而非 outbound
-        local is_enabled=$(grep -q '"tag"[[:space:]]*:[[:space:]]*"warp-ep"' /etc/sing-box/config.json && echo "true" || echo "false")
+        local is_enabled=$(jq -e '.outbounds[]? | select(.tag == "warp-out")' /etc/sing-box/config.json >/dev/null 2>&1 && echo "true" || echo "false")
         local status_text="\033[1;31m未启用 ✗\033[0m"
         [ "$is_enabled" = "true" ] && status_text="\033[1;32m已启用 ✔\033[0m"
 
@@ -909,29 +1045,42 @@ manage_warp() {
         echo -e "1. 启用 WARP 出站"
         echo -e "2. 禁用 WARP 出站"
         echo -e "3. 重新注册账号"
+        echo -e "4. 查看运行日志"
+        echo -e "5. 手动测试运行"
         echo -e "0. 返回主菜单"
-        read -r -p "请选择 [0-3]: " wopt
+        read -r -p "请选择 [0-5]: " wopt
         case "$wopt" in
             1)
                 apply_warp_config "enable" && {
-                    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart >/dev/null 2>&1
-                    systemctl restart sing-box >/dev/null 2>&1 || pidof sing-box | xargs kill -9 >/dev/null 2>&1
-                    sleep 2
-                    # 验证启动状态
-                    if pidof sing-box >/dev/null 2>&1; then
-                        succ "WARP 已启用并生效 (endpoint 模式)"
+                    info "重启 sing-box 服务..."
+                    if [ -x "/etc/init.d/sing-box" ]; then
+                        rc-service sing-box restart 2>&1 | tail -5
                     else
-                        err "sing-box 启动失败,请检查日志"
-                        [ "$OS" != "alpine" ] && journalctl -u sing-box -n 10 --no-pager
+                        systemctl restart sing-box 2>&1 | tail -5
+                    fi
+                    sleep 3
+                    
+                    if pidof sing-box >/dev/null 2>&1; then
+                        succ "WARP 已启用(endpoint + outbound 桥接模式)"
+                        info "测试: curl --socks5 127.0.0.1:10011 https://www.youtube.com -I"
+                    else
+                        err "启动失败!请选择选项 5 手动测试"
                     fi
                 } ;;
             2)
                 apply_warp_config "disable" && {
-                    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart >/dev/null 2>&1
-                    systemctl restart sing-box >/dev/null 2>&1 || pidof sing-box | xargs kill -9 >/dev/null 2>&1
+                    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart || systemctl restart sing-box
                     info "WARP 已禁用"
                 } ;;
-            3) rm -f /etc/sing-box/warp.json && register_warp ;;
+            3) 
+                rm -f /etc/sing-box/warp.json && register_warp ;;
+            4)
+                echo -e "\n--- 最近 30 行日志 ---"
+                tail -30 /var/log/messages | grep -E "sing-box|warp|ERROR|FATAL" || \
+                logread | tail -30 | grep -E "sing-box|warp" ;;
+            5)
+                echo -e "\n--- 手动测试(Ctrl+C 退出) ---"
+                /usr/bin/sing-box run -c /etc/sing-box/config.json ;;
             0) break ;;
         esac
     done
@@ -1127,7 +1276,7 @@ while true; do
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
 		6) manage_warp ;;
         7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
-           [[ "\${cf,,}" != "y" ]] && { info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; break; }
+           [[ "\${cf,,}" != "y" ]] && { info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; }
            info "正在执行深度卸载..."
            # 1. 暴力关停服务与清理 Swap
            { pkill -9 sing-box; systemctl disable --now sing-box zram-swap; rc-service sing-box stop; rc-update del zram-swap sing-box; swapoff -a; } &>/dev/null
