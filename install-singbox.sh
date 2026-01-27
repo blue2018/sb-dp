@@ -843,39 +843,33 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 结构初始化，防止 jq 对 null 迭代
-    jq '.route //= {"rules": []} | .outbounds //= []' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+    # 1. 结构预处理
+    jq '.log.level = "info" | .route //= {"rules": []} | .outbounds //= []' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
-    # 清理所有旧的 WARP 规则和 DNS 路由
-    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out")) | del(.route.rules[] | select(.protocol == "dns"))' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+    # 2. 清理旧规则
+    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 写入配置：重点在于 detour 绕行和域名嗅探
+        # 3. 注入极致兼容性配置
         jq --arg priv "$priv" '
         .outbounds += [{
             "type": "wireguard",
             "tag": "warp-out",
-            "server": "162.159.192.1",
+            "server": "engage.cloudflareclient.com",
             "server_port": 2408,
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1280,
+            "mtu": 1120,
             "detour": "direct-out"
         }] |
         .route.rules = [
             { "protocol": "dns", "outbound": "direct-out" },
             {
-                "domain_suffix": [
-                    "youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com", "reddit.com", 
-                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxso.net", 
-                    "nflxext.com", "disneyplus.com", "disney-plus.net", "disneystreaming.com", 
-                    "amazon.com", "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com", 
-                    "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"
-                ],
+                "domain_suffix": ["youtube.com", "googlevideo.com", "ytimg.com", "netflix.com", "netflix.net", "openai.com", "chatgpt.com", "oaistatic.com", "anthropic.com", "claude.ai", "gemini.google.com", "ip.gs"],
                 "outbound": "warp-out"
             }
         ] + .route.rules |
@@ -883,7 +877,9 @@ apply_warp_config() {
         .inbounds[0].sniff = true |
         .inbounds[0].sniff_override_destination = true
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-        info "JSON 配置修改完成"
+        
+        # 调试信息
+        succ "调试级配置已生成，MTU 已降至 1120"
     fi
 }
 
