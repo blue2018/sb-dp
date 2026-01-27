@@ -843,20 +843,27 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 彻底清理旧配置
+    # 1. 结构预检查与初始化 (防止 jq 迭代 null 报错)
+    if [ ! -f "$config" ]; then err "配置文件不存在"; return 1; fi
+    
+    # 确保 route 和 rules 存在
+    jq '.route //= {"rules": []} | .route.rules //= [] | .outbounds //= []' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+
+    # 2. 彻底清理旧的 WARP 配置
     jq '
     del(.outbounds[] | select(.tag == "warp-out")) |
     del(.route.rules[] | select(.outbound == "warp-out")) |
-    del(.route.rules[] | select(.outbound == "dns-out"))
+    del(.route.rules[] | select(.protocol == "dns"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 2. 注入优化后的配置：添加 detour 和强制 sniffing
+        # 3. 注入修复后的配置
+        # 注意：Hysteria2 属于传输层协议，嗅探应在全局 route 或指定的 inbounds 属性中通过 sniffing 对象配置
         jq --arg priv "$priv" '
-        # 在 outbounds 最前面插入 warp-out，并设置 detour 绕行
+        # 插入 WARP 出站 (detour 绕行，防止回环)
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
@@ -871,7 +878,7 @@ apply_warp_config() {
             "udp_fragment": true
         }] + .outbounds |
         
-        # 配置路由规则
+        # 插入路由规则 (DNS 保持直连，特定域名走 WARP)
         .route.rules = [
             { "protocol": "dns", "outbound": "direct-out" },
             {
@@ -886,14 +893,15 @@ apply_warp_config() {
             }
         ] + .route.rules |
         
-        # 开启流量嗅探，这是解决域名无法访问的关键
-        .inbounds[0].sniff = true |
-        .inbounds[0].sniff_override_destination = true |
-        
-        .route.auto_detect_interface = true
+        # 全局路由优化
+        .route.auto_detect_interface = true |
+        .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
         
-        succ "WARP 配置已修复：强制绕行模式 + 流量嗅探已开启"
+        # 4. 特殊处理：为 Hysteria2 入站开启嗅探 (Sing-box 1.8.0+ 语法)
+        jq '.inbounds[0] += {"sniff": true, "sniff_override_destination": true}' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+        
+        succ "WARP 配置修复完成：JSON 结构已补全，嗅探已开启"
     fi
 }
 
