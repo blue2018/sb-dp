@@ -834,7 +834,7 @@ register_warp() {
         echo "{\"private_key\":\"$priv_key\"}" > "$warp_conf"
         succ "WARP 账号注册成功"
     else
-        err "注册失败"; return 1
+        err "注册失败，母鸡 IP 可能被封锁"; return 1
     fi
 }
 
@@ -843,72 +843,45 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 清理
     jq '
-    .outbounds //= [] |
+    .outbounds //= [] | 
     .route //= {} | 
     .route.rules //= [] |
-    .outbounds |= map(select(.tag != "warp" and .tag != "warp-IPv4" and .tag != "warp-IPv6")) |
-    .route.rules |= map(select(.outbound != "warp" and .outbound != "warp-IPv4" and .outbound != "warp-IPv6"))
+    .outbounds |= map(select(.tag != "warp-out")) |
+    .route.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 使用稳定的旧版 WireGuard outbound
         jq --arg priv "$priv" '
-        .outbounds = [
-            {
-                "type": "direct",
-                "tag": "warp-IPv4",
-                "detour": "warp",
-                "domain_strategy": "ipv4_only"
-            },
-            {
-                "type": "direct",
-                "tag": "warp-IPv6",
-                "detour": "warp",
-                "domain_strategy": "ipv6_only"
-            },
-            {
-                "type": "wireguard",
-                "tag": "warp",
-                "server": "162.159.192.1",
-                "server_port": 2408,
-                "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
-                "private_key": $priv,
-                "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-                "mtu": 1280
-            }
-        ] + (.outbounds // []) |
+        .outbounds = [{
+            "type": "wireguard",
+            "tag": "warp-out",
+            "server": "162.159.192.1",
+            "server_port": 2408,
+            "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
+            "private_key": $priv,
+            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+            "mtu": 1280
+        }] + .outbounds |
         
         .route.rules = [
             {
-                "domain_suffix": [
-                    "youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com", "youtu.be",
-                    "reddit.com", "redditstatic.com", "redd.it", "redditmedia.com",
-                    "netflix.com", "netflix.net", "nflxext.com", "nflximg.net", "nflxvideo.net", "nflxso.net",
-                    "disneyplus.com", "disney-plus.net", "disneystreaming.com", "dssott.com",
-                    "openai.com", "chatgpt.com", "oaistatic.com", "oaiusercontent.com",
-                    "anthropic.com", "claude.ai",
-                    "gemini.google.com", "bard.google.com",
-                    "cloudflare.com", "ip.gs"
-                ],
-                "outbound": "warp-IPv4"
+                "domain_suffix": ["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"],
+                "outbound": "warp-out"
             }
         ] + (.route.rules // []) |
         
         .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-        
-        succ "WARP 配置完成(稳定 outbound 模式)"
     fi
 }
 
 manage_warp() {
     while true; do
-        local is_enabled=$(jq -e '.outbounds[]? | select(.tag == "warp")' /etc/sing-box/config.json >/dev/null 2>&1 && echo "true" || echo "false")
+        local is_enabled=$(grep -q "warp-out" /etc/sing-box/config.json && echo "true" || echo "false")
         local status_text="\033[1;31m未启用 ✗\033[0m"
         [ "$is_enabled" = "true" ] && status_text="\033[1;32m已启用 ✔\033[0m"
 
@@ -917,20 +890,24 @@ manage_warp() {
         echo -e "========================================"
         echo -e " 当前状态: $status_text"
         echo -e "----------------------------------------"
-        echo -e "1. 启用 WARP"
-        echo -e "2. 禁用 WARP"
-        echo -e "3. 重新注册"
-        echo -e "0. 返回"
-        read -r -p "选择 [0-3]: " wopt
+        echo -e "1. 启用 WARP 出站"
+        echo -e "2. 禁用 WARP 出站"
+        echo -e "3. 重新注册账号"
+        echo -e "0. 返回主菜单"
+        read -r -p "请选择 [0-3]: " wopt
         case "$wopt" in
             1)
                 apply_warp_config "enable" && {
-                    rc-service sing-box restart 2>&1
-                    sleep 2
-                    pidof sing-box >/dev/null && succ "WARP 已启用" || err "启动失败"
+                    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart >/dev/null 2>&1
+                    pidof sing-box | xargs kill -9 >/dev/null 2>&1
+                    succ "WARP 已开启 (用户态模式)"
                 } ;;
             2)
-                apply_warp_config "disable" && rc-service sing-box restart && info "WARP 已禁用" ;;
+                apply_warp_config "disable" && {
+                    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart >/dev/null 2>&1
+                    pidof sing-box | xargs kill -9 >/dev/null 2>&1
+                    info "WARP 已禁用"
+                } ;;
             3) rm -f /etc/sing-box/warp.json && register_warp ;;
             0) break ;;
         esac
@@ -1127,16 +1104,20 @@ while true; do
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
 		6) manage_warp ;;
         7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
-           [[ "\${cf,,}" != "y" ]] && { info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; }
-           info "正在执行深度卸载..."
-           # 1. 暴力关停服务与清理 Swap
-           { pkill -9 sing-box; systemctl disable --now sing-box zram-swap; rc-service sing-box stop; rc-update del zram-swap sing-box; swapoff -a; } &>/dev/null
-           # 2. 物理抹除所有残留文件
-           rm -rf /swapfile /etc/sing-box /usr/bin/sing-box /usr/local/bin/[sS][bB] /etc/systemd/system/{zram-swap,sing-box}* /etc/init.d/{zram-swap,sing-box} /etc/sysctl.d/*sing-box* /tmp/*
-           # 3. 恢复内核、防火墙与环境配置
-           printf "net.ipv4.ip_forward=0\nnet.ipv6.conf.all.forwarding=0\nvm.swappiness=60\n" > /etc/sysctl.conf
-           { iptables -F; iptables -t nat -F; iptables -X; sysctl -p; sed -i '/[sS][bB]/d' ~/.bashrc /etc/profile; systemctl daemon-reload; } &>/dev/null
-           succ "卸载完成"; exit 0 ;;
+           if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
+               info "正在执行深度卸载..."
+               # 1. 停止并禁用所有服务
+               systemctl stop sing-box 2>/dev/null; rc-service sing-box stop 2>/dev/null
+               systemctl disable zram-swap.service sing-box.service 2>/dev/null; rc-update del zram-swap sing-box 2>/dev/null
+               # 2. 清理 ZRAM 与 磁盘 Swap (单行合并逻辑)
+               grep -q "/dev/zram0" /proc/swaps && { swapoff /dev/zram0 2>/dev/null; echo 1 > /sys/block/zram0/reset 2>/dev/null; info "ZRAM 已清理"; }
+               grep -q "/swapfile" /proc/swaps && { swapoff /swapfile 2>/dev/null; rm -f /swapfile; sed -i '/\/swapfile/d' /etc/fstab 2>/dev/null; info "磁盘 Swap 已清理"; }
+               # 3. 文件一键清理 (使用大括号扩展压缩)
+               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{zram-swap,sing-box}.service /etc/init.d/{zram-swap,sing-box} /etc/sysctl.d/99-sing-box.conf
+               # 4. 系统恢复并退出
+               printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
+               sysctl -p >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "卸载完成"; exit 0
+           else info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; fi ;;
         0) exit 0 ;;
     esac
 done
