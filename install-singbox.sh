@@ -843,10 +843,10 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 结构预修复：确保基础 JSON 对象存在，防止 jq 报错
+    # 1. 结构预检查
     jq '.route //= {"rules": []} | .outbounds //= []' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
-    # 2. 彻底移除旧的 WARP 相关配置
+    # 2. 清理旧配置
     jq '
     del(.outbounds[] | select(.tag == "warp-out")) |
     del(.route.rules[] | select(.outbound == "warp-out"))
@@ -856,9 +856,8 @@ apply_warp_config() {
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 3. 注入针对“分流后断网”优化的配置
+        # 3. 写入符合 Cloudflare 2026 规范的配置
         jq --arg priv "$priv" '
-        # 出站配置：增加 MTU 兼容性和明确的绕行逻辑
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
@@ -867,14 +866,16 @@ apply_warp_config() {
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "mtu": 1200,
-            "udp_fragment": true,
+            "reserved": [0, 0, 0], 
+            "mtu": 1280,
             "domain_strategy": "prefer_ipv4",
+            "udp_fragment": true,
             "detour": "direct-out"
         }] + .outbounds |
         
-        # 路由配置：确保列表域名精准送入隧道
+        # 路由规则：域名列表置顶，且强制 DNS 绕过 WARP
         .route.rules = [
+            { "protocol": "dns", "outbound": "direct-out" },
             {
                 "domain_suffix": [
                     "youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com", "reddit.com", 
@@ -886,13 +887,17 @@ apply_warp_config() {
                 "outbound": "warp-out"
             }
         ] + .route.rules |
+
+        .route.auto_detect_interface = true |
         
-        # 强制开启嗅探，否则 Hy2 无法根据域名分流
-        .inbounds[0].sniff = true |
-        .inbounds[0].sniff_override_destination = true
+        # 必须在入站开启嗅探，否则 Hy2 无法根据域名分流
+        .inbounds[0] += {
+            "sniff": true,
+            "sniff_override_destination": true
+        }
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
         
-        succ "WARP 分流策略已重构：已解决 MTU 黑洞并强制域名嗅探"
+        succ "WARP 配置已重构：已加入 Reserved 特征码并强制 DNS 绕行"
     fi
 }
 
