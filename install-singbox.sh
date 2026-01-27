@@ -1106,20 +1106,16 @@ while true; do
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
 		6) manage_warp ;;
         7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
-           if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
-               info "正在执行深度卸载..."
-               # 1. 停止并禁用所有服务
-               systemctl stop sing-box 2>/dev/null; rc-service sing-box stop 2>/dev/null
-               systemctl disable zram-swap.service sing-box.service 2>/dev/null; rc-update del zram-swap sing-box 2>/dev/null
-               # 2. 清理 ZRAM 与 磁盘 Swap (单行合并逻辑)
-               grep -q "/dev/zram0" /proc/swaps && { swapoff /dev/zram0 2>/dev/null; echo 1 > /sys/block/zram0/reset 2>/dev/null; info "ZRAM 已清理"; }
-               grep -q "/swapfile" /proc/swaps && { swapoff /swapfile 2>/dev/null; rm -f /swapfile; sed -i '/\/swapfile/d' /etc/fstab 2>/dev/null; info "磁盘 Swap 已清理"; }
-               # 3. 文件一键清理 (使用大括号扩展压缩)
-               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{zram-swap,sing-box}.service /etc/init.d/{zram-swap,sing-box} /etc/sysctl.d/99-sing-box.conf
-               # 4. 系统恢复并退出
-               printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
-               sysctl -p >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "卸载完成"; exit 0
-           else info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; fi ;;
+           [[ "\${cf,,}" != "y" ]] && { info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; break; }
+           info "正在执行深度卸载..."
+           # 1. 暴力关停服务与清理 Swap
+           { pkill -9 sing-box; systemctl disable --now sing-box zram-swap; rc-service sing-box stop; rc-update del zram-swap sing-box; swapoff -a; } &>/dev/null
+           # 2. 物理抹除所有残留文件
+           rm -rf /swapfile /etc/sing-box /usr/bin/sing-box /usr/local/bin/[sS][bB] /etc/systemd/system/{zram-swap,sing-box}* /etc/init.d/{zram-swap,sing-box} /etc/sysctl.d/*sing-box* /tmp/*
+           # 3. 恢复内核、防火墙与环境配置
+           printf "net.ipv4.ip_forward=0\nnet.ipv6.conf.all.forwarding=0\nvm.swappiness=60\n" > /etc/sysctl.conf
+           { iptables -F; iptables -t nat -F; iptables -X; sysctl -p; sed -i '/[sS][bB]/d' ~/.bashrc /etc/profile; systemctl daemon-reload; } &>/dev/null
+           succ "卸载完成"; exit 0 ;;
         0) exit 0 ;;
     esac
 done
