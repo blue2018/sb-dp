@@ -843,25 +843,23 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 第一步：彻底清理旧的 WARP 相关配置，防止多次操作导致 JSON 嵌套错误
+    # 清理所有 WARP 相关配置
     jq '
     del(.outbounds[] | select(.tag == "warp-out")) |
-    del(.route.rules[] | select(.outbound == "warp-out" or .tag == "warp-dns-rule"))
+    del(.route.rules[] | select(.outbound == "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 第二步：注入新的 WARP 出站和路由规则
-        # 1. 增加 warp-dns-rule：强制所有 DNS 流量走直连，防止解析死循环
-        # 2. 增加 detour: "direct-out"：确保 WireGuard 隧道包走物理网口
+        # 写入 WARP 配置
+        # 移除了 detour，加入了更稳健的路由判断
         jq --arg priv "$priv" '
         .outbounds = [
             {
                 "type": "wireguard",
                 "tag": "warp-out",
-                "detour": "direct-out",
                 "server": "162.159.192.1",
                 "server_port": 2408,
                 "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
@@ -873,17 +871,22 @@ apply_warp_config() {
         
         .route.rules = [
             {
-                "tag": "warp-dns-rule",
+                "outbound": "direct-out",
                 "port": [53],
-                "outbound": "direct-out"
+                "description": "DNS bypass"
             },
             {
                 "domain_suffix": [
                     "youtube.com", "googlevideo.com", "reddit.com", "netflix.com", 
                     "netflix.net", "disneyplus.com", "disneystreaming.com", 
                     "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", 
-                    "gemini.google.com", "cloudflare.com", "ip.gs"
+                    "gemini.google.com", "ip.gs", "cloudflare.com"
                 ],
+                "outbound": "warp-out"
+            },
+            {
+                "protocol": ["quic", "http"],
+                "domain_suffix": ["google.com"],
                 "outbound": "warp-out"
             }
         ] + .route.rules
