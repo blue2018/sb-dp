@@ -823,52 +823,18 @@ EOF
 register_warp() {
     local warp_conf="/etc/sing-box/warp.json"
     [ -s "$warp_conf" ] && return 0
-    
     info "正在为容器环境注册 WARP 账号..."
-    
     local priv_key=$(openssl rand -base64 32)
     local install_id=$(openssl rand -hex 16)
-    local tos_date=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-    
     local reg_data=$(curl -sSL -X POST -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" \
-        -d "{\"key\":\"$priv_key\",\"install_id\":\"$install_id\",\"tos\":\"$tos_date\",\"type\":\"Linux\",\"locale\":\"en_US\"}" \
+        -d "{\"key\":\"$priv_key\",\"install_id\":\"$install_id\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"type\":\"Linux\"}" \
         "https://api.cloudflareclient.com/v0a1922/reg" 2>/dev/null)
 
-    local id=$(echo "$reg_data" | jq -r '.id // empty')
-    
-    if [ -n "$id" ]; then
-        # 提取原始数据
-        local v4=$(echo "$reg_data" | jq -r '.config.interface.addresses.v4 // empty')
-        local v6=$(echo "$reg_data" | jq -r '.config.interface.addresses.v6 // empty')
-        
-        # 兼容性处理：如果 API 返回的 IP 不带掩码，手动补全 (v4补/32, v6补/128)
-        [[ -n "$v4" && ! "$v4" == */* ]] && v4="${v4}/32"
-        [[ -n "$v6" && ! "$v6" == */* ]] && v6="${v6}/128"
-
-        # Reserved 计算 (纯 Shell 稳健版)
-        local client_id=$(echo "$reg_data" | jq -r '.config.client_id // empty')
-        local reserved_json="[]"
-        if [ -n "$client_id" ]; then
-            local hex_str=$(echo "$client_id" | base64 -d 2>/dev/null | od -An -t x1 | tr -d '\n')
-            local dec_list=()
-            for hex_byte in $hex_str; do
-                [ -n "$hex_byte" ] && dec_list+=($(printf "%d" "0x$hex_byte"))
-            done
-            [ ${#dec_list[@]} -ge 3 ] && reserved_json="[${dec_list[0]}, ${dec_list[1]}, ${dec_list[2]}]"
-        fi
-
-        cat > "$warp_conf" <<EOF
-{
-  "private_key": "$priv_key",
-  "local_address_v4": "$v4",
-  "local_address_v6": "$v6",
-  "reserved": $reserved_json
-}
-EOF
-        succ "WARP 账号注册成功 (IPv4: ${v4:-N/A})"
+    if echo "$reg_data" | grep -q "id"; then
+        echo "{\"private_key\":\"$priv_key\"}" > "$warp_conf"
+        succ "WARP 账号注册成功"
     else
-        err "WARP 注册接口请求失败，请检查网络"
-        return 1
+        err "注册失败，母鸡 IP 可能被封锁"; return 1
     fi
 }
 
@@ -877,65 +843,43 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # --- 步骤 1: 深度清理旧配置 (包含路由规则和 DNS 规则) ---
     jq '
-    .outbounds //= [] | .route //= {} | .route.rules //= [] | .dns //= {} | .dns.rules //= [] |
+    .outbounds //= [] | 
+    .route //= {} | 
+    .route.rules //= [] |
     .outbounds |= map(select(.tag != "warp-out")) |
-    .route.rules |= map(select(.outbound != "warp-out")) |
-    .dns.rules |= map(select(.server != "warp-dns"))
+    .route.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
-        [ ! -f "$warp_data" ] && return 1
-
         local priv=$(jq -r '.private_key' "$warp_data")
-        local v4=$(jq -r '.local_address_v4' "$warp_data")
-        local v6=$(jq -r '.local_address_v6' "$warp_data")
-        local rsv=$(jq -r '.reserved | tojson' "$warp_data")
-
-        # 你的定制域名列表
-        local unlock_domains='["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"]'
-
-        # --- 步骤 2: 使用 jq 构建高优先级路由与 DNS 联动 ---
-        jq --arg priv "$priv" --arg v4 "$v4" --arg v6 "$v6" --argjson rsv "$rsv" --argjson domains "$unlock_domains" '
         
-        # A. 构造 IP 数组并强制处理掩码
-        ([$v4, $v6] | map(select(. != null and . != ""))) as $clean_ips |
-
-        # B. 注入 WARP 出站 (增加 udp_over_tcp 探测和策略优化)
+        jq --arg priv "$priv" '
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
             "server": "162.159.192.1",
             "server_port": 2408,
-            "local_address": $clean_ips,
+            "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "reserved": (if $rsv != [] then $rsv else null end),
-            "mtu": 1280,
-            "domain_strategy": "prefer_ipv4"
+            "mtu": 1280
         }] + .outbounds |
-
-        # C. 注入 DNS 规则：确保列表中的域名解析也走 direct，防止解析死锁
-        .dns.rules = [
-            { "domain": $domains, "server": "dns-direct" }
-        ] + (.dns.rules // []) |
         
-        # D. 注入路由规则：必须放在最前面
         .route.rules = [
             {
-                "domain": $domains,
+                "domain_suffix": ["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"],
                 "outbound": "warp-out"
             }
         ] + (.route.rules // []) |
-
-        # E. 关键设置：增加嗅探，防止流量无法识别
-        .route.sniff = true |
-        .route.sniff_override_destination = true
+        
+        .route.final = "direct-out"
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
     fi
 }
+
+
 
 manage_warp() {
     while true; do
