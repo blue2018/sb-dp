@@ -869,24 +869,7 @@ apply_warp_config() {
         
         .route.rules = [
             {
-                "domain_suffix": [
-                    # 流媒体平台
-                    "netflix.com", "netflix.net", "nflximg.net", "nflxvideo.net", "nflxso.net",
-                    "disneyplus.com", "disney-plus.net", "disneystreaming.com",
-                    "hulu.com", "hulustream.com",
-                    "hbo.com", "hbomax.com", "max.com",
-                    "primevideo.com", "amazon.com", "amazonvideo.com",
-                    "youtube.com", "googlevideo.com", "ytimg.com",
-                    
-                    # AI 服务
-                    "openai.com", "chatgpt.com",
-                    "anthropic.com", "claude.ai",
-                    "gemini.google.com",
-                    
-                    # 测试工具（用于验证 WARP）
-                    "cloudflare.com", "cloudflare-dns.com",
-                    "ip.gs", "ident.me", "ipinfo.io", "ifconfig.me"
-                ],
+                "domain_suffix": ["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"],
                 "outbound": "warp-out"
             }
         ] + (.route.rules // []) |
