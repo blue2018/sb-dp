@@ -843,22 +843,19 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # 1. 结构预检查
+    # 结构初始化，防止 jq 对 null 迭代
     jq '.route //= {"rules": []} | .outbounds //= []' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
-    # 2. 清理旧配置
-    jq '
-    del(.outbounds[] | select(.tag == "warp-out")) |
-    del(.route.rules[] | select(.outbound == "warp-out"))
-    ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+    # 清理所有旧的 WARP 规则和 DNS 路由
+    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out")) | del(.route.rules[] | select(.protocol == "dns"))' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         local priv=$(jq -r '.private_key' "$warp_data")
         
-        # 3. 写入符合 Cloudflare 2026 规范的配置
+        # 写入配置：重点在于 detour 绕行和域名嗅探
         jq --arg priv "$priv" '
-        .outbounds = [{
+        .outbounds += [{
             "type": "wireguard",
             "tag": "warp-out",
             "server": "162.159.192.1",
@@ -866,14 +863,9 @@ apply_warp_config() {
             "local_address": ["172.16.0.2/32", "fd01:5ca1:ab1e::1/128"],
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-            "reserved": [0, 0, 0], 
             "mtu": 1280,
-            "domain_strategy": "prefer_ipv4",
-            "udp_fragment": true,
             "detour": "direct-out"
-        }] + .outbounds |
-        
-        # 路由规则：域名列表置顶，且强制 DNS 绕过 WARP
+        }] |
         .route.rules = [
             { "protocol": "dns", "outbound": "direct-out" },
             {
@@ -887,17 +879,11 @@ apply_warp_config() {
                 "outbound": "warp-out"
             }
         ] + .route.rules |
-
         .route.auto_detect_interface = true |
-        
-        # 必须在入站开启嗅探，否则 Hy2 无法根据域名分流
-        .inbounds[0] += {
-            "sniff": true,
-            "sniff_override_destination": true
-        }
+        .inbounds[0].sniff = true |
+        .inbounds[0].sniff_override_destination = true
         ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-        
-        succ "WARP 配置已重构：已加入 Reserved 特征码并强制 DNS 绕行"
+        info "JSON 配置修改完成"
     fi
 }
 
@@ -908,7 +894,7 @@ manage_warp() {
         [ "$is_enabled" = "true" ] && status_text="\033[1;32m已启用 ✔\033[0m"
 
         echo -e "\n========================================"
-        echo -e "  WARP 流媒体解锁管理"
+        echo -e "  WARP 流媒体解锁管理 (冷启动模式)"
         echo -e "========================================"
         echo -e " 当前状态: $status_text"
         echo -e "----------------------------------------"
@@ -918,17 +904,22 @@ manage_warp() {
         echo -e "0. 返回主菜单"
         read -r -p "请选择 [0-3]: " wopt
         case "$wopt" in
-            1)
-                apply_warp_config "enable" && {
-                    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart >/dev/null 2>&1
-                    pidof sing-box | xargs kill -9 >/dev/null 2>&1
-                    succ "WARP 已开启 (用户态模式)"
-                } ;;
-            2)
-                apply_warp_config "disable" && {
-                    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box restart >/dev/null 2>&1
-                    pidof sing-box | xargs kill -9 >/dev/null 2>&1
-                    info "WARP 已禁用"
+            1|2)
+                local act="enable"; [ "$wopt" = "2" ] && act="disable"
+                
+                # --- 第一步：彻底停服，释放端口 ---
+                info "正在彻底停止服务并清理残留进程..."
+                systemctl stop sing-box >/dev/null 2>&1
+                [ -x "/etc/init.d/sing-box" ] && rc-service sing-box stop >/dev/null 2>&1
+                pidof sing-box | xargs kill -9 >/dev/null 2>&1
+                sleep 1.5 # 关键：等待内核释放 UDP 端口和网卡接口
+                
+                # --- 第二步：修改配置 ---
+                apply_warp_config "$act" && {
+                    # --- 第三步：通过 setup_service 重新初始化系统优化与启动 ---
+                    info "配置已更新，正在执行冷启动..."
+                    setup_service 
+                    succ "操作完成！WARP 已${act/enable/启用}${act/disable/禁用}，服务已重绑定端口"
                 } ;;
             3) rm -f /etc/sing-box/warp.json && register_warp ;;
             0) break ;;
