@@ -826,66 +826,48 @@ register_warp() {
     
     info "正在为容器环境注册 WARP 账号..."
     
-    # 生成注册所需参数
     local priv_key=$(openssl rand -base64 32)
     local install_id=$(openssl rand -hex 16)
     local tos_date=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
     
-    # 发起注册请求
     local reg_data=$(curl -sSL -X POST -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" \
         -d "{\"key\":\"$priv_key\",\"install_id\":\"$install_id\",\"tos\":\"$tos_date\",\"type\":\"Linux\",\"locale\":\"en_US\"}" \
         "https://api.cloudflareclient.com/v0a1922/reg" 2>/dev/null)
 
-    # 提取 ID 以验证注册是否成功
     local id=$(echo "$reg_data" | jq -r '.id // empty')
     
     if [ -n "$id" ]; then
-        # 1. 提取 IP (不设置回退值，获取不到即视为失败)
+        # 提取原始数据
         local v4=$(echo "$reg_data" | jq -r '.config.interface.addresses.v4 // empty')
         local v6=$(echo "$reg_data" | jq -r '.config.interface.addresses.v6 // empty')
         
-        if [ -z "$v4" ] && [ -z "$v6" ]; then
-            err "注册成功但未获取到有效 IP，可能是 Cloudflare 接口限制"
-            return 1
-        fi
+        # 兼容性处理：如果 API 返回的 IP 不带掩码，手动补全 (v4补/32, v6补/128)
+        [[ -n "$v4" && ! "$v4" == */* ]] && v4="${v4}/32"
+        [[ -n "$v6" && ! "$v6" == */* ]] && v6="${v6}/128"
 
-        # 2. 提取并计算 Reserved 字段 (纯 Shell 方案，兼容 Alpine/Busybox)
+        # Reserved 计算 (纯 Shell 稳健版)
         local client_id=$(echo "$reg_data" | jq -r '.config.client_id // empty')
         local reserved_json="[]"
-        
         if [ -n "$client_id" ]; then
-            # base64 解码 -> 转为 hex 字符串 (例如: 1a 2b 3c)
-            # 使用 od -An -t x1 输出 hex 字节，tr 清理换行
             local hex_str=$(echo "$client_id" | base64 -d 2>/dev/null | od -An -t x1 | tr -d '\n')
-            
-            # 将 hex 字符串转为数组
             local dec_list=()
             for hex_byte in $hex_str; do
-                # 使用 printf 将 hex 转十进制，兼容性最好
-                if [ -n "$hex_byte" ]; then
-                    dec_list+=($(printf "%d" "0x$hex_byte"))
-                fi
+                [ -n "$hex_byte" ] && dec_list+=($(printf "%d" "0x$hex_byte"))
             done
-            
-            # 只有当解析出 3 个字节时才认为是有效的 reserved
-            if [ ${#dec_list[@]} -ge 3 ]; then
-                reserved_json="[${dec_list[0]}, ${dec_list[1]}, ${dec_list[2]}]"
-            fi
+            [ ${#dec_list[@]} -ge 3 ] && reserved_json="[${dec_list[0]}, ${dec_list[1]}, ${dec_list[2]}]"
         fi
 
-        # 3. 写入配置文件
         cat > "$warp_conf" <<EOF
 {
   "private_key": "$priv_key",
   "local_address_v4": "$v4",
   "local_address_v6": "$v6",
-  "reserved": $reserved_json,
-  "client_id": "$client_id"
+  "reserved": $reserved_json
 }
 EOF
-        succ "WARP 账号注册成功 (IPv4: ${v4:-N/A} | Reserved: $reserved_json)"
+        succ "WARP 账号注册成功 (IPv4: ${v4:-N/A})"
     else
-        err "WARP 注册接口请求失败，请检查服务器网络连接"
+        err "WARP 注册接口请求失败，请检查网络"
         return 1
     fi
 }
@@ -895,7 +877,7 @@ apply_warp_config() {
     local config="/etc/sing-box/config.json"
     local warp_data="/etc/sing-box/warp.json"
 
-    # --- 步骤 1: 清理旧配置 (确保幂等性) ---
+    # 1. 先清理旧配置 (确保干净)
     jq '
     .outbounds //= [] | 
     .route //= {} | 
@@ -904,49 +886,38 @@ apply_warp_config() {
     .route.rules |= map(select(.outbound != "warp-out"))
     ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
 
-    # --- 步骤 2: 启用逻辑 ---
+    # 2. 启用逻辑
     if [ "$action" = "enable" ]; then
         register_warp || return 1
         
-        if [ ! -f "$warp_data" ]; then
-            err "WARP 配置文件读取失败"
-            return 1
-        fi
+        if [ ! -f "$warp_data" ]; then err "配置文件丢失"; return 1; fi
 
-        # 读取配置
+        # 读取变量，注意这里不做任何 Shell 数组处理，全部交给 jq
         local priv=$(jq -r '.private_key' "$warp_data")
         local v4=$(jq -r '.local_address_v4' "$warp_data")
         local v6=$(jq -r '.local_address_v6' "$warp_data")
         local reserved=$(jq -r '.reserved | tojson' "$warp_data")
-        
-        # 严格校验：如果没有有效 IP，禁止启用，防止断流
-        if [ -z "$v4" ] && [ -z "$v6" ]; then
-             err "无效的 WARP IP 配置，请尝试重新注册 (选项3)"
-             return 1
-        fi
 
-        # 构建 local_address 数组
-        local addr_json="[]"
-        if [ -n "$v4" ] && [ "$v4" != "null" ]; then addr_json="[\"$v4\"]"; fi
-        if [ -n "$v6" ] && [ "$v6" != "null" ]; then 
-            if [ "$addr_json" == "[]" ]; then addr_json="[\"$v6\"]"; else addr_json="[\"$v4\", \"$v6\"]"; fi
-        fi
-
-        # --- 用户指定域名列表 ---
+        # 您的定制域名列表
         local unlock_domains='["youtube.com", "reddit.com", "netflix.com", "netflix.net", "disneyplus.com", "disney-plus.net", "disneystreaming.com", "amazon.com", "openai.com", "chatgpt.com", "anthropic.com", "claude.ai", "gemini.google.com", "cloudflare.com", "ip.gs"]'
 
-        # 注入配置
+        # 3. 使用 jq 进行安全注入
+        # 关键修复：在 jq 内部构造 local_address 数组，自动丢弃 null 或空值，防止 Service 崩溃
         jq --arg priv "$priv" \
-           --argjson addr "$addr_json" \
+           --arg v4 "$v4" \
+           --arg v6 "$v6" \
            --argjson rsv "$reserved" \
            --argjson domains "$unlock_domains" '
         
+        # 构造清洗后的 IP 数组
+        ([$v4, $v6] | map(select(. != null and . != ""))) as $clean_ips |
+
         .outbounds = [{
             "type": "wireguard",
             "tag": "warp-out",
             "server": "162.159.192.1",
             "server_port": 2408,
-            "local_address": $addr,
+            "local_address": $clean_ips,
             "private_key": $priv,
             "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
             "reserved": (if $rsv != [] then $rsv else null end),
