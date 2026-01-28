@@ -723,6 +723,7 @@ setup_service() {
 	local mem_total=$(probe_memory_total); local io_prio=2
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
     info "配置服务 (核心: $real_c | 绑定: $core_range | 权重: $cur_nice)..."
+	info "正在写入服务配置，请稍后..."
 
 	if [ "$OS" = "alpine" ]; then
         # 【优化1】确保依赖并构建启动命令
@@ -787,7 +788,7 @@ EOF
 
         systemctl daemon-reload && systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || true
     fi
-	info "服务配置已写入，正在后台启动..."
+	info "配置已写入，后台启动中..."
 	# 【优化4】统一异步启动与验证逻辑
 	(	
 	    local pid="" retry=0
