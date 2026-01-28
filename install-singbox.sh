@@ -791,10 +791,8 @@ EOF
     fi
 	# 【优化4】统一异步启动与验证逻辑
 	(
-	    # 验证启动状态
 	    local pid="" retry=0
 	    while [ $retry -lt 10 ]; do pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && break; sleep 0.5; retry=$((retry + 1)); done
-	    
 	    if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
 	        local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null); local ma_mb=$(( ${ma:-0} / 1024 ))
 	        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
@@ -807,7 +805,6 @@ EOF
 	        warn "尝试降级启动（禁用 CPU 绑定和 IO 调度）..."
 	        if [ "$OS" = "alpine" ]; then sed -i 's/^command_args=.*/command_args="-c \"nice -n '$cur_nice' \/usr\/bin\/sing-box run -c \/etc\/sing-box\/config.json\""/' /etc/init.d/sing-box; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1
 	        else sed -i 's/^ExecStart=.*/ExecStart=\/usr\/bin\/sing-box run -c \/etc\/sing-box\/config.json/' /etc/systemd/system/sing-box.service; systemctl daemon-reload && systemctl restart sing-box >/dev/null 2>&1; fi
-	        
 	        sleep 2; pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && warn "降级启动成功（已禁用部分优化特性）" || err "所有启动尝试均失败，请检查系统兼容性"
 	    fi
 	) &  # 【关键】整个启动流程异步执行
