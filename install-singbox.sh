@@ -791,14 +791,14 @@ EOF
 		(systemctl restart sing-box >/dev/null 2>&1) &
     fi
 	    local pid="" retry=0
-	    while [ $retry -lt 6 ]; do pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && break; sleep 0.3; retry=$((retry + 1)); done
+	    while [ $retry -lt 5 ]; do pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && break; sleep 0.3; retry=$((retry + 1)); done
 	    if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
 	        local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null); local ma_mb=$(( ${ma:-0} / 1024 ))
 	        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
 	    else
 	        err "sing-box 启动失败，诊断信息："
-	        if [ "$OS" = "alpine" ]; then echo -e "\033[1;33m[OpenRC 状态]\033[0m"; rc-service sing-box status 2>/dev/null || true; echo -e "\033[1;33m[系统日志]\033[0m"; logread 2>/dev/null | grep -i sing-box | tail -n 10 || tail -n 10 /var/log/messages 2>/dev/null || true
-	        else echo -e "\033[1;33m[Systemd 状态]\033[0m"; systemctl status sing-box --no-pager -l 2>/dev/null || true; echo -e "\033[1;33m[服务日志]\033[0m"; journalctl -u sing-box -n 10 --no-pager 2>/dev/null || true; fi
+	        if [ "$OS" = "alpine" ]; then echo -e "\033[1;33m[OpenRC 状态]\033[0m"; rc-service sing-box status 2>/dev/null || true; echo -e "\033[1;33m[系统日志](最后10行)\033[0m"; logread 2>/dev/null | grep -i sing-box | tail -n 10 || tail -n 10 /var/log/messages 2>/dev/null || true
+	        else echo -e "\033[1;33m[Systemd 状态]\033[0m"; systemctl status sing-box --no-pager -l 2>/dev/null || true; echo -e "\033[1;33m[服务日志](最后10行)\033[0m"; journalctl -u sing-box -n 10 --no-pager 2>/dev/null || true; fi
 	        echo -e "\033[1;33m[配置自检]\033[0m"; /usr/bin/sing-box check -c /etc/sing-box/config.json 2>&1 || true
 	        
 	        warn "尝试降级启动（禁用 CPU 绑定和 IO 调度）..."
@@ -850,7 +850,7 @@ display_system_status() {
     local CWND_VAL=$(echo "$ROUTE_DEF" | awk -F'initcwnd ' '{if($2){split($2,a," ");print a[1]}else{print "10"}}')
     local CWND_LBL=$(echo "$ROUTE_DEF" | grep -q "initcwnd" && echo "(已优化)" || echo "(默认)")
     local SBOX_PID=$(pgrep sing-box | head -n1)
-    local NI_VAL="0"; local NI_LBL="(启动中)"
+    local NI_VAL="N/A"; local NI_LBL="(启动中)"
     if [ -n "$SBOX_PID" ] && [ -f "/proc/$SBOX_PID/stat" ]; then
         NI_VAL=$(cat "/proc/$SBOX_PID/stat" | awk '{print $19}')
         [ "$NI_VAL" -lt 0 ] && NI_LBL="(进程优先)" || { [ "$NI_VAL" -gt 0 ] && NI_LBL="(低优先级)" || NI_LBL="(默认)"; }
