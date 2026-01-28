@@ -786,31 +786,30 @@ Restart=always; RestartSec=10s; TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload >/dev/null 2>&1 || true
-		(systemctl enable sing-box >/dev/null 2>&1 || true; systemctl stop sing-box >/dev/null 2>&1 || true
-		sleep 1; systemctl start sing-box >/dev/null 2>&1 || true) &
+        (systemctl daemon-reload >/dev/null 2>&1 || true; systemctl enable sing-box >/dev/null 2>&1 || true
+		systemctl stop sing-box >/dev/null 2>&1 || true; sleep 1; systemctl start sing-box >/dev/null 2>&1 || true) &
     fi
 	info "服务配置已写入，正在后台启动..."
 	# 【优化4】统一异步启动与验证逻辑
-	local os_type="$OS" nice_val="$cur_nice" core_script="$SBOX_CORE" mem_mb="$mem_total" cwnd_done="$INITCWND_DONE"
 	(
 	    local pid="" retry=0
 	    while [ $retry -lt 10 ]; do pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && break; sleep 0.5; retry=$((retry + 1)); done
-        if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
-            local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null); local ma_mb=$(( ${ma:-0} / 1024 ))
-            succ "sing-box 启动成功 | 总内存: ${mem_mb:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$cwnd_done" == "true" ]] && echo "内核" || echo "应用层")"
-        else
-            err "sing-box 启动失败，诊断信息："
-            if [ "$os_type" = "alpine" ]; then echo -e "\033[1;33m[OpenRC 状态]\033[0m"; rc-service sing-box status 2>/dev/null || true; echo -e "\033[1;33m[系统日志]\033[0m"; logread 2>/dev/null | grep -i sing-box | tail -n 10 || tail -n 10 /var/log/messages 2>/dev/null || true
-            else echo -e "\033[1;33m[Systemd 状态]\033[0m"; systemctl status sing-box --no-pager -l 2>/dev/null || true; echo -e "\033[1;33m[服务日志]\033[0m"; journalctl -u sing-box -n 10 --no-pager 2>/dev/null || true; fi
-            echo -e "\033[1;33m[配置自检]\033[0m"; /usr/bin/sing-box check -c /etc/sing-box/config.json 2>&1 || true
-            
-            warn "尝试降级启动（禁用 CPU 绑定和 IO 调度）..."
-            if [ "$os_type" = "alpine" ]; then sed -i 's/^command_args=.*/command_args="-c \"nice -n '$nice_val' \/usr\/bin\/sing-box run -c \/etc\/sing-box\/config.json\""/' /etc/init.d/sing-box; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1
-            else sed -i 's/^ExecStart=.*/ExecStart=\/usr\/bin\/sing-box run -c \/etc\/sing-box\/config.json/' /etc/systemd/system/sing-box.service; systemctl daemon-reload && systemctl restart sing-box >/dev/null 2>&1; fi
-            sleep 2; pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && warn "降级启动成功（已禁用部分优化特性）" || err "所有启动尝试均失败，请检查系统兼容性"
-        fi
-    ) &
+	    if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
+	        local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null); local ma_mb=$(( ${ma:-0} / 1024 ))
+	        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
+	    else
+	        err "sing-box 启动失败，诊断信息："
+	        if [ "$OS" = "alpine" ]; then echo -e "\033[1;33m[OpenRC 状态]\033[0m"; rc-service sing-box status 2>/dev/null || true; echo -e "\033[1;33m[系统日志]\033[0m"; logread 2>/dev/null | grep -i sing-box | tail -n 10 || tail -n 10 /var/log/messages 2>/dev/null || true
+	        else echo -e "\033[1;33m[Systemd 状态]\033[0m"; systemctl status sing-box --no-pager -l 2>/dev/null || true; echo -e "\033[1;33m[服务日志]\033[0m"; journalctl -u sing-box -n 10 --no-pager 2>/dev/null || true; fi
+	        echo -e "\033[1;33m[配置自检]\033[0m"; /usr/bin/sing-box check -c /etc/sing-box/config.json 2>&1 || true
+	        
+	        warn "尝试降级启动（禁用 CPU 绑定和 IO 调度）..."
+	        if [ "$OS" = "alpine" ]; then sed -i 's/^command_args=.*/command_args="-c \"nice -n '$cur_nice' \/usr\/bin\/sing-box run -c \/etc\/sing-box\/config.json\""/' /etc/init.d/sing-box; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1
+	        else sed -i 's/^ExecStart=.*/ExecStart=\/usr\/bin\/sing-box run -c \/etc\/sing-box\/config.json/' /etc/systemd/system/sing-box.service; systemctl daemon-reload && systemctl restart sing-box >/dev/null 2>&1; fi
+	        sleep 2; pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && warn "降级启动成功（已禁用部分优化特性）" || err "所有启动尝试均失败，请检查系统兼容性"
+	    fi
+	) &
+	
 }
 
 # ==========================================
