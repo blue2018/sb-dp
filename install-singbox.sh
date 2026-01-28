@@ -747,7 +747,8 @@ start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>
 start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd >/dev/null 2>&1) & }
 EOF
         chmod +x /etc/init.d/sing-box
-		rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1 || true
+		rc-update add sing-box default >/dev/null 2>&1 || true
+		(RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1 || true) &
     else
         # Systemd 分支
         local mem_config="" io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio" cpu_quota=$((real_c * 100))
@@ -786,7 +787,8 @@ Restart=always; RestartSec=10s; TimeoutStopSec=15
 WantedBy=multi-user.target
 EOF
 
-        systemctl daemon-reload && systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || true
+        systemctl daemon-reload && systemctl enable sing-box >/dev/null 2>&1 || true
+		(systemctl restart sing-box >/dev/null 2>&1 || true) &
     fi
 	    local pid="" retry=0
 	    while [ $retry -lt 5 ]; do pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && break; sleep 0.3; retry=$((retry + 1)); done
