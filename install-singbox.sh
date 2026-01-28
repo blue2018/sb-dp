@@ -788,9 +788,6 @@ EOF
 
         systemctl daemon-reload && systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || true
     fi
-	info "配置已写入，后台启动中..."
-	# 【优化4】统一异步启动与验证逻辑
-	(	
 	    local pid="" retry=0
 	    while [ $retry -lt 10 ]; do pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && break; sleep 0.5; retry=$((retry + 1)); done
 	    if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
@@ -807,7 +804,6 @@ EOF
 	        else sed -i 's/^ExecStart=.*/ExecStart=\/usr\/bin\/sing-box run -c \/etc\/sing-box\/config.json/' /etc/systemd/system/sing-box.service; systemctl daemon-reload && systemctl restart sing-box >/dev/null 2>&1; fi
 	        sleep 2; pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && warn "降级启动成功（已禁用部分优化特性）" || err "所有启动尝试均失败，请检查系统兼容性"
 	    fi
-	) &
 }
 
 # ==========================================
