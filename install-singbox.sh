@@ -786,8 +786,9 @@ Restart=always; RestartSec=10s; TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF
-        (systemctl daemon-reload >/dev/null 2>&1 || true; systemctl enable sing-box >/dev/null 2>&1 || true
-		systemctl stop sing-box >/dev/null 2>&1 || true; sleep 1; systemctl start sing-box >/dev/null 2>&1 || true) &
+        systemctl daemon-reload >/dev/null 2>&1 || true
+		(systemctl enable sing-box >/dev/null 2>&1 || true; systemctl stop sing-box >/dev/null 2>&1 || true
+		sleep 1; systemctl start sing-box >/dev/null 2>&1 || true) &
     fi
 	info "服务配置已写入，正在后台启动..."
 	# 【优化4】统一异步启动与验证逻辑
