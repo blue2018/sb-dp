@@ -746,6 +746,7 @@ start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>
 start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd >/dev/null 2>&1) & }
 EOF
         chmod +x /etc/init.d/sing-box
+		rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1 || true
     else
         # Systemd 分支
         local mem_config="" io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio" cpu_quota=$((real_c * 100))
@@ -783,13 +784,12 @@ Restart=always; RestartSec=10s; TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF
+
+        systemctl daemon-reload && systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || true
     fi
 	info "服务配置已写入，正在后台启动..."
 	# 【优化4】统一异步启动与验证逻辑
-	(
-	    if [ "$OS" = "alpine" ]; then rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box stop >/dev/null 2>&1 || true; sleep 1; RC_NO_DEPENDS=yes rc-service sing-box start >/dev/null 2>&1 || true
-        else systemctl daemon-reload >/dev/null 2>&1 || true; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl stop sing-box >/dev/null 2>&1 || true; sleep 1; systemctl start sing-box >/dev/null 2>&1 || true; fi
-		
+	(	
 	    local pid="" retry=0
 	    while [ $retry -lt 10 ]; do pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && break; sleep 0.5; retry=$((retry + 1)); done
 	    if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
@@ -806,7 +806,7 @@ EOF
 	        else sed -i 's/^ExecStart=.*/ExecStart=\/usr\/bin\/sing-box run -c \/etc\/sing-box\/config.json/' /etc/systemd/system/sing-box.service; systemctl daemon-reload && systemctl restart sing-box >/dev/null 2>&1; fi
 	        sleep 2; pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && warn "降级启动成功（已禁用部分优化特性）" || err "所有启动尝试均失败，请检查系统兼容性"
 	    fi
-	) >/dev/null 2>&1 &
+	) &
 }
 
 # ==========================================
