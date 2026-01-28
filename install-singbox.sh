@@ -716,55 +716,50 @@ EOF
 # ==========================================
 # 服务配置
 # ==========================================
-setup_service() {
-    local real_c="$CPU_CORE" core_range=""
-    local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
-    local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
-    local cur_nice="${VAR_SYSTEMD_NICE:--5}"
-    local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"  
-    local mem_total=$(probe_memory_total); local io_prio=2
+setup_service() {	
+	local real_c="$CPU_CORE" core_range=""
+	local taskset_bin=$(command -v taskset 2>/dev/null); local ionice_bin=$(command -v ionice 2>/dev/null)
+    local cur_nice="${VAR_SYSTEMD_NICE:--5}"; local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"
+	local mem_total=$(probe_memory_total); local io_prio=2
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
     info "配置服务 (核心: $real_c | 绑定: $core_range | 权重: $cur_nice)..."
-    
-    if [ "$OS" = "alpine" ]; then
-        command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
-        local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
-        if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
-            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
-            exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
-        fi
+
+	if [ "$OS" = "alpine" ]; then
+        # 【优化1】确保依赖并构建启动命令
+        [ -z "$taskset_bin" ] && { apk add --no-cache util-linux >/dev/null 2>&1 || true; taskset_bin=$(command -v taskset 2>/dev/null); }
+        local base_cmd="/usr/bin/sing-box run -c /etc/sing-box/config.json" exec_cmd="nice -n $cur_nice"
+        [ -n "$taskset_bin" ] && [ -x "$taskset_bin" ] && exec_cmd="$exec_cmd $taskset_bin -c $core_range" || warn "taskset 不可用，跳过 CPU 绑定"
+        exec_cmd="$exec_cmd $base_cmd"
+        [ -n "$ionice_bin" ] && [ -x "$ionice_bin" ] && [ "$mem_total" -ge 200 ] && { [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0; exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"; }
+        
+        # 【优化2】写入 OpenRC 配置（紧凑格式）
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
-name="sing-box"
-description="Sing-box Service"
-supervisor="supervise-daemon"
-respawn_delay=10
-respawn_max=3
-respawn_period=60
+name="sing-box"; description="Sing-box Service"; supervisor="supervise-daemon"
+respawn_delay=10; respawn_max=3; respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
-command="/bin/sh"
-command_args="-c \"$exec_cmd\""
-pidfile="/run/\${RC_SVCNAME}.pid"
-rc_ulimit="-n 1000000"
-rc_nice="$cur_nice"
-rc_oom_score_adj="-500"
+command="/bin/sh"; command_args="-c \"$exec_cmd\""; pidfile="/run/\${RC_SVCNAME}.pid"
+rc_ulimit="-n 1000000"; rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
-start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
-start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
+start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd >/dev/null 2>&1) & }
+start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd >/dev/null 2>&1) & }
 EOF
         chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1 || true
+        rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box stop >/dev/null 2>&1 || true
+		sleep 1; RC_NO_DEPENDS=yes rc-service sing-box start >/dev/null 2>&1 || true
+        
     else
-        local mem_config=""
+        # Systemd 分支
+        local mem_config="" io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio" cpu_quota=$((real_c * 100))
         [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
+        [ "$mem_total" -lt 200 ] && io_prio=4; [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
+        [ "$cpu_quota" -lt 100 ] && cpu_quota=100
+        # 【优化3】构建 systemd 启动命令
+        local systemd_exec=""
+        [ -n "$taskset_bin" ] && [ -x "$taskset_bin" ] && systemd_exec="$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json" || { warn "taskset 不可用，跳过 CPU 绑定"; systemd_exec="/usr/bin/sing-box run -c /etc/sing-box/config.json"; }
         
-		[ "$mem_total" -lt 200 ] && io_prio=4
-        [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
-        local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
-        local cpu_quota=$((real_c * 100))
-        [ "$cpu_quota" -lt 100 ] && cpu_quota=100        
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
@@ -774,45 +769,49 @@ StartLimitIntervalSec=60
 StartLimitBurst=3
 
 [Service]
-Type=simple
-User=root
+Type=simple; User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
-ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
-ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
-ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
+ExecStartPre=-/bin/bash -c '[ -f $SBOX_CORE ] && /bin/bash $SBOX_CORE --apply-cwnd || true'
+ExecStart=$systemd_exec
+ExecStartPost=-/bin/bash -c 'sleep 3; [ -f $SBOX_CORE ] && /bin/bash $SBOX_CORE --apply-cwnd || true'
 Nice=$cur_nice
 ${io_config}
-LimitNOFILE=1000000
-LimitMEMLOCK=infinity
+LimitNOFILE=1000000; LimitMEMLOCK=infinity
 ${mem_config}CPUQuota=${cpu_quota}%
-OOMPolicy=continue
-OOMScoreAdjust=-500
-Restart=always
-RestartSec=10s
-TimeoutStopSec=15
+OOMPolicy=continue; OOMScoreAdjust=-500
+Restart=always; RestartSec=10s; TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
-        systemctl daemon-reload && systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || true
+        systemctl daemon-reload >/dev/null 2>&1 || true; systemctl enable sing-box >/dev/null 2>&1 || true
+		systemctl stop sing-box >/dev/null 2>&1 || true; sleep 1; systemctl start sing-box >/dev/null 2>&1 || true
     fi
-    
-    local pid=""
-	for i in 1 2 3 4 5; do 
-        pid=$(pidof sing-box | awk '{print $1}')
-        [ -n "$pid" ] && break || sleep 0.4
-    done
-    if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
-        local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
-        local ma_mb=$(( ${ma:-0} / 1024 ))
-        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
-    else 
-        err "sing-box 启动失败，最近日志："; [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 5 || tail -n 5 /var/log/messages 2>/dev/null; } || { journalctl -u sing-box -n 5 --no-pager 2>/dev/null; }
-        echo -e "\033[1;33m[配置自检]\033[0m"; /usr/bin/sing-box check -c /etc/sing-box/config.json || true; exit 1
-    fi
+	# 【优化4】统一异步启动与验证逻辑
+	(
+	    # 验证启动状态
+	    local pid="" retry=0
+	    while [ $retry -lt 10 ]; do pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && break; sleep 0.5; retry=$((retry + 1)); done
+	    
+	    if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
+	        local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null); local ma_mb=$(( ${ma:-0} / 1024 ))
+	        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
+	    else
+	        err "sing-box 启动失败，诊断信息："
+	        if [ "$OS" = "alpine" ]; then echo -e "\033[1;33m[OpenRC 状态]\033[0m"; rc-service sing-box status 2>/dev/null || true; echo -e "\033[1;33m[系统日志]\033[0m"; logread 2>/dev/null | grep -i sing-box | tail -n 10 || tail -n 10 /var/log/messages 2>/dev/null || true
+	        else echo -e "\033[1;33m[Systemd 状态]\033[0m"; systemctl status sing-box --no-pager -l 2>/dev/null || true; echo -e "\033[1;33m[服务日志]\033[0m"; journalctl -u sing-box -n 10 --no-pager 2>/dev/null || true; fi
+	        echo -e "\033[1;33m[配置自检]\033[0m"; /usr/bin/sing-box check -c /etc/sing-box/config.json 2>&1 || true
+	        
+	        warn "尝试降级启动（禁用 CPU 绑定和 IO 调度）..."
+	        if [ "$OS" = "alpine" ]; then sed -i 's/^command_args=.*/command_args="-c \"nice -n '$cur_nice' \/usr\/bin\/sing-box run -c \/etc\/sing-box\/config.json\""/' /etc/init.d/sing-box; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1
+	        else sed -i 's/^ExecStart=.*/ExecStart=\/usr\/bin\/sing-box run -c \/etc\/sing-box\/config.json/' /etc/systemd/system/sing-box.service; systemctl daemon-reload && systemctl restart sing-box >/dev/null 2>&1; fi
+	        
+	        sleep 2; pid=$(pidof sing-box 2>/dev/null | awk '{print $1}'); [ -n "$pid" ] && [ -e "/proc/$pid" ] && warn "降级启动成功（已禁用部分优化特性）" || err "所有启动尝试均失败，请检查系统兼容性"
+	    fi
+	) &  # 【关键】整个启动流程异步执行
+	info "服务配置已写入，正在后台启动..."
 }
 
 # ==========================================
