@@ -808,10 +808,10 @@ EOF
         [ "$OS" = "alpine" ] && rc-service sing-box start >/dev/null 2>&1 & || systemctl start sing-box --no-block >/dev/null 2>&1
         for i in {1..20}; do pid=$(pidof sing-box | awk '{print $1}'); [ -n "$pid" ] && break; sleep 0.5; done
         pid=$(pidof sing-box | awk '{print $1}')
-        if [ -z "$pid" ]; then
-	        err "最终启动失败，日志如下："; [ "$OS" = "alpine" ] && logread 2>/dev/null | tail -n 10 || journalctl -u sing-box -n 10 --no-pager 2>/dev/null
-	        exit 1
-	    fi
+		if [ -z "$pid" ]; then
+            err "启动失败，日志如下："; [ "$OS" = "alpine" ] && logread 2>/dev/null | tail -n 10 || journalctl -u sing-box -n 10 --no-pager 2>/dev/null
+            exit 1
+        fi
         succ "服务已通过自愈模式就绪"
     fi
 }
