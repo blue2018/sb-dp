@@ -843,26 +843,29 @@ get_env_data() {
 }
 
 display_links() {
-    local LINK_V4="" LINK_V6="" FULL_CLIP="" 
+    local LINK_V4="" LINK_V6="" FULL_CLIP="" M=""
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
-    [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
-    [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
-    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m"
+    [ -n "$RAW_FP" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
+    [ -n "$RAW_SALA" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
+    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${USER_PORT}\033[0m"
 
-    [ -n "${RAW_IP4:-}" ] && {
-        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v4"
-        echo -e "\n\033[1;35m[IPv4节点链接]\033[0m\n$LINK_V4\n"
-        FULL_CLIP="$LINK_V4"
-    }
-    [ -n "${RAW_IP6:-}" ] && {
-        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v6"
-        echo -e "\033[1;36m[IPv6节点链接]\033[0m\n$LINK_V6"
-        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
-    }
+    for s in 4 6; do
+        local var="RAW_IP$s" && local ip="${!var:-}"
+        [ -z "$ip" ] && continue
+        if nc -zu -w1 "$ip" "$USER_PORT" >/dev/null 2>&1; then M="\033[1;32m已连通\033[0m"; else M="\033[1;33m未放行\033[0m"; fi
+        if [ "$s" == "4" ]; then
+            LINK_V4="hy2://$RAW_PSK@$ip:$USER_PORT/?${BASE_PARAM}#$(hostname)_v4"
+            echo -e "\n\033[1;35m[IPv4 链接]\033[0m ($M)\n$LINK_V4"; FULL_CLIP="$LINK_V4"
+        else
+            LINK_V6="hy2://$RAW_PSK@[$ip]:$USER_PORT/?${BASE_PARAM}#$(hostname)_v6"
+            echo -e "\033[1;36m[IPv6 链接]\033[0m ($M)\n$LINK_V6"; FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"  
+        fi
+    done
 
-    echo -e "\033[1;34m==========================================\033[0m"
-    [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m 证书 SHA256 指纹已集成，支持强校验"
-    [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
+    echo -e "\n\033[1;34m==========================================\033[0m"
+    # 这里也建议加上 || true 或者使用 if，防止检测失败中断
+    if [ -n "$RAW_FP" ]; then echo -e "\033[1;32m[安全提示]\033[0m 证书 SHA256 指纹已集成，支持强校验"; fi
+    if [ -n "$FULL_CLIP" ]; then copy_to_clipboard "$FULL_CLIP"; fi
 }
 
 display_system_status() {
