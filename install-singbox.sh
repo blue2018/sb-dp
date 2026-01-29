@@ -793,7 +793,6 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload >/dev/null 2>&1; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box --no-block >/dev/null 2>&1 || true
     fi
-
     local pid=""; info "服务状态校验中..."
     for i in {1..50}; do
         pid=$(pidof sing-box | awk '{print $1}')
@@ -805,7 +804,7 @@ EOF
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
     else
         warn "服务拉起异常，尝试自愈重启..."
-        if [ "$OS" = "alpine" ]; then rc-service sing-box start >/dev/null 2>&1 &; else systemctl start sing-box --no-block >/dev/null 2>&1; fi
+        if [ "$OS" = "alpine" ]; then rc-service sing-box start >/dev/null 2>&1 & else systemctl start sing-box --no-block >/dev/null 2>&1; fi
         for i in {1..20}; do pid=$(pidof sing-box | awk '{print $1}'); [ -n "$pid" ] && break; sleep 0.5; done
         [ -z "$pid" ] && { err "启动失败，日志如下："; [ "$OS" = "alpine" ] && logread 2>/dev/null | tail -n 10 || journalctl -u sing-box -n 10 --no-pager 2>/dev/null; exit 1; }
         succ "服务已通过自愈模式就绪"
