@@ -97,25 +97,27 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p retry=0 check_p='ss -tuln | grep -Eq'
+    local p retry=0
     while :; do
         read -r -p "请输入端口 [1025-65535] (回车随机): " p
         [ -z "$p" ] && { # 场景1：直接回车，进入随机逻辑
             while [ $retry -lt 20 ]; do
                 p=$(shuf -i 1025-65535 -n 1)
-                ! eval "$check_p \":$p([[:space:]]|$)\"" && USER_PORT="$p" && break
+                # 直接执行 ss 指令，移除 eval
+                ! ss -tuln | grep -Eq ":$p([[:space:]]|$)" && USER_PORT="$p" && break
                 ((retry++))
             done
             [ -n "$USER_PORT" ] && { echo -e "\033[1;32m[INFO]\033[0m 自动分配空闲端口: $USER_PORT" && return 0; }
             err "随机尝试失败" && exit 1
         }
-		# 场景2：手动输入，校验格式与范围
+        # 场景2：手动输入，校验格式与范围
         if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
-            if ! eval "$check_p \":$p([[:space:]]|$)\""; then USER_PORT="$p" && return 0; else
+            # 直接执行 ss 指令校验占用情况
+            if ! ss -tuln | grep -Eq ":$p([[:space:]]|$)"; then USER_PORT="$p" && return 0; else
                 warn "端口 $p 已被占用，正为你自动分配可用端口..."
                 while [ $retry -lt 20 ]; do
                     p=$(shuf -i 1025-65535 -n 1)
-                    ! eval "$check_p \":$p([[:space:]]|$)\"" && USER_PORT="$p" && break
+                    ! ss -tuln | grep -Eq ":$p([[:space:]]|$)" && USER_PORT="$p" && break
                     ((retry++))
                 done
                 [ -n "$USER_PORT" ] && { succ "已更换为可用端口: $USER_PORT" && return 0; }
@@ -846,10 +848,10 @@ display_links() {
     for s in 4 6; do
         local var="RAW_IP$s" && local ip="${!var:-}"
         [ -z "$ip" ] && continue
-        nc -zu -w2 "$ip" "$USER_PORT" >/dev/null 2>&1 && \
-        { M="\033[1;32m已连通\033[0m"; mark="[已连通]"; } || \
-        { M="\033[1;33m未放行\033[0m"; mark="[未放行]"; }
-
+		M="\033[1;33m未放行\033[0m" && mark="[未放行]"
+        nc -zu -w1 "$ip" "$USER_PORT" >/dev/null 2>&1 && \
+	    { M="\033[1;32m已连通\033[0m"; mark="[已连通]"; } || \
+	    { M="\033[1;33m未放行\033[0m"; mark="[未放行]"; }
         if [ "$s" == "4" ]; then
             LINK_V4="hy2://$RAW_PSK@$ip:$USER_PORT/?${BASE_PARAM}#$(hostname)_v4${mark}"
             echo -e "\n\033[1;35m[IPv4 链接]\033[0m ($M)\n$LINK_V4" && FULL_CLIP="$LINK_V4"
