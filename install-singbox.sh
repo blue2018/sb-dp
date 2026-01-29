@@ -103,7 +103,6 @@ prompt_for_port() {
         [ -z "$p" ] && { # 场景1：直接回车，进入随机逻辑
             while [ $retry -lt 20 ]; do
                 p=$(shuf -i 1025-65535 -n 1)
-                # 直接执行 ss 指令，移除 eval
                 ! ss -tuln | grep -Eq ":$p([[:space:]]|$)" && USER_PORT="$p" && break
                 ((retry++))
             done
@@ -112,7 +111,6 @@ prompt_for_port() {
         }
         # 场景2：手动输入，校验格式与范围
         if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
-            # 直接执行 ss 指令校验占用情况
             if ! ss -tuln | grep -Eq ":$p([[:space:]]|$)"; then USER_PORT="$p" && return 0; else
                 warn "端口 $p 已被占用，正为你自动分配可用端口..."
                 while [ $retry -lt 20 ]; do
