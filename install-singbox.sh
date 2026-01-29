@@ -100,17 +100,35 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p rand
+    local p retry=0 check_p='ss -tuln | grep -Eq'
     while :; do
-        read -r -p "请输入端口 [1025-65535] (回车随机生成): " p
-        if [ -z "$p" ]; then
-            if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
-            elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' '); p=$((1025 + rand % 64511))
-            else p=$((1025 + RANDOM % 64511)); fi
-            echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $p" >&2; echo "$p"; return 0
+        read -r -p "请输入端口 [1025-65535] (回车随机): " p
+        [ -z "$p" ] && { # 场景1：直接回车，进入随机逻辑
+            while [ $retry -lt 20 ]; do
+                p=$(shuf -i 1025-65535 -n 1)
+                ! eval "$check_p \":$p([[:space:]]|$)\"" && USER_PORT="$p" && break
+                ((retry++))
+            done
+            [ -n "$USER_PORT" ] && { echo -e "\033[1;32m[INFO]\033[0m 自动分配空闲端口: $USER_PORT" && return 0; }
+            err "随机尝试失败" && exit 1
+        }
+        # 场景2：手动输入，校验格式与范围
+        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
+            if ! eval "$check_p \":$p([[:space:]]|$)\""; then
+                USER_PORT="$p" && return 0 # 没被占用，直接使用
+            else
+                # 关键改进：被占用则转为自动生成，不要求用户重输
+                warn "端口 $p 已被占用，正在为你分配可用端口..."
+                while [ $retry -lt 20 ]; do
+                    p=$(shuf -i 1025-65535 -n 1)
+                    ! eval "$check_p \":$p([[:space:]]|$)\"" && USER_PORT="$p" && break
+                    ((retry++))
+                done
+                [ -n "$USER_PORT" ] && { succ "已自动更换为可用端口: $USER_PORT" && return 0; }
+            fi
+        else
+            echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字"
         fi
-        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then echo "$p"; return 0
-        else echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字或直接回车" >&2; fi
     done
 }
 
@@ -660,7 +678,7 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local PORT_HY2="${1:-}"
+    local port="${USER_PORT}"
 	local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
@@ -668,11 +686,8 @@ create_config() {
 	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
 	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # 1. 端口确定逻辑
-    if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
-        else PORT_HY2=$(shuf -i 1025-65535 -n 1); fi
-    fi
+    # 1. 端口防御性校验：如果为空则报错
+    [ -z "$port" ] && { err "端口变量为空，配置生成失败"; exit 1; }
     
     # 2. PSK (密码) 确定逻辑
     local PSK
@@ -891,6 +906,7 @@ OS='$OS'
 SBOX_ARCH='$SBOX_ARCH'
 CPU_CORE='$CPU_CORE'
 SBOX_CORE='$SBOX_CORE'
+USER_PORT='USER_PORT'
 VAR_HY2_BW='${VAR_HY2_BW:-200}'
 SBOX_GOLIMIT='$SBOX_GOLIMIT'
 SBOX_GOGC='${SBOX_GOGC:-100}'
@@ -1037,11 +1053,11 @@ CPU_CORE=$(get_cpu_core)
 export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
-USER_PORT=$(prompt_for_port)
+prompt_for_port
 optimize_system
 install_singbox "install"
 generate_cert
-create_config "$USER_PORT"
+create_config
 create_sb_tool
 setup_service
 get_env_data
