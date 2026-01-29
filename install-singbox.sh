@@ -794,10 +794,10 @@ EOF
         systemctl daemon-reload >/dev/null 2>&1; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box --no-block >/dev/null 2>&1 || true
     fi
     local pid=""; info "服务状态校验中..."
-    for i in {1..50}; do
+    for i in {1..30}; do
         pid=$(pidof sing-box | awk '{print $1}')
-        [ -n "$pid" ] && ss -tlpn | grep -q "sing-box" && break
-        printf "."; sleep 0.2
+        [ -n "$pid" ] && [ -e "/proc/$pid" ] && break
+        printf "."; sleep 0.3
     done; echo ""
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
