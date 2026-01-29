@@ -851,7 +851,11 @@ display_links() {
     for s in 4 6; do
         local var="RAW_IP$s" && local ip="${!var:-}"
         [ -z "$ip" ] && continue
-        if nc -zu -w1 "$ip" "$USER_PORT" >/dev/null 2>&1; then M="\033[1;32m已连通\033[0m"; else M="\033[1;33m未放行\033[0m"; fi
+        if nc -zu -w1 "$ip" "$USER_PORT" >/dev/null 2>&1; then
+            M="\033[1;32m已连通\033[0m"
+        else
+            M="\033[1;33m未放行\033[0m"
+        fi
         if [ "$s" == "4" ]; then
             LINK_V4="hy2://$RAW_PSK@$ip:$USER_PORT/?${BASE_PARAM}#$(hostname)_v4"
             echo -e "\n\033[1;35m[IPv4 链接]\033[0m ($M)\n$LINK_V4"; FULL_CLIP="$LINK_V4"
@@ -860,7 +864,6 @@ display_links() {
             echo -e "\033[1;36m[IPv6 链接]\033[0m ($M)\n$LINK_V6"; FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"  
         fi
     done
-
     echo -e "\n\033[1;34m==========================================\033[0m"
     [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m 证书 SHA256 指纹已集成，支持强校验"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
