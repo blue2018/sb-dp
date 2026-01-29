@@ -799,6 +799,7 @@ TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF
+
         systemctl daemon-reload >/dev/null 2>&1; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box --no-block >/dev/null 2>&1 || true
     fi
     local pid=""; info "服务状态校验中..."
