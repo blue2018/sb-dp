@@ -711,7 +711,7 @@ create_config() {
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
-    "listen_port": $PORT_HY2,
+    "listen_port": $port,
     "users": [ { "password": "$PSK" } ],
     "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
