@@ -763,8 +763,9 @@ EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true; rc-service sing-box restart >/dev/null 2>&1 &
     else
-        local mem_config=""; local cpu_quota=$((real_c * 100))
+        local mem_config=""; local cpu_line=""; local cpu_quota=$((real_c * 100))
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
+		[ "$real_c" -gt 1 ] && cpu_line="CPUQuota=${cpu_quota}%"
         local io_config="IOSchedulingClass=$io_class"$'\n'"IOSchedulingPriority=$io_prio"
         [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
@@ -789,7 +790,7 @@ Nice=$cur_nice
 $io_config
 LimitNOFILE=1000000
 LimitMEMLOCK=infinity
-${mem_config}CPUQuota=${cpu_quota}%
+${mem_config}${cpu_line}
 OOMPolicy=continue
 OOMScoreAdjust=-500
 Restart=always
@@ -839,8 +840,8 @@ get_env_data() {
 display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" M=""
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
-    [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
-    [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
+    [ -n "$RAW_FP" ] && BASE_PARAM+="&pinsha256=$RAW_FP"
+    [ -n "$RAW_SALA" ] && BASE_PARAM+="&obfs=salamander&obfs-password=$RAW_SALA"
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${USER_PORT}\033[0m"
 
     for s in 4 6; do
