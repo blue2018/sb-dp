@@ -804,7 +804,7 @@ EOF
     local pid=""; info "服务状态校验中..."
     for i in {1..30}; do
         pid=$(pidof sing-box | awk '{print $1}')
-        [ -n "$pid" ] && break || sleep 0.3
+        [ -n "$pid" ] && break || sleep 0.5
     done
 
     if [ -n "$pid" ]; then
