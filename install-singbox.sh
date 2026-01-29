@@ -765,7 +765,7 @@ EOF
     else
         local mem_config=""; local cpu_line=""; local cpu_quota=$((real_c * 100))
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
-		[ "$real_c" -gt 1 ] && cpu_line="CPUQuota=${cpu_quota}%"
+		if [ "$real_c" -gt 1 ]; then cpu_line="CPUQuota=${cpu_quota}%"; fi
         local io_config="IOSchedulingClass=$io_class"$'\n'"IOSchedulingPriority=$io_prio"
         [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
