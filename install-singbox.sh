@@ -722,18 +722,16 @@ setup_service() {
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
     local cur_nice="${VAR_SYSTEMD_NICE:--5}"; local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"  
     local mem_total=$(probe_memory_total); local io_prio=4  
+	[ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
 	[ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
     [ "$mem_total" -lt 200 ] && io_prio=7 # 极低内存下进一步降低 IO 优先级，防止死锁
-    [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
 	info "正在写入服务配置..."
 	
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
         local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
-        if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
-            exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
-        fi
+        [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ] && exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
@@ -755,13 +753,13 @@ start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>
 start_post() { (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 & }
 EOF
         chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1 || true
+        rc-update add sing-box default >/dev/null 2>&1 || true; rc-service sing-box restart >/dev/null 2>&1 &
     else
-        local mem_config=""
+        local mem_config=""; local cpu_quota=$((real_c * 100))
+		local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
         [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
-        local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
-        local cpu_quota=$((real_c * 100)); [ "$cpu_quota" -lt 100 ] && cpu_quota=100
+        [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
@@ -793,25 +791,27 @@ TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload && systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || true
+        systemctl daemon-reload >/dev/null 2>&1; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box --no-block >/dev/null 2>&1 || true
     fi
     
-    local pid=""
-    info "服务就绪状态校验中..."
-    for i in {1..13}; do 
+    local pid=""; info "服务状态校验中..."
+    for i in {1..50}; do
         pid=$(pidof sing-box | awk '{print $1}')
-        [ -n "$pid" ] && [ -e "/proc/$pid" ] && break || sleep 0.8
-    done
+        [ -n "$pid" ] && ss -tlpn | grep -q "sing-box" && break
+        printf "."; sleep 0.2
+    done; echo ""
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
-        local ma_mb=$(( ${ma:-0} / 1024 ))
-        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
-    else 
+        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
+    else
         warn "服务拉起异常，尝试自愈重启..."
-        if [ "$OS" = "alpine" ]; then rc-service sing-box restart >/dev/null 2>&1; else systemctl restart sing-box >/dev/null 2>&1; fi
-        sleep 3
+        [ "$OS" = "alpine" ] && rc-service sing-box start >/dev/null 2>&1 & || systemctl start sing-box --no-block >/dev/null 2>&1
+        for i in {1..20}; do pid=$(pidof sing-box | awk '{print $1}'); [ -n "$pid" ] && break; sleep 0.5; done
         pid=$(pidof sing-box | awk '{print $1}')
-        if [ -z "$pid" ]; then err "sing-box 最终启动失败，报错日志如下："; [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 10 || tail -n 10 /var/log/messages 2>/dev/null; } || { journalctl -u sing-box -n 10 --no-pager 2>/dev/null; }; exit 1; fi
+        if [ -z "$pid" ]; then
+	        err "最终启动失败，日志如下："; [ "$OS" = "alpine" ] && logread 2>/dev/null | tail -n 10 || journalctl -u sing-box -n 10 --no-pager 2>/dev/null
+	        exit 1
+	    fi
         succ "服务已通过自愈模式就绪"
     fi
 }
