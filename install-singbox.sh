@@ -330,8 +330,8 @@ apply_userspace_adaptive_profile() {
     [ "$real_c" -eq 1 ] && export GOMAXPROCS=2 || export GOMAXPROCS="$g_procs"
     # === 2. 内存回收策略分级 (75M+- 差异化处理) ===
     [ "$mem_total" -lt 75 ] && \
-    { export GODEBUG="madvdontneed=1,scavenge_target=1"; info "Runtime → 激进回收模式 (75M-)"; } || \
-    { export GODEBUG="madvdontneed=1,asyncpreemptoff=1"; info "Runtime → 性能优先模式 (75M+)"; }
+    { export GODEBUG="madvdontneed=1,scavenge_target=1"; info "Runtime → 激进回收模式 (75 M-)"; } || \
+    { export GODEBUG="madvdontneed=1,asyncpreemptoff=1"; info "Runtime → 性能优先模式 (75 M+)"; }
     export GOGC="${SBOX_GOGC:-100}" GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}"
     export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" VAR_HY2_BW="${VAR_HY2_BW:-200}"
     export SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"
@@ -358,7 +358,7 @@ EOF
     chmod 644 /etc/sing-box/env
     # === 4. CPU 亲和力优化 (绑定当前脚本到所有可用核心) ===
     [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1 && taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1
-    info "Runtime → GOMAXPROCS: $GOMAXPROCS核 | 内存限额:$GOMEMLIMIT | GC权重:$GOGC | Buffer:$((buf/1024))KB"
+    info "Runtime → GOMAXPROCS: $GOMAXPROCS 核 | 内存限额: $GOMEMLIMIT | GC权重: $GOGC | Buffer: $((buf/1024))KB"
 }
 
 # 网卡核心负载加速（RPS/XPS/批处理密度）
@@ -400,7 +400,7 @@ apply_nic_core_boost() {
             [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
         done
     fi
-	info "NIC 优化 → 网卡:$IFACE | QLen:$target_qlen | 中断延迟:${tuned_usc:-default}us"
+	info "NIC 优化 → 网卡: $IFACE | QLen: $target_qlen | 中断延迟: ${tuned_usc:-default}us"
 }
 
 # ==========================================
@@ -415,7 +415,7 @@ optimize_system() {
     local swappiness_val="${SWAPPINESS_VAL:-10}" busy_poll_val="${BUSY_POLL_VAL:-0}"
     
     setup_zrm_swap "$mem_total"
-	info "系统画像: CPU核心=${real_c}核 | 系统内存=${mem_total}mb | 平均延迟=${RTT_AVG}ms | RTT补偿=${REAL_RTT_FACTORS}ms | 丢包补偿=${LOSS_COMPENSATION}%"
+	info "系统画像: CPU核心: ${real_c} 核 | 系统内存: ${mem_total} MB | 平均延迟: ${RTT_AVG} ms | RTT补偿: ${REAL_RTT_FACTORS} ms | 丢包补偿: ${LOSS_COMPENSATION}%"
 
     # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
@@ -495,8 +495,8 @@ optimize_system() {
 	apply_initcwnd_optimization "false"
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf" "$real_c" "$mem_total"
     apply_nic_core_boost "$real_c" "$net_bgt" "$net_usc"
-    info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW}Mbps"
-    info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 ))MB"
+    info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW} Mbps"
+    info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
 	
     # 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
     local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
@@ -725,8 +725,8 @@ setup_service() {
 	[ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
     [ "$mem_total" -lt 200 ] && io_prio=7 # 极低内存下进一步降低 IO 优先级，防止死锁
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
-    info "配置服务 (核心: $real_c | 绑定: $core_range | 权重: $cur_nice)..."
-	info "正在写入服务配置，请稍后..."
+    info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
+	info "正在写入服务配置..."
 	
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
@@ -797,7 +797,7 @@ EOF
     fi
     
     local pid=""
-    info "正在校验服务就绪状态..."
+    info "服务就绪状态校验中..."
     for i in {1..13}; do 
         pid=$(pidof sing-box | awk '{print $1}')
         [ -n "$pid" ] && [ -e "/proc/$pid" ] && break || sleep 0.8
