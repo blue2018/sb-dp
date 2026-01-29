@@ -782,14 +782,14 @@ User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
-ExecStartPre=-/bin/bash -c '[ -f $SBOX_CORE ] && /bin/bash $SBOX_CORE --apply-cwnd'
+ExecStartPre=-/bin/bash -c '[ -f \$SBOX_CORE ] && /bin/bash \$SBOX_CORE --apply-cwnd'
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
-ExecStartPost=-/bin/bash -c '(sleep 3; /bin/bash $SBOX_CORE --apply-cwnd) &'
+ExecStartPost=-/bin/bash -c '(sleep 3; /bin/bash \$SBOX_CORE --apply-cwnd) &'
 Nice=$cur_nice
-\${io_config}
+$io_config
 LimitNOFILE=1000000
 LimitMEMLOCK=infinity
-\${mem_config}CPUQuota=\${cpu_quota}%
+${mem_config}CPUQuota=${cpu_quota}%
 OOMPolicy=continue
 OOMScoreAdjust=-500
 Restart=always
