@@ -74,9 +74,12 @@ install_dependencies() {
              M=$(command -v dnf || echo "yum")
              $M install -y $DEPS || { err "$M 安装依赖失败"; exit 1; } ;;
     esac
-    # 针对小鸡常见的 CA 证书缺失问题进行强制刷新
+
+    # [优化] 针对小鸡常见的 CA 证书缺失问题进行强制刷新
     [ -f /etc/ssl/certs/ca-certificates.crt ] || update-ca-certificates 2>/dev/null || true
-    for cmd in jq curl tar nc; do command -v "$cmd" >/dev/null 2>&1 || { err "核心依赖 $cmd 安装失败，请检查网络或源"; exit 1; }; done
+    for cmd in jq curl tar nc; do 
+        command -v "$cmd" >/dev/null 2>&1 || { err "核心依赖 $cmd 安装失败，请检查网络或源"; exit 1; }
+    done
     succ "所需依赖已就绪"
 }
 
@@ -698,7 +701,7 @@ create_config() {
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "error", "timestamp": true },
+  "log": { "level": "fatal", "timestamp": true },
   "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
@@ -734,7 +737,7 @@ setup_service() {
     [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
     [ "$mem_total" -lt 200 ] && io_prio=7 # 极低内存下进一步降低 IO 优先级，防止死锁
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
-    info "正在写入服务配置，请稍后..."
+    info "正在写入服务配置..."
 
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
@@ -763,11 +766,13 @@ EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true; rc-service sing-box restart >/dev/null 2>&1 &
     else
-        local mem_config=""; local cpu_quota=$((real_c * 100))
+        local cpu_quota=$((real_c * 100))
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         local io_config="IOSchedulingClass=$io_class"$'\n'"IOSchedulingPriority=$io_prio"
+        local mem_config=""
         [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
+
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
@@ -805,10 +810,10 @@ EOF
     local pid=""; info "服务状态校验中..."
     for i in {1..30}; do
         pid=$(pidof sing-box | awk '{print $1}')
-        [ -n "$pid" ] && break || sleep 0.5
+        [ -n "$pid" ] && [ -e "/proc/$pid" ] && break
+        sleep 0.3
     done
-
-    if [ -n "$pid" ]; then
+    if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
     else
@@ -818,7 +823,7 @@ EOF
         else
             systemctl start sing-box --no-block >/dev/null 2>&1 || true
         fi
-        for i in {1..30}; do pid=$(pidof sing-box | awk '{print $1}'); [ -n "$pid" ] && break || sleep 0.5; done
+        for i in {1..20}; do pid=$(pidof sing-box | awk '{print $1}'); [ -n "$pid" ] && break; sleep 0.5; done
         [ -z "$pid" ] && { err "启动失败，日志如下："; [ "$OS" = "alpine" ] && logread 2>/dev/null | tail -n 10 || journalctl -u sing-box -n 10 --no-pager 2>/dev/null; exit 1; }
         succ "服务已通过自愈模式就绪"
     fi
@@ -840,8 +845,8 @@ get_env_data() {
 display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" M=""
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
-    [ -n "$RAW_FP" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
-    [ -n "$RAW_SALA" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
+    [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
+    [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${USER_PORT}\033[0m"
 
     for s in 4 6; do
@@ -857,7 +862,7 @@ display_links() {
             echo -e "\n\033[1;35m[IPv4 链接]\033[0m ($M)\n$LINK_V4" && FULL_CLIP="$LINK_V4"
         else
             LINK_V6="hy2://$RAW_PSK@[$ip]:$USER_PORT/?${BASE_PARAM}#$(hostname)_v6"
-            echo -e "\033[1;36m[IPv6 链接]\033[0m ($M)\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"  
+            echo -e "\033[1;36m[IPv6 链接]\033[0m ($M)\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"  
         fi
     done
     echo -e "\n\033[1;34m==========================================\033[0m"
@@ -905,7 +910,6 @@ OS='$OS'
 SBOX_ARCH='$SBOX_ARCH'
 CPU_CORE='$CPU_CORE'
 SBOX_CORE='$SBOX_CORE'
-USER_PORT='USER_PORT'
 VAR_HY2_BW='${VAR_HY2_BW:-200}'
 SBOX_GOLIMIT='$SBOX_GOLIMIT'
 SBOX_GOGC='${SBOX_GOGC:-100}'
