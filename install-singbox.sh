@@ -734,7 +734,7 @@ setup_service() {
     [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
     [ "$mem_total" -lt 200 ] && io_prio=7 # 极低内存下进一步降低 IO 优先级，防止死锁
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
-    info "正在写入服务配置..."
+    info "正在写入服务配置，请稍后..."
 
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
@@ -804,7 +804,7 @@ EOF
     local pid=""; info "服务状态校验中..."
     for i in {1..30}; do
         pid=$(pidof sing-box | awk '{print $1}')
-        [ -n "$pid" ] && break || sleep 0.3
+        [ -n "$pid" ] && break || sleep 0.5
     done
 
     if [ -n "$pid" ]; then
@@ -817,7 +817,7 @@ EOF
         else
             systemctl start sing-box --no-block >/dev/null 2>&1 || true
         fi
-        for i in {1..20}; do pid=$(pidof sing-box | awk '{print $1}'); [ -n "$pid" ] && break || sleep 0.5; done
+        for i in {1..30}; do pid=$(pidof sing-box | awk '{print $1}'); [ -n "$pid" ] && break || sleep 0.5; done
         [ -z "$pid" ] && { err "启动失败，日志如下："; [ "$OS" = "alpine" ] && logread 2>/dev/null | tail -n 10 || journalctl -u sing-box -n 10 --no-pager 2>/dev/null; exit 1; }
         succ "服务已通过自愈模式就绪"
     fi
