@@ -720,17 +720,18 @@ setup_service() {
     local real_c="$CPU_CORE" core_range=""
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
-    local cur_nice="${VAR_SYSTEMD_NICE:--5}"
-    local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"  
-    local mem_total=$(probe_memory_total); local io_prio=2
+    local cur_nice="${VAR_SYSTEMD_NICE:--5}"; local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"  
+    local mem_total=$(probe_memory_total); local io_prio=4  
+	[ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
+    [ "$mem_total" -lt 200 ] && io_prio=7 # 极低内存下进一步降低 IO 优先级，防止死锁
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
     info "配置服务 (核心: $real_c | 绑定: $core_range | 权重: $cur_nice)..."
-    
+	info "正在写入服务配置，请稍后..."
+	
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
         local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
         if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
-            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
             exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
         fi
         cat > /etc/init.d/sing-box <<EOF
@@ -739,8 +740,7 @@ name="sing-box"
 description="Sing-box Service"
 supervisor="supervise-daemon"
 respawn_delay=10
-respawn_max=3
-respawn_period=60
+respawn_max=5
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
 command="/bin/sh"
@@ -750,8 +750,8 @@ rc_ulimit="-n 1000000"
 rc_nice="$cur_nice"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
-start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
-start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
+start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 & }
+start_post() { (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 & }
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1 || true
@@ -759,19 +759,14 @@ EOF
         local mem_config=""
         [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
-        
-		[ "$mem_total" -lt 200 ] && io_prio=4
-        [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
         local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
-        local cpu_quota=$((real_c * 100))
-        [ "$cpu_quota" -lt 100 ] && cpu_quota=100        
+        local cpu_quota=$((real_c * 100)); [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=3
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -779,9 +774,9 @@ User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
-ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
+ExecStartPre=-/bin/bash -c '[ -f $SBOX_CORE ] && /bin/bash $SBOX_CORE --apply-cwnd'
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
-ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
+ExecStartPost=-/bin/bash -c '(sleep 3; /bin/bash $SBOX_CORE --apply-cwnd) &'
 Nice=$cur_nice
 ${io_config}
 LimitNOFILE=1000000
@@ -790,28 +785,32 @@ ${mem_config}CPUQuota=${cpu_quota}%
 OOMPolicy=continue
 OOMScoreAdjust=-500
 Restart=always
-RestartSec=10s
+RestartSec=5s
 TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
         systemctl daemon-reload && systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || true
     fi
     
     local pid=""
-	for i in 1 2 3 4 5; do 
+    info "正在校验服务就绪状态..."
+    for i in {1..13}; do 
         pid=$(pidof sing-box | awk '{print $1}')
-        [ -n "$pid" ] && break || sleep 0.4
+        [ -n "$pid" ] && [ -e "/proc/$pid" ] && break || sleep 0.8
     done
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
         local ma_mb=$(( ${ma:-0} / 1024 ))
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
     else 
-        err "sing-box 启动失败，最近日志："; [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 5 || tail -n 5 /var/log/messages 2>/dev/null; } || { journalctl -u sing-box -n 5 --no-pager 2>/dev/null; }
-        echo -e "\033[1;33m[配置自检]\033[0m"; /usr/bin/sing-box check -c /etc/sing-box/config.json || true; exit 1
+        warn "服务拉起异常，尝试自愈重启..."
+        if [ "$OS" = "alpine" ]; then rc-service sing-box restart >/dev/null 2>&1; else systemctl restart sing-box >/dev/null 2>&1; fi
+        sleep 3
+        pid=$(pidof sing-box | awk '{print $1}')
+        if [ -z "$pid" ]; then err "sing-box 最终启动失败，报错日志如下："; [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 10 || tail -n 10 /var/log/messages 2>/dev/null; } || { journalctl -u sing-box -n 10 --no-pager 2>/dev/null; }; exit 1; fi
+        succ "服务已通过自愈模式就绪"
     fi
 }
 
