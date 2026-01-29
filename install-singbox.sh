@@ -741,6 +741,7 @@ description="Sing-box Service"
 supervisor="supervise-daemon"
 respawn_delay=10
 respawn_max=5
+respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
 command="/bin/sh"
@@ -767,6 +768,7 @@ Description=Sing-box Service
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=0
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -785,7 +787,7 @@ ${mem_config}CPUQuota=${cpu_quota}%
 OOMPolicy=continue
 OOMScoreAdjust=-500
 Restart=always
-RestartSec=5s
+RestartSec=10s
 TimeoutStopSec=15
 
 [Install]
