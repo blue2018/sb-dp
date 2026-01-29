@@ -837,7 +837,7 @@ get_env_data() {
 }
 
 display_links() {
-    local LINK_V4="" LINK_V6="" FULL_CLIP="" M="" mark=""
+    local LINK_V4="" LINK_V6="" FULL_CLIP="" M=""
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
@@ -846,16 +846,13 @@ display_links() {
     for s in 4 6; do
         local var="RAW_IP$s" && local ip="${!var:-}"
         [ -z "$ip" ] && continue
-		M="\033[1;33m未放行\033[0m" && mark="[未放行]"
-        nc -zu -w1 "$ip" "$USER_PORT" >/dev/null 2>&1 && \
-	    { M="\033[1;32m已连通\033[0m"; mark="[已连通]"; } || \
-	    { M="\033[1;33m未放行\033[0m"; mark="[未放行]"; }
+        if nc -zu -w1 "$ip" "$USER_PORT" >/dev/null 2>&1; then M="\033[1;32m已连通\033[0m"; else M="\033[1;33m未放行\033[0m"; fi
         if [ "$s" == "4" ]; then
-            LINK_V4="hy2://$RAW_PSK@$ip:$USER_PORT/?${BASE_PARAM}#$(hostname)_v4${mark}"
+            LINK_V4="hy2://$RAW_PSK@$ip:$USER_PORT/?${BASE_PARAM}#$(hostname)_v4"
             echo -e "\n\033[1;35m[IPv4 链接]\033[0m ($M)\n$LINK_V4" && FULL_CLIP="$LINK_V4"
         else
-            LINK_V6="hy2://$RAW_PSK@[$ip]:$USER_PORT/?${BASE_PARAM}#$(hostname)_v6${mark}"
-            echo -e "\033[1;36m[IPv6 链接]\033[0m ($M)\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
+            LINK_V6="hy2://$RAW_PSK@[$ip]:$USER_PORT/?${BASE_PARAM}#$(hostname)_v6"
+            echo -e "\033[1;36m[IPv6 链接]\033[0m ($M)\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"  
         fi
     done
     echo -e "\n\033[1;34m==========================================\033[0m"
