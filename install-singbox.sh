@@ -764,10 +764,10 @@ EOF
         rc-update add sing-box default >/dev/null 2>&1 || true; rc-service sing-box restart >/dev/null 2>&1 &
     else
         local mem_config=""; local cpu_quota=$((real_c * 100))
-        local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
-        [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
-        [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
+        local io_config="IOSchedulingClass=$io_class"$'\n'"IOSchedulingPriority=$io_prio"
+        [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
+        [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
@@ -804,20 +804,16 @@ EOF
     local pid=""; info "服务状态校验中..."
     for i in {1..30}; do
         pid=$(pidof sing-box | awk '{print $1}')
-        [ -n "$pid" ] && [ -e "/proc/$pid" ] && break
-        sleep 0.3
+        [ -n "$pid" ] && break || sleep 0.3
     done
-    if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
+
+    if [ -n "$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
     else
         warn "服务拉起异常，尝试自愈重启..."
-        if [ "$OS" = "alpine" ]; then
-            rc-service sing-box start >/dev/null 2>&1 &
-        else
-            systemctl start sing-box --no-block >/dev/null 2>&1 || true
-        fi
-        for i in {1..20}; do pid=$(pidof sing-box | awk '{print $1}'); [ -n "$pid" ] && break; sleep 0.5; done
+        [ "$OS" = "alpine" ] && rc-service sing-box start >/dev/null 2>&1 & || systemctl start sing-box --no-block >/dev/null 2>&1
+        for i in {1..20}; do pid=$(pidof sing-box | awk '{print $1}'); [ -n "$pid" ] && break || sleep 0.5; done
         [ -z "$pid" ] && { err "启动失败，日志如下："; [ "$OS" = "alpine" ] && logread 2>/dev/null | tail -n 10 || journalctl -u sing-box -n 10 --no-pager 2>/dev/null; exit 1; }
         succ "服务已通过自愈模式就绪"
     fi
