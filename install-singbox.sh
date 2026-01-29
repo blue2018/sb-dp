@@ -847,7 +847,11 @@ display_links() {
     for s in 4 6; do
         local var="RAW_IP$s" && local ip="${!var:-}"
         [ -z "$ip" ] && continue
-        if nc -zu -w1 "$ip" "$USER_PORT" >/dev/null 2>&1; then M="\033[1;32m已连通\033[0m"; else M="\033[1;33m未放行\033[0m"; fi
+        if nc -zu -w1 "$ip" "$USER_PORT" >/dev/null 2>&1; then
+            M="\033[1;32m已连通\033[0m"
+        else
+            M="\033[1;33m未放行\033[0m"
+        fi
         if [ "$s" == "4" ]; then
             LINK_V4="hy2://$RAW_PSK@$ip:$USER_PORT/?${BASE_PARAM}#$(hostname)_v4"
             echo -e "\n\033[1;35m[IPv4 链接]\033[0m ($M)\n$LINK_V4" && FULL_CLIP="$LINK_V4"
