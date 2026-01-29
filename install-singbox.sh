@@ -112,22 +112,18 @@ prompt_for_port() {
             [ -n "$USER_PORT" ] && { echo -e "\033[1;32m[INFO]\033[0m 自动分配空闲端口: $USER_PORT" && return 0; }
             err "随机尝试失败" && exit 1
         }
-        # 场景2：手动输入，校验格式与范围
+		# 场景2：手动输入，校验格式与范围
         if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
-            if ! eval "$check_p \":$p([[:space:]]|$)\""; then
-                USER_PORT="$p" && return 0 # 没被占用，直接使用
-            else
-                # 关键改进：被占用则转为自动生成，不要求用户重输
-                warn "端口 $p 已被占用，正在为你分配可用端口..."
+            if ! eval "$check_p \":$p([[:space:]]|$)\""; then USER_PORT="$p" && return 0; else
+                warn "端口 $p 已被占用，正为你自动分配可用端口..."
                 while [ $retry -lt 20 ]; do
                     p=$(shuf -i 1025-65535 -n 1)
                     ! eval "$check_p \":$p([[:space:]]|$)\"" && USER_PORT="$p" && break
                     ((retry++))
                 done
-                [ -n "$USER_PORT" ] && { succ "已自动更换为可用端口: $USER_PORT" && return 0; }
+                [ -n "$USER_PORT" ] && { succ "已更换为可用端口: $USER_PORT" && return 0; }
             fi
-        else
-            echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字"
+        else echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字"
         fi
     done
 }
@@ -844,24 +840,28 @@ get_env_data() {
 }
 
 display_links() {
-    local LINK_V4="" LINK_V6="" FULL_CLIP="" 
+    local LINK_V4="" LINK_V6="" FULL_CLIP="" M="" mark=""
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
-    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m"
+    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${USER_PORT}\033[0m"
 
-    [ -n "${RAW_IP4:-}" ] && {
-        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v4"
-        echo -e "\n\033[1;35m[IPv4节点链接]\033[0m\n$LINK_V4\n"
-        FULL_CLIP="$LINK_V4"
-    }
-    [ -n "${RAW_IP6:-}" ] && {
-        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v6"
-        echo -e "\033[1;36m[IPv6节点链接]\033[0m\n$LINK_V6"
-        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
-    }
+    for s in 4 6; do
+        local var="RAW_IP$s" && local ip="${!var:-}"
+        [ -z "$ip" ] && continue
+        nc -zu -w2 "$ip" "$USER_PORT" >/dev/null 2>&1 && \
+        { M="\033[1;32m已连通\033[0m"; mark="[已连通]"; } || \
+        { M="\033[1;33m未放行\033[0m"; mark="[未放行]"; }
 
-    echo -e "\033[1;34m==========================================\033[0m"
+        if [ "$s" == "4" ]; then
+            LINK_V4="hy2://$RAW_PSK@$ip:$USER_PORT/?${BASE_PARAM}#$(hostname)_v4${mark}"
+            echo -e "\n\033[1;35m[IPv4 链接]\033[0m ($M)\n$LINK_V4" && FULL_CLIP="$LINK_V4"
+        else
+            LINK_V6="hy2://$RAW_PSK@[$ip]:$USER_PORT/?${BASE_PARAM}#$(hostname)_v6${mark}"
+            echo -e "\033[1;36m[IPv6 链接]\033[0m ($M)\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
+        fi
+    done
+    echo -e "\n\033[1;34m==========================================\033[0m"
     [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m 证书 SHA256 指纹已集成，支持强校验"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
