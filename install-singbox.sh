@@ -5,12 +5,12 @@ set -euo pipefail
 # 基础变量声明与环境准备
 # ==========================================
 # === 系统与环境参数初始化 ===
-SBOX_ARCH="";            OS_DISPLAY="";           SBOX_CORE="/etc/sing-box/core_script.sh"
-SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";         SBOX_MEM_MAX="55M";       SBOX_OPTIMIZE_LEVEL="未检测"
-SBOX_MEM_HIGH="42M";     CPU_CORE="1";            INITCWND_DONE="false";    VAR_DEF_MEM=""
-VAR_UDP_RMEM="";         VAR_UDP_WMEM="";         VAR_SYSTEMD_NICE="";      VAR_HY2_BW="200";    RAW_SALA=""
-VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";     BUSY_POLL_VAL="0";        VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
-REAL_RTT_FACTORS="130";  LOSS_COMPENSATION="100"
+SBOX_ARCH="";            OS_DISPLAY="";            SBOX_CORE="/etc/sing-box/core_script.sh"
+SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";          SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测"
+SBOX_MEM_HIGH="42M";     CPU_CORE="1";             INITCWND_DONE="false";  VAR_DEF_MEM=""
+VAR_UDP_RMEM="";         VAR_UDP_WMEM="";          VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200"
+VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";      BUSY_POLL_VAL="0";      VAR_BACKLOG="5000"
+REAL_RTT_FACTORS="130";  LOSS_COMPENSATION="100";  USER_PORT="";           RAW_SALA="";        UDP_MEM_SCALE=""
 
 # TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
