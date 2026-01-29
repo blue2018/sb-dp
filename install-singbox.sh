@@ -766,10 +766,9 @@ EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true; rc-service sing-box restart >/dev/null 2>&1 &
     else
-        local cpu_quota=$((real_c * 100))
+        local mem_config=""; local cpu_quota=$((real_c * 100))
+		local io_config="IOSchedulingClass=$io_class"$'\n'"IOSchedulingPriority=$io_prio"
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
-        local io_config="IOSchedulingClass=$io_class"$'\n'"IOSchedulingPriority=$io_prio"
-        local mem_config=""
         [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
 
