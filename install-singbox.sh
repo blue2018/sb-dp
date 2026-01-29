@@ -863,9 +863,8 @@ display_links() {
     done
 
     echo -e "\n\033[1;34m==========================================\033[0m"
-    # 这里也建议加上 || true 或者使用 if，防止检测失败中断
-    if [ -n "$RAW_FP" ]; then echo -e "\033[1;32m[安全提示]\033[0m 证书 SHA256 指纹已集成，支持强校验"; fi
-    if [ -n "$FULL_CLIP" ]; then copy_to_clipboard "$FULL_CLIP"; fi
+    [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m 证书 SHA256 指纹已集成，支持强校验"
+    [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
 display_system_status() {
