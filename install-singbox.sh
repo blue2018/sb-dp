@@ -110,22 +110,37 @@ prompt_for_port() {
     while :; do
         read -r -p "请输入端口 [1025-65535] (回车随机): " input_p
         p=${input_p:-$(shuf -i 1025-65000 -n 1)}
-        if [ "$p" -ge 1025 ] 2>/dev/null && [ "$p" -le 65535 ] 2>/dev/null; then
+        
+        # 基础数字校验，兼容所有环境
+        if [ "$p" -eq "$p" ] 2>/dev/null && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
             while :; do
-                if { command -v ss >/dev/null 2>&1 && ss -tuln | grep -q ":$p "; } || \
-                   { command -v netstat >/dev/null 2>&1 && netstat -tuln | grep -q ":$p "; } || \
-                   { command -v nc >/dev/null 2>&1 && (nc -z -w1 127.0.0.1 "$p" 2>/dev/null || nc -zu -w1 127.0.0.1 "$p" 2>/dev/null); }; then
-                    [ -n "$input_p" ] && { echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已自动更换" >&2; input_p=""; }
-                    ((p++))
-                    [ "$p" -gt 65535 ] && p=1025
-                    continue
+                # 终极探测：直接通过 python 或 perl 尝试监听端口（如果环境允许）
+                # 或者使用最稳妥的多工具顺序检测
+                local occupied=0
+                if command -v ss >/dev/null 2>&1; then
+                    ss -tuln | grep -q ":$p " && occupied=1
+                elif command -v netstat >/dev/null 2>&1; then
+                    netstat -tuln | grep -q ":$p " && occupied=1
+                else
+                    # 最后的兜底，使用 nc 探测
+                    nc -z -w1 127.0.0.1 "$p" >/dev/null 2>&1 && occupied=1
+                    nc -zu -w1 127.0.0.1 "$p" >/dev/null 2>&1 && occupied=1
                 fi
-                echo -e "\033[1;32m[OK]\033[0m 使用端口: $p" >&2
-                echo "$p"
-                return 0
+
+                if [ "$occupied" -eq 0 ]; then
+                    [ -n "$input_p" ] && [ "$p" != "$input_p" ] && echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已更换"
+                    # 直接修改全局变量，不使用 echo 捕获
+                    USER_PORT="$p"
+                    echo -e "\033[1;32m[OK]\033[0m 使用端口: $USER_PORT"
+                    return 0
+                fi
+                
+                # 占用处理
+                ((p++)); [ "$p" -gt 65535 ] && p=1025
+                input_p=""
             done
         else 
-            echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字" >&2
+            echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字"
         fi
     done
 }
