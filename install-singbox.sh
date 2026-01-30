@@ -330,8 +330,8 @@ apply_userspace_adaptive_profile() {
     [ "$real_c" -eq 1 ] && export GOMAXPROCS=2 || export GOMAXPROCS="$g_procs"
     # === 2. 内存回收策略分级 (75M+- 差异化处理) ===
     [ "$mem_total" -lt 75 ] && \
-    { export GODEBUG="madvdontneed=1,scavenge_target=1"; info "Runtime → 激进回收模式 (75 M-)"; } || \
-    { export GODEBUG="madvdontneed=1,asyncpreemptoff=1"; info "Runtime → 性能优先模式 (75 M+)"; }
+    { export GODEBUG="madvdontneed=1,scavenge_target=1"; info "Runtime → 激进回收模式 (75M-)"; } || \
+    { export GODEBUG="madvdontneed=1,asyncpreemptoff=1"; info "Runtime → 性能优先模式 (75M+)"; }
     export GOGC="${SBOX_GOGC:-100}" GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}"
     export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" VAR_HY2_BW="${VAR_HY2_BW:-200}"
     export SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"
@@ -358,7 +358,7 @@ EOF
     chmod 644 /etc/sing-box/env
     # === 4. CPU 亲和力优化 (绑定当前脚本到所有可用核心) ===
     [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1 && taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1
-    info "Runtime → GOMAXPROCS: $GOMAXPROCS 核 | 内存限额: $GOMEMLIMIT | GC权重: $GOGC | Buffer: $((buf/1024))KB"
+    info "Runtime → GOMAXPROCS: $GOMAXPROCS核 | 内存限额:$GOMEMLIMIT | GC权重:$GOGC | Buffer:$((buf/1024))KB"
 }
 
 # 网卡核心负载加速（RPS/XPS/批处理密度）
@@ -400,7 +400,7 @@ apply_nic_core_boost() {
             [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
         done
     fi
-	info "NIC 优化 → 网卡: $IFACE | QLen: $target_qlen | 中断延迟: ${tuned_usc:-default}us"
+	info "NIC 优化 → 网卡:$IFACE | QLen:$target_qlen | 中断延迟:${tuned_usc:-default}us"
 }
 
 # ==========================================
@@ -415,7 +415,7 @@ optimize_system() {
     local swappiness_val="${SWAPPINESS_VAL:-10}" busy_poll_val="${BUSY_POLL_VAL:-0}"
     
     setup_zrm_swap "$mem_total"
-	info "系统画像: CPU核心: ${real_c} 核 | 系统内存: ${mem_total} MB | 平均延迟: ${RTT_AVG} ms | RTT补偿: ${REAL_RTT_FACTORS} ms | 丢包补偿: ${LOSS_COMPENSATION}%"
+	info "系统画像: CPU核心=${real_c}核 | 系统内存=${mem_total}mb | 平均延迟=${RTT_AVG}ms | RTT补偿=${REAL_RTT_FACTORS}ms | 丢包补偿=${LOSS_COMPENSATION}%"
 
     # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
@@ -495,8 +495,8 @@ optimize_system() {
 	apply_initcwnd_optimization "false"
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf" "$real_c" "$mem_total"
     apply_nic_core_boost "$real_c" "$net_bgt" "$net_usc"
-    info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW} Mbps"
-    info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
+    info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW}Mbps"
+    info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 ))MB"
 	
     # 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
     local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
@@ -671,7 +671,7 @@ create_config() {
     # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
-        else PORT_HY2=$(shuf -i 1025-65535 -n 1); fi
+        else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
     fi
     
     # 2. PSK (密码) 确定逻辑
@@ -720,25 +720,26 @@ setup_service() {
     local real_c="$CPU_CORE" core_range=""
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
-    local cur_nice="${VAR_SYSTEMD_NICE:--5}"; local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"
-    local mem_total=$(probe_memory_total); local io_prio=4
+    local cur_nice="${VAR_SYSTEMD_NICE:--5}"
+    local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"  
+    local mem_total=$(probe_memory_total); local io_prio=2
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
-    [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
-    [ "$mem_total" -lt 200 ] && io_prio=7 # 极低内存下进一步降低 IO 优先级，防止死锁
-    info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
-    info "正在写入服务配置..."
-
+    info "配置服务 (核心: $real_c | 绑定: $core_range | 权重: $cur_nice)..."
+    
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
         local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
-        [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ] && exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
+        if [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ]; then
+            [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0  
+            exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
+        fi
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
 description="Sing-box Service"
 supervisor="supervise-daemon"
 respawn_delay=10
-respawn_max=5
+respawn_max=3
 respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
@@ -749,23 +750,27 @@ rc_ulimit="-n 1000000"
 rc_nice="$cur_nice"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
-start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 & }
-start_post() { (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 & }
+start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
+start_post() { sleep 2; pidof sing-box >/dev/null && (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) & }
 EOF
         chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default >/dev/null 2>&1 || true; rc-service sing-box restart >/dev/null 2>&1 &
+        rc-update add sing-box default >/dev/null 2>&1 || true; RC_NO_DEPENDS=yes rc-service sing-box restart >/dev/null 2>&1 || true
     else
-        local mem_config=""; local cpu_quota=$((real_c * 100))
-        local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
+        local mem_config=""
         [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
-        [ "$cpu_quota" -lt 100 ] && cpu_quota=100
+        
+		[ "$mem_total" -lt 200 ] && io_prio=4
+        [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0
+        local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
+        local cpu_quota=$((real_c * 100))
+        [ "$cpu_quota" -lt 100 ] && cpu_quota=100        
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=0
+StartLimitIntervalSec=60
 StartLimitBurst=3
 
 [Service]
@@ -774,14 +779,14 @@ User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
-ExecStartPre=-/bin/bash -c '[ -f $SBOX_CORE ] && /bin/bash $SBOX_CORE --apply-cwnd'
+ExecStartPre=-/bin/bash $SBOX_CORE --apply-cwnd
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
-ExecStartPost=-/bin/bash -c '(sleep 3; /bin/bash $SBOX_CORE --apply-cwnd) &'
+ExecStartPost=-/bin/bash -c 'sleep 3; /bin/bash $SBOX_CORE --apply-cwnd'
 Nice=$cur_nice
-\${io_config}
+${io_config}
 LimitNOFILE=1000000
 LimitMEMLOCK=infinity
-\${mem_config}CPUQuota=\${cpu_quota}%
+${mem_config}CPUQuota=${cpu_quota}%
 OOMPolicy=continue
 OOMScoreAdjust=-500
 Restart=always
@@ -791,27 +796,22 @@ TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload >/dev/null 2>&1; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box --no-block >/dev/null 2>&1 || true
+
+        systemctl daemon-reload && systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || true
     fi
-    local pid=""; info "服务状态校验中..."
-    for i in {1..30}; do
+    
+    local pid=""
+	for i in 1 2 3 4 5; do 
         pid=$(pidof sing-box | awk '{print $1}')
-        [ -n "$pid" ] && [ -e "/proc/$pid" ] && break
-        sleep 0.3
+        [ -n "$pid" ] && break || sleep 0.4
     done
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
-        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
-    else
-        warn "服务拉起异常，尝试自愈重启..."
-        if [ "$OS" = "alpine" ]; then
-            rc-service sing-box start >/dev/null 2>&1 &
-        else
-            systemctl start sing-box --no-block >/dev/null 2>&1 || true
-        fi
-        for i in {1..20}; do pid=$(pidof sing-box | awk '{print $1}'); [ -n "$pid" ] && break; sleep 0.5; done
-        [ -z "$pid" ] && { err "启动失败，日志如下："; [ "$OS" = "alpine" ] && logread 2>/dev/null | tail -n 10 || journalctl -u sing-box -n 10 --no-pager 2>/dev/null; exit 1; }
-        succ "服务已通过自愈模式就绪"
+        local ma_mb=$(( ${ma:-0} / 1024 ))
+        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: ${ma_mb} MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
+    else 
+        err "sing-box 启动失败，最近日志："; [ "$OS" = "alpine" ] && { logread 2>/dev/null | tail -n 5 || tail -n 5 /var/log/messages 2>/dev/null; } || { journalctl -u sing-box -n 5 --no-pager 2>/dev/null; }
+        echo -e "\033[1;33m[配置自检]\033[0m"; /usr/bin/sing-box check -c /etc/sing-box/config.json || true; exit 1
     fi
 }
 
