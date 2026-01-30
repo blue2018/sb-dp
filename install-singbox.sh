@@ -847,6 +847,7 @@ get_env_data() {
 }
 
 display_links() {
+    [ -n "${RAW_PORT:-}" ] && USER_PORT="$RAW_PORT"
     local LINK_V4="" LINK_V6="" FULL_CLIP="" M=""
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "$RAW_FP" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
