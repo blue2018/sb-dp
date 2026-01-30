@@ -100,28 +100,31 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p retry=0
+    local p hex_port
     while :; do
         read -r -p "请输入端口 [1025-65535] (回车随机): " p
-        [ -z "$p" ] && { # 场景1：直接回车，进入随机逻辑
-            while [ $retry -lt 20 ]; do
-                p=$(shuf -i 1025-65535 -n 1)
-                ! ss -tuln | grep -Eq ":$p([[:space:]]|$)" && USER_PORT="$p" && break
-                ((retry++))
+        if [ -z "$p" ]; then
+            p=$(shuf -i 1025-65000 -n 1)
+            while :; do
+                hex_port=$(printf ':%04X ' "$p")
+                if ! grep -q "$hex_port" /proc/net/tcp* /proc/net/udp* 2>/dev/null; then
+                    USER_PORT="$p"; echo -e "\033[1;32m[INFO]\033[0m 自动分配空闲端口: $USER_PORT"; return 0
+                fi
+                ((p++)); [ "$p" -gt 65535 ] && p=1025
             done
-            [ -n "$USER_PORT" ] && { echo -e "\033[1;32m[INFO]\033[0m 自动分配空闲端口: $USER_PORT" && return 0; }
-            err "随机尝试失败" && exit 1
-        }
-        # 场景2：手动输入，校验格式与范围
+        fi
         if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
-            if ! ss -tuln | grep -Eq ":$p([[:space:]]|$)"; then USER_PORT="$p" && return 0; else
-                warn "端口 $p 已被占用，正为你自动分配可用端口..."
-                while [ $retry -lt 20 ]; do
-                    p=$(shuf -i 1025-65535 -n 1)
-                    ! ss -tuln | grep -Eq ":$p([[:space:]]|$)" && USER_PORT="$p" && break
-                    ((retry++))
+            hex_port=$(printf ':%04X ' "$p")
+            if ! grep -q "$hex_port" /proc/net/tcp* /proc/net/udp* 2>/dev/null; then
+                USER_PORT="$p"; return 0
+            else
+                warn "端口 $p 已被占用，正在搜索临近可用端口..."
+                while :; do
+                    ((p++)); [ "$p" -gt 65535 ] && p=1025; hex_port=$(printf ':%04X ' "$p")
+                    if ! grep -q "$hex_port" /proc/net/tcp* /proc/net/udp* 2>/dev/null; then
+                        USER_PORT="$p"; succ "已更换为可用端口: $USER_PORT"; return 0
+                    fi
                 done
-                [ -n "$USER_PORT" ] && { succ "已更换为可用端口: $USER_PORT" && return 0; }
             fi
         else echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字"
         fi
