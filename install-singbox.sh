@@ -121,7 +121,6 @@ prompt_for_port() {
                     nc -z -w1 127.0.0.1 "$p" >/dev/null 2>&1 && occupied=true
                     nc -zu -w1 127.0.0.1 "$p" >/dev/null 2>&1 && occupied=true
                 fi
-
                 if [ "$occupied" = false ]; then
                     [ -n "$input_p" ] && [ "$p" != "$input_p" ] && echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已自动更换" >&2
                     echo -e "\033[1;32m[OK]\033[0m 使用端口: $p" >&2
