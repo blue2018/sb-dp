@@ -106,46 +106,47 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local input p is_busy
-    
-    # 所有的交互提示必须重定向到 >&2，否则会被变量捕获导致看不到提示
+    local p input check_cmd
+    # 自动选择检测工具
+    if command -v ss >/dev/null 2>&1; then check_cmd="ss -ulnt"
+    elif command -v netstat >/dev/null 2>&1; then check_cmd="netstat -ulnt"
+    else check_cmd=""; fi
+
     while :; do
         read -r -p "请输入端口 [1025-65535] (回车随机生成): " input >&2
         
-        # 1. 判定输入
+        # 1. 确定初始候选端口
         if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1025 ] && [ "$input" -le 65535 ]; then
             p="$input"
         else
-            # 使用 awk 生成随机数，确保在没有 shuf 的小鸡上也兼容
-            p=$(awk -v min=1025 -v max=65000 'BEGIN{srand(); print int(min+rand()*(max-min+1))}')
+            # 兼容性随机生成逻辑
+            if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
+            else p=$((1025 + RANDOM % 64511)); fi
         fi
 
-        # 2. 占用检测 (set +e 环境下 grep -q 是安全的)
-        is_busy=0
-        if command -v ss >/dev/null 2>&1; then
-            ss -ulnt | grep -qE ":$p[[:space:]]" && is_busy=1 || true
-        elif command -v netstat >/dev/null 2>&1; then
-            netstat -ulnt | grep -qE ":$p[[:space:]]" && is_busy=1 || true
+        # 2. 冲突校验：如果 check_cmd 为空则跳过，否则检测是否占用
+        local is_busy=0
+        if [ -n "$check_cmd" ]; then
+            # 关键点：使用 || true 防止 grep 没搜到结果时导致整个脚本退出
+            if $check_cmd | grep -qE ":${p}[[:space:]]" >/dev/null 2>&1; then
+                is_busy=1
+            fi || true
         fi
 
-        # 3. 冲突逻辑处理
+        # 3. 结果判定
         if [ "$is_busy" -eq 1 ]; then
-            if [ "$p" == "$input" ]; then
-                echo -e "\033[1;31m[占用]\033[0m 端口 $p 已被占用，尝试随机生成..." >&2
-                input="" # 重置输入，强制下一次循环进入随机逻辑
-            fi
-            # 继续循环重新生成
+            echo -e "\033[1;33m[冲突]\033[0m 端口 $p 已被占用，请重新输入或直接回车随机分配" >&2
+            input="" # 强制进入下一次尝试
+            continue
         else
-            # 成功找到可用端口
+            # 确定可用，输出结果供捕获
             if [ -z "$input" ]; then
-                echo -e "\033[1;32m[INFO]\033[0m 已随机分配可用端口: $p" >&2
+                echo -e "\033[1;32m[INFO]\033[0m 已自动分配可用端口: $p" >&2
             else
                 echo -e "\033[1;32m[OK]\033[0m 端口 $p 校验通过" >&2
             fi
-            
-            # 只有这一行是发送给 stdout 的，它会被赋值给 USER_PORT
             echo "$p"
-            break
+            return 0
         fi
     done
 }
