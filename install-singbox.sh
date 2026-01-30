@@ -164,14 +164,17 @@ generate_cert() {
 
 # 防火墙放行端口
 apply_firewall() {
-    local port="${1:-$USER_PORT}"
+    local port="${1:-$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)}"
+    [ -z "$port" ] && return
     info "防火墙操作：尝试放行 UDP 端口 $port ..."
     if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
     elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
     else
-        iptables -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
-        ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
-        command -v iptables-legacy >/dev/null 2>&1 && iptables-legacy -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
+        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
+        ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
+        ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
+        command -v iptables-legacy >/dev/null 2>&1 && iptables-legacy -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
     fi
 }
 
