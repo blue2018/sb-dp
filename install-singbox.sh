@@ -683,7 +683,7 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local port="${USER_PORT}"
+    local port="${1:-}"
 	local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
@@ -691,23 +691,20 @@ create_config() {
 	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
 	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # 1. 端口防御性校验：如果为空则报错
-    [ -z "$port" ] && { err "端口变量为空，配置生成失败"; exit 1; }
-    
-    # 2. PSK (密码) 确定逻辑
+    # 1. PSK (密码) 确定逻辑
     local PSK
     if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
     elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
 
-    # 3. Salamander 混淆密码确定逻辑
+    # 2. Salamander 混淆密码确定逻辑
     local SALA_PASS=""
     if [ -f /etc/sing-box/config.json ]; then
         SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 4. 写入 Sing-box 配置文件
+    # 3. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -1067,7 +1064,7 @@ prompt_for_port
 optimize_system
 install_singbox "install"
 generate_cert
-create_config
+create_config "$USER_PORT"
 create_sb_tool
 setup_service
 get_env_data
