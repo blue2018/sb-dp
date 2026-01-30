@@ -110,23 +110,17 @@ prompt_for_port() {
     while :; do
         read -r -p "请输入端口 [1025-65535] (回车随机): " input_p
         p=${input_p:-$(shuf -i 1025-65000 -n 1)}
-        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
-            while :; do
-                local occupied=false
-                if command -v ss >/dev/null 2>&1; then
-                    ss -tuln | grep -q ":$p " && occupied=true
-                else
-                    nc -z -w1 127.0.0.1 "$p" >/dev/null 2>&1 && occupied=true
-                fi
-
-                if [ "$occupied" = false ]; then
-                    [ -n "$input_p" ] && [ "$p" != "$input_p" ] && echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已更换"
-                    USER_PORT="$p"; echo -e "\033[1;32m[OK]\033[0m 使用端口: $USER_PORT"; return 0
-                fi
-                ((p++)); [ "$p" -gt 65535 ] && p=1025
-            done
-        else echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字"
-        fi
+        [[ ! "$p" =~ ^[0-9]+$ || "$p" -lt 1025 || "$p" -gt 65535 ]] && { echo -e "\033[1;31m[错误]\033[0m 格式无效"; continue; }
+        while :; do
+            # 简洁高效：一次性检测 TCP/UDP，匹配端口边界
+            if { command -v ss >/dev/null && ss -tuln | grep -q ":$p "; } || \
+               { command -v netstat >/dev/null && netstat -tuln | grep -q ":$p "; } || \
+               { nc -z -w1 127.0.0.1 "$p" 2>/dev/null || nc -zu -w1 127.0.0.1 "$p" 2>/dev/null; }; then
+                ((p++)); [ "$p" -gt 65535 ] && p=1025; input_p=""; continue
+            fi
+            [ -n "$input_p" ] && [ "$p" != "$input_p" ] && echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已更换"
+            USER_PORT="$p"; echo -e "\033[1;32m[OK]\033[0m 使用端口: $USER_PORT"; return 0
+        done
     done
 }
 
