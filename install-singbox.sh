@@ -106,39 +106,39 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p input check_cmd is_busy
-    # 局部隔离：防止检测命令的失败导致主进程退出
-    set +e 
-    
+    local p input check_cmd
+    # 1. 探测工具 (仅赋值，不执行，绝不报错)
     if command -v ss >/dev/null 2>&1; then check_cmd="ss -ulnt"
     elif command -v netstat >/dev/null 2>&1; then check_cmd="netstat -ulnt"
     else check_cmd=""; fi
 
     while :; do
+        # 提示语重定向到 stderr (>&2)，这是捕获模式必须的
         read -r -p "请输入端口 [1025-65535] (回车随机生成): " input >&2
         
         if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1025 ] && [ "$input" -le 65535 ]; then
             p="$input"
         else
-            # 简洁兼容的随机数
+            # 原始代码的随机逻辑
             p=$((1025 + RANDOM % 64511))
         fi
 
-        is_busy=0
+        # 2. 关键：用 if 包裹检测，这在 shell 中是绝对安全的，不会触发 set -e
+        local is_busy=0
         if [ -n "$check_cmd" ]; then
-            # 加上 || true 彻底切断错误向上传递
-            $check_cmd | grep -qE ":${p}[[:space:]]" && is_busy=1 || true
+            # 如果能搜到，说明占用
+            if $check_cmd 2>/dev/null | grep -qE ":${p}[[:space:]]"; then
+                is_busy=1
+            fi
         fi
 
         if [ "$is_busy" -eq 1 ]; then
-            echo -e "\033[1;31m[占用]\033[0m 端口 $p 被占用，请重选" >&2
-            input=""
+            echo -e "\033[1;31m[占用]\033[0m 端口 $p 已被占用，正在重选..." >&2
+            input="" # 强制下次进入随机
         else
-            [ -z "$input" ] && echo -e "\033[1;32m[INFO]\033[0m 自动分配端口: $p" >&2
-            # 恢复 set -e
-            set -e
-            # 强制清洗端口号，确保没有任何不可见字符干扰后续安装
-            echo "$p" | tr -d '\r\n '
+            # 3. 成功后直接 echo 并 return，这是原始代码跑通的核心
+            [ -z "$input" ] && echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $p" >&2
+            echo "$p"
             return 0
         fi
     done
