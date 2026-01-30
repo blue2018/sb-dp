@@ -62,9 +62,11 @@ install_dependencies() {
     elif command -v apt-get >/dev/null 2>&1; then PM="apt" && DEPS="$DEPS netcat-openbsd procps kmod util-linux"
     elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then PM="yum" && DEPS="$DEPS nc procps-ng util-linux"
     else err "未检测到支持的包管理器 (apk/apt-get/yum)，请手动安装依赖"; exit 1; fi
-
-    for cmd in grep tar coreutils; do
-        if ! command -v "$cmd" >/dev/null 2>&1; then DEPS="$DEPS $cmd"; fi
+	
+    for cmd in grep tar stat; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            [ "$cmd" = "stat" ] && DEPS="$DEPS coreutils" || DEPS="$DEPS $cmd"
+        fi
     done
     case "$PM" in
         apk) info "检测到 Alpine 系统，正在同步仓库并安装依赖..."
