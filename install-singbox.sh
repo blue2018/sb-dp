@@ -100,21 +100,21 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p input_p
+    local p hex_port input_p
     while :; do
         read -r -p "请输入端口 [1025-65535] (回车随机): " input_p
         p=${input_p:-$(shuf -i 1025-65000 -n 1)}
-        [[ ! "$p" =~ ^[0-9]+$ || "$p" -lt 1025 || "$p" -gt 65535 ]] && { echo -e "\033[1;31m[错误]\033[0m 格式无效"; continue; }
-        while :; do
-            # 简洁高效：一次性检测 TCP/UDP，匹配端口边界
-            if { command -v ss >/dev/null && ss -tuln | grep -q ":$p "; } || \
-               { command -v netstat >/dev/null && netstat -tuln | grep -q ":$p "; } || \
-               { nc -z -w1 127.0.0.1 "$p" 2>/dev/null || nc -zu -w1 127.0.0.1 "$p" 2>/dev/null; }; then
-                ((p++)); [ "$p" -gt 65535 ] && p=1025; input_p=""; continue
-            fi
-            [ -n "$input_p" ] && [ "$p" != "$input_p" ] && echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已更换"
-            USER_PORT="$p"; echo -e "\033[1;32m[OK]\033[0m 使用端口: $USER_PORT"; return 0
-        done
+        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
+            while :; do
+                hex_port=$(printf ':%04X ' "$p")
+                if ! grep -q "$hex_port" /proc/net/tcp* /proc/net/udp* 2>/dev/null; then
+                    [ -n "$input_p" ] && [ "$p" != "$input_p" ] && echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已自动更换"
+                    USER_PORT="$p"; echo -e "\033[1;32m[OK]\033[0m 使用端口: $USER_PORT"; return 0
+                fi
+                ((p++)); [ "$p" -gt 65535 ] && p=1025
+            done
+        else echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字"
+        fi
     done
 }
 
@@ -141,22 +141,6 @@ generate_cert() {
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
         chmod 600 "$CERT_DIR"/*.pem; succ "ECC 证书就绪"
     } || { err "证书生成失败"; exit 1; }
-}
-
-# 防火墙放行端口
-apply_firewall() {
-    local port="${1:-$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)}"
-    [ -z "$port" ] && return
-    info "防火墙操作：尝试放行 UDP 端口 $port ..."
-    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
-    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
-    else
-        iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
-        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
-        ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
-        ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
-        command -v iptables-legacy >/dev/null 2>&1 && iptables-legacy -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
-    fi
 }
 
 #获取公网IP
@@ -516,7 +500,7 @@ optimize_system() {
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf" "$real_c" "$mem_total"
     apply_nic_core_boost "$real_c" "$net_bgt" "$net_usc"
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW} Mbps"
-    info "网络蓄水池(dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
+    info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
 	
     # 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
     local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
@@ -680,7 +664,7 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local port="${1:-}"
+    local port="${USER_PORT}"
 	local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
@@ -688,20 +672,23 @@ create_config() {
 	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
 	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # 1. PSK (密码) 确定逻辑
+    # 1. 端口防御性校验：如果为空则报错
+    [ -z "$port" ] && { err "端口变量为空，配置生成失败"; exit 1; }
+    
+    # 2. PSK (密码) 确定逻辑
     local PSK
     if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
     elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
 
-    # 2. Salamander 混淆密码确定逻辑
+    # 3. Salamander 混淆密码确定逻辑
     local SALA_PASS=""
     if [ -f /etc/sing-box/config.json ]; then
         SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 3. 写入 Sing-box 配置文件
+    # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -740,7 +727,7 @@ setup_service() {
     [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
     [ "$mem_total" -lt 200 ] && io_prio=7 # 极低内存下进一步降低 IO 优先级，防止死锁
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
-    info "正在写入服务配置并启动，请稍后..."
+    info "正在写入服务配置..."
 
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
@@ -844,11 +831,10 @@ get_env_data() {
 }
 
 display_links() {
-    [ -n "${RAW_PORT:-}" ] && USER_PORT="$RAW_PORT"
     local LINK_V4="" LINK_V6="" FULL_CLIP="" M=""
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
-    [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
-    [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
+    [ -n "$RAW_FP" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
+    [ -n "$RAW_SALA" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${USER_PORT}\033[0m"
 
     for s in 4 6; do
@@ -857,13 +843,13 @@ display_links() {
         if nc -zu -w1 "$ip" "$USER_PORT" >/dev/null 2>&1; then
             M="\033[1;32m已连通\033[0m"
         else
-            M="\033[1;33m本地连接受阻\033[0m"
+            M="\033[1;33m未放行\033[0m"
         fi
         if [ "$s" == "4" ]; then
             LINK_V4="hy2://$RAW_PSK@$ip:$USER_PORT/?${BASE_PARAM}#$(hostname)_v4"
             echo -e "\n\033[1;35m[IPv4 链接]\033[0m ($M)\n$LINK_V4"; FULL_CLIP="$LINK_V4"
         else
-            LINK_V6="hy2://$RAW_PSK@[$ip]:$USER_PORT/?${BASE_PARAM}#$(hostname)_v6"  
+            LINK_V6="hy2://$RAW_PSK@[$ip]:$USER_PORT/?${BASE_PARAM}#$(hostname)_v6"
             echo -e "\033[1;36m[IPv6 链接]\033[0m ($M)\n$LINK_V6"; FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"  
         fi
     done
@@ -912,6 +898,7 @@ OS='$OS'
 SBOX_ARCH='$SBOX_ARCH'
 CPU_CORE='$CPU_CORE'
 SBOX_CORE='$SBOX_CORE'
+USER_PORT='USER_PORT'
 VAR_HY2_BW='${VAR_HY2_BW:-200}'
 SBOX_GOLIMIT='$SBOX_GOLIMIT'
 SBOX_GOGC='${SBOX_GOGC:-100}'
@@ -930,11 +917,10 @@ RAW_IP6='${RAW_IP6:-}'
 IS_V6_OK='${IS_V6_OK:-false}'
 REAL_RTT_FACTORS='$REAL_RTT_FACTORS'
 LOSS_COMPENSATION='$LOSS_COMPENSATION'
-USER_PORT='$USER_PORT'
 EOF
 
     # 导出函数
-    local funcs=(apply_firewall probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
+    local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
 create_config setup_service install_singbox info err warn succ optimize_system \
 apply_userspace_adaptive_profile apply_nic_core_boost \
@@ -946,24 +932,39 @@ setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp 
 
     cat >> "$CORE_TMP" <<'EOF'
 detect_os; set +e
+
+# 自动从配置提取端口并放行
+apply_firewall() {
+    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+    [ -z "$port" ] && return
+    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
+    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
+    elif command -v iptables >/dev/null 2>&1; then
+        iptables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+        command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
+    fi
+}
+
 if [[ "${1:-}" == "--detect-only" ]]; then :
 elif [[ "${1:-}" == "--show-only" ]]; then
     get_env_data; echo -e "\n\033[1;34m==========================================\033[0m"
     display_system_status; display_links
 elif [[ "${1:-}" == "--reset-port" ]]; then
-    USER_PORT="${2:-$USER_PORT}"; optimize_system; create_config "$USER_PORT"; apply_firewall "$USER_PORT"; setup_service
-    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
+    optimize_system; create_config "$2"; apply_firewall; setup_service
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
     get_env_data; display_links
 elif [[ "${1:-}" == "--update-kernel" ]]; then
     if install_singbox "update"; then
-        local p=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-        optimize_system; setup_service; [ -n "$p" ] && apply_firewall "$p"
-        systemctl daemon-reload >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
-        succ "内核已更新并同步规则"
+        optimize_system; setup_service; apply_firewall
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
+        succ "内核已更新并应用防火墙规则"
     fi
 elif [[ "${1:-}" == "--apply-cwnd" ]]; then
-    local p=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    apply_userspace_adaptive_profile >/dev/null 2>&1 || true; apply_initcwnd_optimization "true" || true; [ -n "$p" ] && apply_firewall "$p"
+    apply_userspace_adaptive_profile >/dev/null 2>&1 || true
+    apply_initcwnd_optimization "true" || true; apply_firewall
 fi
 EOF
 
@@ -1004,11 +1005,10 @@ while true; do
         1) source "\$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
         2) f="/etc/sing-box/config.json"; old=\$(md5sum \$f 2>/dev/null)
            vi \$f; if [ "\$old" != "\$(md5sum \$f 2>/dev/null)" ]; then
-		       source "\$SBOX_CORE" --apply-cwnd
                service_ctrl restart && succ "配置已更新，网络画像与防火墙已同步刷新"
            else info "配置未作变更"; fi
            read -r -p $'\n按回车键返回菜单...' ;;
-        3) prompt_for_port; source "\$SBOX_CORE" --reset-port "\$USER_PORT"; read -r -p $'\n按回车键返回菜单...' ;;
+        3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
         6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
@@ -1048,10 +1048,9 @@ prompt_for_port
 optimize_system
 install_singbox "install"
 generate_cert
-create_config "$USER_PORT"
+create_config
 create_sb_tool
 setup_service
-apply_firewall "$USER_PORT"
 get_env_data
 echo -e "\n\033[1;34m==========================================\033[0m"
 display_system_status
