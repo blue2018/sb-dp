@@ -1068,9 +1068,9 @@ optimize_system
 install_singbox "install"
 generate_cert
 create_config "$USER_PORT"
-apply_firewall "$USER_PORT"
 create_sb_tool
 setup_service
+apply_firewall "$USER_PORT"
 get_env_data
 echo -e "\n\033[1;34m==========================================\033[0m"
 display_system_status
