@@ -57,28 +57,37 @@ detect_os() {
 # 依赖安装 (容错增强版)
 install_dependencies() {
     info "正在检查系统类型..."
-    local PM=""; local DEPS="curl jq openssl ca-certificates iproute2 ethtool iptables bash"
+    local PM=""; local FINAL_DEPS=""; local DEPS="curl jq openssl ca-certificates iproute2 ethtool iptables bash"
     if command -v apk >/dev/null 2>&1; then PM="apk" && DEPS="$DEPS netcat-openbsd procps util-linux"
     elif command -v apt-get >/dev/null 2>&1; then PM="apt" && DEPS="$DEPS netcat-openbsd procps kmod util-linux"
     elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then PM="yum" && DEPS="$DEPS nc procps-ng util-linux"
     else err "未检测到支持的包管理器 (apk/apt-get/yum)，请手动安装依赖"; exit 1; fi
-	
     for cmd in grep tar stat; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             [ "$cmd" = "stat" ] && DEPS="$DEPS coreutils" || DEPS="$DEPS $cmd"
         fi
     done
-    case "$PM" in
-        apk) info "检测到 Alpine 系统，正在同步仓库并安装依赖..."
-             apk update >/dev/null 2>&1 || true
-             apk add --no-cache $DEPS || { err "apk 安装依赖失败"; exit 1; } ;;
-        apt) info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..."
-             export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1 || true
-             apt-get install -y --no-install-recommends $DEPS || { err "apt 安装依赖失败"; exit 1; } ;;
-        yum) info "检测到 RHEL/CentOS 系统，正在安装依赖..."
-             local M=$(command -v dnf || echo "yum")
-             $M install -y $DEPS || { err "$M 安装依赖失败"; exit 1; } ;;
-    esac
+    for pkg in $DEPS; do
+        local check_cmd="${pkg%%-*}"
+        [ "$check_cmd" = "util" ] && check_cmd="taskset"
+        [ "$check_cmd" = "procps" ] && check_cmd="free"
+        if ! command -v "$check_cmd" >/dev/null 2>&1; then
+            FINAL_DEPS="$FINAL_DEPS $pkg"
+        fi
+    done
+    if [ -n "$(echo "$FINAL_DEPS" | tr -d ' ')" ]; then
+        case "$PM" in
+            apk) info "检测到 Alpine 系统，正在同步仓库并安装依赖..."
+                 apk update >/dev/null 2>&1 || true
+                 apk add --no-cache $FINAL_DEPS || { err "apk 安装依赖失败"; exit 1; } ;;
+            apt) info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..."
+                 export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1 || true
+                 apt-get install -y --no-install-recommends $FINAL_DEPS || { err "apt 安装依赖失败"; exit 1; } ;;
+            yum) info "检测到 RHEL/CentOS 系统，正在安装依赖..."
+                 local M=$(command -v dnf || echo "yum")
+                 $M install -y $FINAL_DEPS || { err "$M 安装依赖失败"; exit 1; } ;;
+        esac
+    fi
     # 针对小鸡常见的 CA 证书缺失问题进行强制刷新
     [ -f /etc/ssl/certs/ca-certificates.crt ] || update-ca-certificates 2>/dev/null || true
     for cmd in jq curl tar nc bash; do 
