@@ -75,7 +75,7 @@ install_dependencies() {
              $M install -y $DEPS || { err "$M 安装依赖失败"; exit 1; } ;;
     esac
 
-    # [优化] 针对小鸡常见的 CA 证书缺失问题进行强制刷新
+    # 针对小鸡常见的 CA 证书缺失问题进行强制刷新
     [ -f /etc/ssl/certs/ca-certificates.crt ] || update-ca-certificates 2>/dev/null || true
     for cmd in jq curl tar nc; do 
         command -v "$cmd" >/dev/null 2>&1 || { err "核心依赖 $cmd 安装失败，请检查网络或源"; exit 1; }
@@ -727,7 +727,7 @@ setup_service() {
     [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
     [ "$mem_total" -lt 200 ] && io_prio=7 # 极低内存下进一步降低 IO 优先级，防止死锁
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
-    info "正在写入服务配置..."
+    info "正在写入服务配置，请稍后..."
 
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
@@ -761,7 +761,6 @@ EOF
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
-
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
@@ -793,7 +792,6 @@ TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF
-
         systemctl daemon-reload >/dev/null 2>&1; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box --no-block >/dev/null 2>&1 || true
     fi
     local pid=""; info "服务状态校验中..."
@@ -1031,7 +1029,6 @@ while true; do
     esac
 done
 EOF
-
 	chmod +x "$SB_PATH"
     ln -sf "$SB_PATH" "/usr/local/bin/SB" 2>/dev/null || true
 }
