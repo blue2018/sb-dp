@@ -105,22 +105,46 @@ get_cpu_core() {
 }
 
 # 获取并校验端口 (范围：1025-65535)
+# 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
     local p input_p
     while :; do
         read -r -p "请输入端口 [1025-65535] (回车随机): " input_p
         p=${input_p:-$(shuf -i 1025-65000 -n 1)}
         [[ ! "$p" =~ ^[0-9]+$ || "$p" -lt 1025 || "$p" -gt 65535 ]] && { echo -e "\033[1;31m[错误]\033[0m 格式无效"; continue; }
-        while :; do
-            # 简洁高效：一次性检测 TCP/UDP，匹配端口边界
-            if { command -v ss >/dev/null && ss -tuln | grep -q ":$p "; } || \
-               { command -v netstat >/dev/null && netstat -tuln | grep -q ":$p "; } || \
-               { nc -z -w1 127.0.0.1 "$p" 2>/dev/null || nc -zu -w1 127.0.0.1 "$p" 2>/dev/null; }; then
-                ((p++)); [ "$p" -gt 65535 ] && p=1025; input_p=""; continue
-            fi
-            [ -n "$input_p" ] && [ "$p" != "$input_p" ] && echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已更换"
-            USER_PORT="$p"; echo -e "\033[1;32m[OK]\033[0m 使用端口: $USER_PORT"; return 0
-        done
+        
+        # 端口占用检测（容错增强版）
+        local port_free=true original_p="$p"
+        if command -v ss >/dev/null 2>&1; then
+            ss -tuln 2>/dev/null | awk '{print $5}' | grep -q ":$p$" && port_free=false
+        elif command -v netstat >/dev/null 2>&1; then
+            netstat -tuln 2>/dev/null | awk '{print $4}' | grep -q ":$p$" && port_free=false
+        fi
+        
+        # nc 探测作为补充（带超时保护）
+        if [ "$port_free" = true ]; then
+            timeout 1 bash -c "nc -z -w1 127.0.0.1 $p 2>/dev/null" && port_free=false
+            timeout 1 bash -c "nc -zu -w1 127.0.0.1 $p 2>/dev/null" && port_free=false
+        fi
+        
+        # 端口被占用时自动递增
+        if [ "$port_free" = false ]; then
+            [ -n "$input_p" ] && echo -e "\033[1;33m[WARN]\033[0m 端口 $p 被占用，自动递增..."
+            while [ "$p" -le 65535 ]; do
+                ((p++))
+                if command -v ss >/dev/null 2>&1; then
+                    ss -tuln 2>/dev/null | awk '{print $5}' | grep -q ":$p$" || { port_free=true; break; }
+                elif command -v netstat >/dev/null 2>&1; then
+                    netstat -tuln 2>/dev/null | awk '{print $4}' | grep -q ":$p$" || { port_free=true; break; }
+                else
+                    port_free=true; break
+                fi
+            done
+            [ "$p" -gt 65535 ] && p=1025
+        fi
+        
+        [ -n "$input_p" ] && [ "$p" != "$original_p" ] && echo -e "\033[1;33m[INFO]\033[0m 已更换至可用端口"
+        USER_PORT="$p"; echo -e "\033[1;32m[OK]\033[0m 使用端口: $USER_PORT"; return 0
     done
 }
 
