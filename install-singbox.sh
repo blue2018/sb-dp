@@ -105,18 +105,51 @@ get_cpu_core() {
 }
 
 # 获取并校验端口 (范围：1025-65535)
+# 获取并校验端口 (集成了输入、校验、防冲突自动重置逻辑)
 prompt_for_port() {
-    local p rand
+    local input p check_cmd
+    read -r -p "请输入端口 [1025-65535] (回车随机生成): " input
+
+    # 1. 预处理输入：如果是有效数字则采纳，否则留空待处理
+    if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1025 ] && [ "$input" -le 65535 ]; then
+        p="$input"
+    else
+        p="" 
+    fi
+
+    # 2. 确定检测命令 (优先 ss，备用 netstat，都没有则略过检测)
+    if command -v ss >/dev/null 2>&1; then check_cmd="ss -uln"
+    elif command -v netstat >/dev/null 2>&1; then check_cmd="netstat -uln"
+    else check_cmd="true"; fi
+
+    # 3. 闭环检测与自动生成 (核心逻辑)
     while :; do
-        read -r -p "请输入端口 [1025-65535] (回车随机生成): " p
+        # 如果 p 为空 (无效输入) 或已被标记为占用，则生成随机端口
         if [ -z "$p" ]; then
             if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
-            elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' '); p=$((1025 + rand % 64511))
             else p=$((1025 + RANDOM % 64511)); fi
-            echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $p" >&2; echo "$p"; return 0
         fi
-        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then echo "$p"; return 0
-        else echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字或直接回车" >&2; fi
+
+        # 执行占用检测 (使用 grep -q 且 || true 防止 set -e 退出)
+        local is_busy=0
+        if [ "$check_cmd" != "true" ]; then
+             # 匹配 :端口号 后跟空格或行尾，防止 80 匹配到 8080
+            $check_cmd | grep -qE ":$p[[:space:]]|$" && is_busy=1 || true
+        fi
+
+        if [ "$is_busy" -eq 1 ]; then
+            # 如果端口被占用
+            if [ "$p" == "$input" ]; then
+                echo -e "\033[1;33m[占用]\033[0m 端口 $p 被系统占用，正在自动分配新端口..." >&2
+            fi
+            p="" # 清空 p，触发下一次循环的随机生成
+        else
+            # 端口可用，跳出循环
+            [ "$p" != "$input" ] && [ -n "$input" ] && echo -e "\033[1;32m[INFO]\033[0m 已自动切换至可用端口: $p" >&2
+            [ -z "$input" ] && echo -e "\033[1;32m[INFO]\033[0m 已随机分配端口: $p" >&2
+            echo "$p"
+            return 0
+        fi
     done
 }
 
@@ -673,12 +706,6 @@ create_config() {
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
 	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
 	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
-    
-    # 1. 端口确定逻辑
-    if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
-        else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
-    fi
     
     # 2. PSK (密码) 确定逻辑
     local PSK
