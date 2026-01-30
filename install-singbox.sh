@@ -915,7 +915,6 @@ OS='$OS'
 SBOX_ARCH='$SBOX_ARCH'
 CPU_CORE='$CPU_CORE'
 SBOX_CORE='$SBOX_CORE'
-USER_PORT='$USER_PORT'
 VAR_HY2_BW='${VAR_HY2_BW:-200}'
 SBOX_GOLIMIT='$SBOX_GOLIMIT'
 SBOX_GOGC='${SBOX_GOGC:-100}'
@@ -934,6 +933,7 @@ RAW_IP6='${RAW_IP6:-}'
 IS_V6_OK='${IS_V6_OK:-false}'
 REAL_RTT_FACTORS='$REAL_RTT_FACTORS'
 LOSS_COMPENSATION='$LOSS_COMPENSATION'
+USER_PORT=\$(jq -r '.inbounds[0].listen_port // "$USER_PORT"' /etc/sing-box/config.json 2>/dev/null)
 EOF
 
     # 导出函数
@@ -1022,6 +1022,7 @@ while true; do
         1) source "\$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
         2) f="/etc/sing-box/config.json"; old=\$(md5sum \$f 2>/dev/null)
            vi \$f; if [ "\$old" != "\$(md5sum \$f 2>/dev/null)" ]; then
+		       source "\$SBOX_CORE" --apply-cwnd
                service_ctrl restart && succ "配置已更新，网络画像与防火墙已同步刷新"
            else info "配置未作变更"; fi
            read -r -p $'\n按回车键返回菜单...' ;;
