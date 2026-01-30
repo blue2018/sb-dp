@@ -519,7 +519,7 @@ optimize_system() {
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf" "$real_c" "$mem_total"
     apply_nic_core_boost "$real_c" "$net_bgt" "$net_usc"
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW} Mbps"
-    info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
+    info "网络蓄水池(dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
 	
     # 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
     local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
