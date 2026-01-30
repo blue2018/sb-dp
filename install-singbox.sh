@@ -100,32 +100,19 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p hex_port
+    local p hex_port input_p
     while :; do
-        read -r -p "请输入端口 [1025-65535] (回车随机): " p
-        if [ -z "$p" ]; then
-            p=$(shuf -i 1025-65000 -n 1)
+        read -r -p "请输入端口 [1025-65535] (回车随机): " input_p
+        p=${input_p:-$(shuf -i 1025-65000 -n 1)}
+        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
             while :; do
                 hex_port=$(printf ':%04X ' "$p")
                 if ! grep -q "$hex_port" /proc/net/tcp* /proc/net/udp* 2>/dev/null; then
-                    USER_PORT="$p"; echo -e "\033[1;32m[INFO]\033[0m 自动分配空闲端口: $USER_PORT"; return 0
+                    [ -n "$input_p" ] && [ "$p" != "$input_p" ] && echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已自动更换"
+                    USER_PORT="$p"; echo -e "\033[1;32m[OK]\033[0m 使用端口: $USER_PORT"; return 0
                 fi
                 ((p++)); [ "$p" -gt 65535 ] && p=1025
             done
-        fi
-        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
-            hex_port=$(printf ':%04X ' "$p")
-            if ! grep -q "$hex_port" /proc/net/tcp* /proc/net/udp* 2>/dev/null; then
-                USER_PORT="$p"; return 0
-            else
-                warn "端口 $p 已被占用，正在搜索临近可用端口..."
-                while :; do
-                    ((p++)); [ "$p" -gt 65535 ] && p=1025; hex_port=$(printf ':%04X ' "$p")
-                    if ! grep -q "$hex_port" /proc/net/tcp* /proc/net/udp* 2>/dev/null; then
-                        USER_PORT="$p"; succ "已更换为可用端口: $USER_PORT"; return 0
-                    fi
-                done
-            fi
         else echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字"
         fi
     done
