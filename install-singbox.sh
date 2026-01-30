@@ -957,7 +957,7 @@ USER_PORT=\$(jq -r '.inbounds[0].listen_port // "$USER_PORT"' /etc/sing-box/conf
 EOF
 
     # 导出函数
-    local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
+    local funcs=(apply_firewall probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
 create_config setup_service install_singbox info err warn succ optimize_system \
 apply_userspace_adaptive_profile apply_nic_core_boost \
@@ -974,20 +974,19 @@ elif [[ "${1:-}" == "--show-only" ]]; then
     get_env_data; echo -e "\n\033[1;34m==========================================\033[0m"
     display_system_status; display_links
 elif [[ "${1:-}" == "--reset-port" ]]; then
-    USER_PORT="${2:-$USER_PORT}"; optimize_system; create_config "$USER_PORT"; apply_firewall; setup_service
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
+    USER_PORT="${2:-$USER_PORT}"; optimize_system; create_config "$USER_PORT"; apply_firewall "$USER_PORT"; setup_service
+    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
     get_env_data; display_links
 elif [[ "${1:-}" == "--update-kernel" ]]; then
     if install_singbox "update"; then
-        optimize_system; setup_service; apply_firewall
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
-        succ "内核已更新并应用防火墙规则"
+        local p=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+        optimize_system; setup_service; [ -n "$p" ] && apply_firewall "$p"
+        systemctl daemon-reload >/dev/null 2>&1 || true; systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
+        succ "内核已更新并同步规则"
     fi
 elif [[ "${1:-}" == "--apply-cwnd" ]]; then
-    apply_userspace_adaptive_profile >/dev/null 2>&1 || true
-    apply_initcwnd_optimization "true" || true; apply_firewall
+    local p=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+    apply_userspace_adaptive_profile >/dev/null 2>&1 || true; apply_initcwnd_optimization "true" || true; [ -n "$p" ] && apply_firewall "$p"
 fi
 EOF
 
