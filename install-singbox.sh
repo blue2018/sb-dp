@@ -166,19 +166,12 @@ generate_cert() {
 apply_firewall() {
     local port="${1:-$USER_PORT}"
     info "防火墙操作：尝试放行 UDP 端口 $port ..."
-    if command -v ufw >/dev/null 2>&1; then 
-        ufw allow "$port"/udp >/dev/null 2>&1
-    elif command -v firewall-cmd >/dev/null 2>&1; then 
-        firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1
-        firewall-cmd --reload >/dev/null 2>&1
-    elif command -v iptables >/dev/null 2>&1; then
-        # 改动：增加显式的 -p udp 规则清理与插入
-        iptables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
-        iptables -I INPUT -p udp --dport "$port" -j ACCEPT
-        if command -v ip6tables >/dev/null 2>&1; then
-            ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
-            ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
-        fi
+    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
+    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
+    else
+        iptables -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
+        ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
+        command -v iptables-legacy >/dev/null 2>&1 && iptables-legacy -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
     fi
 }
 
