@@ -106,26 +106,64 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p input_p
-    while :; do
-        read -r -p "请输入端口 [1025-65535] (回车随机): " input_p
-        p=${input_p:-$(shuf -i 1025-65000 -n 1)}
-        if [ "$p" -eq "$p" ] 2>/dev/null && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
-            while :; do
-                local hex_p=$(printf '%04X' "$p")
-                if grep -q "[: ]$hex_p " /proc/net/udp /proc/net/udp6 2>/dev/null; then
-                    [ -n "$input_p" ] && { echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已更换" >&2; input_p=""; }
-                    ((p++))
-                    [ "$p" -gt 65535 ] && p=1025
-                    continue
-                fi
-                echo -e "\033[1;32m[OK]\033[0m 使用端口: $p" >&2
-                echo "$p"
-                return 0
-            done
-        else 
-            echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字" >&2
+    local service_name=$1
+    local default_port=$2
+    local port_var_name="${service_name}_PORT"
+    
+    echo -e "${BLUE}==================== 端口配置 ====================${NC}"
+    echo -e "${YELLOW}正在为 ${service_name} 配置端口...${NC}"
+    
+    while true; do
+        echo -e "${GREEN}请输入 ${service_name} 的端口号 (默认: ${default_port}):${NC}"
+        read -r input_port
+        
+        # 如果用户直接回车，使用默认端口
+        if [[ -z "$input_port" ]]; then
+            input_port=$default_port
+            echo -e "${CYAN}使用默认端口: ${input_port}${NC}"
         fi
+        
+        # 验证端口号格式（1-65535）
+        if ! [[ "$input_port" =~ ^[0-9]+$ ]] || [ "$input_port" -lt 1 ] || [ "$input_port" -gt 65535 ]; then
+            echo -e "${RED}错误: 端口号必须是 1-65535 之间的数字${NC}"
+            continue
+        fi
+        
+        # 检查端口是否已被占用（兼容各种环境）
+        local port_in_use=false
+        
+        # 方法1: 使用 ss 命令（推荐，适用于大多数现代系统）
+        if command -v ss &> /dev/null; then
+            if ss -tuln | grep -q ":${input_port} "; then
+                port_in_use=true
+            fi
+        # 方法2: 使用 netstat 命令（备用方案）
+        elif command -v netstat &> /dev/null; then
+            if netstat -tuln 2>/dev/null | grep -q ":${input_port} "; then
+                port_in_use=true
+            fi
+        # 方法3: 使用 lsof 命令（另一个备用方案）
+        elif command -v lsof &> /dev/null; then
+            if lsof -i ":${input_port}" -sTCP:LISTEN -t &> /dev/null; then
+                port_in_use=true
+            fi
+        # 方法4: 尝试绑定端口测试（最后的兼容方案）
+        else
+            if timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/${input_port}" 2>/dev/null; then
+                port_in_use=true
+            fi
+        fi
+        
+        if [ "$port_in_use" = true ]; then
+            echo -e "${RED}错误: 端口 ${input_port} 已被占用，请选择其他端口${NC}"
+            continue
+        fi
+        
+        # 端口可用，保存并退出循环
+        eval "${port_var_name}=${input_port}"
+        echo -e "${GREEN}✓ ${service_name} 端口设置为: ${input_port}${NC}"
+        echo -e "${BLUE}=================================================${NC}"
+        return 0
     done
 }
 
