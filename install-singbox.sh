@@ -866,8 +866,8 @@ display_links() {
     [ -n "${RAW_PORT:-}" ] && USER_PORT="$RAW_PORT"
     local LINK_V4="" LINK_V6="" FULL_CLIP="" M=""
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
-    [ -n "$RAW_FP" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
-	[ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
+    [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
+    [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${USER_PORT}\033[0m"
 
     for s in 4 6; do
