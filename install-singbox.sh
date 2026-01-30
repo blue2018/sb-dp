@@ -162,6 +162,26 @@ generate_cert() {
     } || { err "证书生成失败"; exit 1; }
 }
 
+# 防火墙放行端口
+apply_firewall() {
+    local port="${1:-$USER_PORT}"
+    info "防火墙操作：尝试放行 UDP 端口 $port ..."
+    if command -v ufw >/dev/null 2>&1; then 
+        ufw allow "$port"/udp >/dev/null 2>&1
+    elif command -v firewall-cmd >/dev/null 2>&1; then 
+        firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1
+        firewall-cmd --reload >/dev/null 2>&1
+    elif command -v iptables >/dev/null 2>&1; then
+        # 改动：增加显式的 -p udp 规则清理与插入
+        iptables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
+        iptables -I INPUT -p udp --dport "$port" -j ACCEPT
+        if command -v ip6tables >/dev/null 2>&1; then
+            ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
+            ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
+        fi
+    fi
+}
+
 #获取公网IP
 get_network_info() {
     info "获取网络信息..."
@@ -851,7 +871,7 @@ display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" M=""
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "$RAW_FP" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
-    [ -n "$RAW_SALA" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
+	[ -n "$RAW_SALA" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs_password=${RAW_SALA}"
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${USER_PORT}\033[0m"
 
     for s in 4 6; do
@@ -860,13 +880,13 @@ display_links() {
         if nc -zu -w1 "$ip" "$USER_PORT" >/dev/null 2>&1; then
             M="\033[1;32m已连通\033[0m"
         else
-            M="\033[1;33m未放行\033[0m"
+            M="\033[1;33m本地连接受阻\033[0m"
         fi
         if [ "$s" == "4" ]; then
             LINK_V4="hy2://$RAW_PSK@$ip:$USER_PORT/?${BASE_PARAM}#$(hostname)_v4"
             echo -e "\n\033[1;35m[IPv4 链接]\033[0m ($M)\n$LINK_V4"; FULL_CLIP="$LINK_V4"
         else
-            LINK_V6="hy2://$RAW_PSK@[$ip]:$USER_PORT/?${BASE_PARAM}#$(hostname)_v6"
+            LINK_V6="hy2://$RAW_PSK@[$ip]:$USER_PORT/?${BASE_PARAM}#$(hostname)_v6"  
             echo -e "\033[1;36m[IPv6 链接]\033[0m ($M)\n$LINK_V6"; FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"  
         fi
     done
@@ -949,20 +969,6 @@ setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp 
 
     cat >> "$CORE_TMP" <<'EOF'
 detect_os; set +e
-
-# 自动从配置提取端口并放行
-apply_firewall() {
-    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    [ -z "$port" ] && return
-    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
-    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
-    elif command -v iptables >/dev/null 2>&1; then
-        iptables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
-        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
-        command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
-    fi
-}
-
 if [[ "${1:-}" == "--detect-only" ]]; then :
 elif [[ "${1:-}" == "--show-only" ]]; then
     get_env_data; echo -e "\n\033[1;34m==========================================\033[0m"
@@ -1067,6 +1073,7 @@ optimize_system
 install_singbox "install"
 generate_cert
 create_config "$USER_PORT"
+apply_firewall "$USER_PORT"
 create_sb_tool
 setup_service
 get_env_data
