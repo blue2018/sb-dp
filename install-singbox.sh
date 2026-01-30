@@ -106,41 +106,17 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p input check_cmd
-    # 1. 探测工具 (仅赋值，不执行，绝不报错)
-    if command -v ss >/dev/null 2>&1; then check_cmd="ss -ulnt"
-    elif command -v netstat >/dev/null 2>&1; then check_cmd="netstat -ulnt"
-    else check_cmd=""; fi
-
+    local p rand
     while :; do
-        # 提示语重定向到 stderr (>&2)，这是捕获模式必须的
-        read -r -p "请输入端口 [1025-65535] (回车随机生成): " input >&2
-        
-        if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1025 ] && [ "$input" -le 65535 ]; then
-            p="$input"
-        else
-            # 原始代码的随机逻辑
-            p=$((1025 + RANDOM % 64511))
+        read -r -p "请输入端口 [1025-65535] (回车随机生成): " p
+        if [ -z "$p" ]; then
+            if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
+            elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' '); p=$((1025 + rand % 64511))
+            else p=$((1025 + RANDOM % 64511)); fi
+            echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $p" >&2; echo "$p"; return 0
         fi
-
-        # 2. 关键：用 if 包裹检测，这在 shell 中是绝对安全的，不会触发 set -e
-        local is_busy=0
-        if [ -n "$check_cmd" ]; then
-            # 如果能搜到，说明占用
-            if $check_cmd 2>/dev/null | grep -qE ":${p}[[:space:]]"; then
-                is_busy=1
-            fi
-        fi
-
-        if [ "$is_busy" -eq 1 ]; then
-            echo -e "\033[1;31m[占用]\033[0m 端口 $p 已被占用，正在重选..." >&2
-            input="" # 强制下次进入随机
-        else
-            # 3. 成功后直接 echo 并 return，这是原始代码跑通的核心
-            [ -z "$input" ] && echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $p" >&2
-            echo "$p"
-            return 0
-        fi
+        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then echo "$p"; return 0
+        else echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字或直接回车" >&2; fi
     done
 }
 
@@ -690,7 +666,7 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local PORT_HY2="${1:-}"
+    local port="${1:-}"
 	local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
@@ -720,7 +696,7 @@ create_config() {
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
-    "listen_port": $PORT_HY2,
+    "listen_port": $port,
     "users": [ { "password": "$PSK" } ],
     "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
