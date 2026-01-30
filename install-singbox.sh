@@ -936,7 +936,7 @@ RAW_IP6='${RAW_IP6:-}'
 IS_V6_OK='${IS_V6_OK:-false}'
 REAL_RTT_FACTORS='$REAL_RTT_FACTORS'
 LOSS_COMPENSATION='$LOSS_COMPENSATION'
-USER_PORT=\$(jq -r '.inbounds[0].listen_port // "$USER_PORT"' /etc/sing-box/config.json 2>/dev/null)
+USER_PORT='$USER_PORT'
 EOF
 
     # 导出函数
