@@ -100,21 +100,17 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p hex_port input_p
+    local p rand
     while :; do
-        read -r -p "请输入端口 [1025-65535] (回车随机): " input_p
-        p=${input_p:-$(shuf -i 1025-65000 -n 1)}
-        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
-            while :; do
-                hex_port=$(printf ':%04X ' "$p")
-                if ! grep -q "$hex_port" /proc/net/tcp* /proc/net/udp* 2>/dev/null; then
-                    [ -n "$input_p" ] && [ "$p" != "$input_p" ] && echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已自动更换"
-                    USER_PORT="$p"; echo -e "\033[1;32m[OK]\033[0m 使用端口: $USER_PORT"; return 0
-                fi
-                ((p++)); [ "$p" -gt 65535 ] && p=1025
-            done
-        else echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字"
+        read -r -p "请输入端口 [1025-65535] (回车随机生成): " p
+        if [ -z "$p" ]; then
+            if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
+            elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' '); p=$((1025 + rand % 64511))
+            else p=$((1025 + RANDOM % 64511)); fi
+            echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $p" >&2; echo "$p"; return 0
         fi
+        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then echo "$p"; return 0
+        else echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字或直接回车" >&2; fi
     done
 }
 
@@ -664,7 +660,7 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local port="${USER_PORT}"
+    local PORT_HY2="${1:-}"
 	local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
@@ -672,8 +668,11 @@ create_config() {
 	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
 	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # 1. 端口防御性校验：如果为空则报错
-    [ -z "$port" ] && { err "端口变量为空，配置生成失败"; exit 1; }
+    # 1. 端口确定逻辑
+    if [ -z "$PORT_HY2" ]; then
+        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
+        else PORT_HY2=$(shuf -i 1025-65535 -n 1); fi
+    fi
     
     # 2. PSK (密码) 确定逻辑
     local PSK
@@ -697,7 +696,7 @@ create_config() {
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
-    "listen_port": $port,
+    "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
     "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
@@ -718,7 +717,7 @@ EOF
 # 服务配置
 # ==========================================
 setup_service() {
-    local real_c="$CPU_CORE" core_range="" pid=""
+    local real_c="$CPU_CORE" core_range=""
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
     local cur_nice="${VAR_SYSTEMD_NICE:--5}"; local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"
@@ -727,7 +726,7 @@ setup_service() {
     [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
     [ "$mem_total" -lt 200 ] && io_prio=7 # 极低内存下进一步降低 IO 优先级，防止死锁
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
-    info "正在写入服务配置并启动，请稍后..."
+    info "正在写入服务配置..."
 
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
@@ -757,10 +756,10 @@ EOF
         rc-update add sing-box default >/dev/null 2>&1 || true; rc-service sing-box restart >/dev/null 2>&1 &
     else
         local mem_config=""; local cpu_quota=$((real_c * 100))
-		local io_config="IOSchedulingClass=$io_class"$'\n'"IOSchedulingPriority=$io_prio"
-        [ "$cpu_quota" -lt 100 ] && cpu_quota=100
-        [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
+        local io_config="-IOSchedulingClass=$io_class"$'\n'"-IOSchedulingPriority=$io_prio"
+        [ -n "$SBOX_MEM_HIGH" ] && mem_config+="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
+        [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
@@ -775,14 +774,14 @@ User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
-ExecStartPre=-/bin/bash -c '[ -f \$SBOX_CORE ] && /bin/bash \$SBOX_CORE --apply-cwnd'
+ExecStartPre=-/bin/bash -c '[ -f $SBOX_CORE ] && /bin/bash $SBOX_CORE --apply-cwnd'
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
-ExecStartPost=-/bin/bash -c '(sleep 3; /bin/bash \$SBOX_CORE --apply-cwnd) &'
+ExecStartPost=-/bin/bash -c '(sleep 3; /bin/bash $SBOX_CORE --apply-cwnd) &'
 Nice=$cur_nice
-$io_config
+\${io_config}
 LimitNOFILE=1000000
 LimitMEMLOCK=infinity
-${mem_config}CPUQuota=${cpu_quota}%
+\${mem_config}CPUQuota=\${cpu_quota}%
 OOMPolicy=continue
 OOMScoreAdjust=-500
 Restart=always
@@ -794,11 +793,10 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload >/dev/null 2>&1; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box --no-block >/dev/null 2>&1 || true
     fi
+    local pid=""; info "服务状态校验中..."
     for i in {1..30}; do
-        pid=$(pgrep -f "sing-box run" 2>/dev/null || \
-              pidof sing-box 2>/dev/null | awk '{print $1}' || \
-              ps -ef | grep "sing-box run" | grep -v grep | awk '{for(i=1;i<=2;i++) if($i ~ /^[0-9]+$/) {print $i; break}}')
-        if [[ "$pid" =~ ^[0-9]+$ ]] && [ -d "/proc/$pid" ]; then break; fi
+        pid=$(pidof sing-box | awk '{print $1}')
+        [ -n "$pid" ] && [ -e "/proc/$pid" ] && break
         sleep 0.3
     done
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
@@ -831,29 +829,24 @@ get_env_data() {
 }
 
 display_links() {
-    local LINK_V4="" LINK_V6="" FULL_CLIP="" M=""
+    local LINK_V4="" LINK_V6="" FULL_CLIP="" 
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
-    [ -n "$RAW_FP" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
-    [ -n "$RAW_SALA" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
-    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${USER_PORT}\033[0m"
+    [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
+    [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
+    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m"
 
-    for s in 4 6; do
-        local var="RAW_IP$s" && local ip="${!var:-}"
-        [ -z "$ip" ] && continue
-        if nc -zu -w1 "$ip" "$USER_PORT" >/dev/null 2>&1; then
-            M="\033[1;32m已连通\033[0m"
-        else
-            M="\033[1;33m未放行\033[0m"
-        fi
-        if [ "$s" == "4" ]; then
-            LINK_V4="hy2://$RAW_PSK@$ip:$USER_PORT/?${BASE_PARAM}#$(hostname)_v4"
-            echo -e "\n\033[1;35m[IPv4 链接]\033[0m ($M)\n$LINK_V4"; FULL_CLIP="$LINK_V4"
-        else
-            LINK_V6="hy2://$RAW_PSK@[$ip]:$USER_PORT/?${BASE_PARAM}#$(hostname)_v6"
-            echo -e "\033[1;36m[IPv6 链接]\033[0m ($M)\n$LINK_V6"; FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"  
-        fi
-    done
-    echo -e "\n\033[1;34m==========================================\033[0m"
+    [ -n "${RAW_IP4:-}" ] && {
+        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v4"
+        echo -e "\n\033[1;35m[IPv4节点链接]\033[0m\n$LINK_V4\n"
+        FULL_CLIP="$LINK_V4"
+    }
+    [ -n "${RAW_IP6:-}" ] && {
+        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v6"
+        echo -e "\033[1;36m[IPv6节点链接]\033[0m\n$LINK_V6"
+        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
+    }
+
+    echo -e "\033[1;34m==========================================\033[0m"
     [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m 证书 SHA256 指纹已集成，支持强校验"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
@@ -898,7 +891,6 @@ OS='$OS'
 SBOX_ARCH='$SBOX_ARCH'
 CPU_CORE='$CPU_CORE'
 SBOX_CORE='$SBOX_CORE'
-USER_PORT='$USER_PORT'  
 VAR_HY2_BW='${VAR_HY2_BW:-200}'
 SBOX_GOLIMIT='$SBOX_GOLIMIT'
 SBOX_GOGC='${SBOX_GOGC:-100}'
@@ -1030,6 +1022,7 @@ while true; do
     esac
 done
 EOF
+
 	chmod +x "$SB_PATH"
     ln -sf "$SB_PATH" "/usr/local/bin/SB" 2>/dev/null || true
 }
@@ -1044,11 +1037,11 @@ CPU_CORE=$(get_cpu_core)
 export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
-prompt_for_port
+USER_PORT=$(prompt_for_port)
 optimize_system
 install_singbox "install"
 generate_cert
-create_config
+create_config "$USER_PORT"
 create_sb_tool
 setup_service
 get_env_data
