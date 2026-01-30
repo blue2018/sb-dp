@@ -1051,7 +1051,7 @@ CPU_CORE=$(get_cpu_core)
 export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
-prompt_for_port
+USER_PORT=$(prompt_for_port)
 optimize_system
 install_singbox "install"
 generate_cert
