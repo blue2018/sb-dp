@@ -107,10 +107,9 @@ get_cpu_core() {
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
     local p input check_cmd is_busy
-    # 局部关闭错误退出，确保检测逻辑自主受控
-    set +e
+    # 局部隔离：防止检测命令的失败导致主进程退出
+    set +e 
     
-    # 自动识别工具
     if command -v ss >/dev/null 2>&1; then check_cmd="ss -ulnt"
     elif command -v netstat >/dev/null 2>&1; then check_cmd="netstat -ulnt"
     else check_cmd=""; fi
@@ -121,27 +120,25 @@ prompt_for_port() {
         if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1025 ] && [ "$input" -le 65535 ]; then
             p="$input"
         else
-            # 采用更轻量的随机方案
+            # 简洁兼容的随机数
             p=$((1025 + RANDOM % 64511))
         fi
 
         is_busy=0
         if [ -n "$check_cmd" ]; then
-            # 这里的 grep 不会因为 set +e 杀掉脚本
-            $check_cmd | grep -qE ":${p}[[:space:]]" && is_busy=1
+            # 加上 || true 彻底切断错误向上传递
+            $check_cmd | grep -qE ":${p}[[:space:]]" && is_busy=1 || true
         fi
 
         if [ "$is_busy" -eq 1 ]; then
-            echo -e "\033[1;31m[占用]\033[0m 端口 $p 已被占用，请重试" >&2
+            echo -e "\033[1;31m[占用]\033[0m 端口 $p 被占用，请重选" >&2
             input=""
         else
-            # 打印提示到 stderr
-            [ -z "$input" ] && echo -e "\033[1;32m[INFO]\033[0m 随机分配端口: $p" >&2
-            
-            # 恢复 set -e 环境，确保后续安装逻辑严谨
+            [ -z "$input" ] && echo -e "\033[1;32m[INFO]\033[0m 自动分配端口: $p" >&2
+            # 恢复 set -e
             set -e
-            # 最终输出并退出
-            echo "$p"
+            # 强制清洗端口号，确保没有任何不可见字符干扰后续安装
+            echo "$p" | tr -d '\r\n '
             return 0
         fi
     done
