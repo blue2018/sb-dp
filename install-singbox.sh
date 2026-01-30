@@ -57,29 +57,35 @@ detect_os() {
 # 依赖安装 (容错增强版)
 install_dependencies() {
     info "正在检查系统类型..."
-    if command -v apk >/dev/null 2>&1; then PM="apk"
-    elif command -v apt-get >/dev/null 2>&1; then PM="apt"
-    elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then PM="yum"
+    local PM=""; local DEPS="curl jq openssl ca-certificates iproute2 ethtool iptables bash tar"
+    if command -v apk >/dev/null 2>&1; then 
+        PM="apk" && DEPS="$DEPS netcat-openbsd procps util-linux ip6tables"
+    elif command -v apt-get >/dev/null 2>&1; then 
+        PM="apt" && DEPS="$DEPS netcat-openbsd procps kmod util-linux"
+    elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then 
+        PM="yum" && DEPS="$DEPS nc procps-ng util-linux"
     else err "未检测到支持的包管理器 (apk/apt-get/yum)，请手动安装依赖"; exit 1; fi
-
+    for cmd in grep stat; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            [ "$cmd" = "stat" ] && DEPS="$DEPS coreutils" || DEPS="$DEPS $cmd"
+        fi
+    done
     case "$PM" in
         apk) info "检测到 Alpine 系统，正在同步仓库并安装依赖..."
              apk update >/dev/null 2>&1 || true
-             apk add --no-cache bash curl jq openssl iproute2 coreutils grep ca-certificates tar ethtool iptables \
-                || { err "apk 安装依赖失败"; exit 1; } ;;
+             apk add --no-cache $DEPS || { err "apk 安装依赖失败"; exit 1; } ;;
         apt) info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..."
              export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1 || true
-             apt-get install -y --no-install-recommends curl jq openssl ca-certificates procps iproute2 coreutils grep tar ethtool iptables kmod \
-                || { err "apt 安装依赖失败"; exit 1; } ;;
+             apt-get install -y --no-install-recommends $DEPS || { err "apt 安装依赖失败"; exit 1; } ;;
         yum) info "检测到 RHEL/CentOS 系统，正在安装依赖..."
-             M=$(command -v dnf || echo "yum")
-             $M install -y curl jq openssl ca-certificates procps-ng iproute tar ethtool iptables \
-                || { err "$M 安装依赖失败"; exit 1; } ;;
+             local M=$(command -v dnf || echo "yum")
+             $M install -y $DEPS || { err "$M 安装依赖失败"; exit 1; } ;;
     esac
-
-    # [优化] 针对小鸡常见的 CA 证书缺失问题进行强制刷新
+    # 针对小鸡常见的 CA 证书缺失问题进行强制刷新
     [ -f /etc/ssl/certs/ca-certificates.crt ] || update-ca-certificates 2>/dev/null || true
-    for cmd in jq curl tar; do command -v "$cmd" >/dev/null 2>&1 || { err "核心依赖 $cmd 安装失败"; exit 1; }; done
+    for cmd in jq curl tar nc bash; do 
+        command -v "$cmd" >/dev/null 2>&1 || { err "核心依赖 $cmd 安装失败，请检查网络或源"; exit 1; }
+    done
     succ "所需依赖已就绪"
 }
 
@@ -717,7 +723,7 @@ EOF
 # 服务配置
 # ==========================================
 setup_service() {
-    local real_c="$CPU_CORE" core_range=""
+    local real_c="$CPU_CORE" core_range="" pid=""
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
     local cur_nice="${VAR_SYSTEMD_NICE:--5}"; local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"
@@ -726,7 +732,7 @@ setup_service() {
     [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
     [ "$mem_total" -lt 200 ] && io_prio=7 # 极低内存下进一步降低 IO 优先级，防止死锁
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
-    info "正在写入服务配置..."
+    info "正在写入服务配置并启动，请稍后..."
 
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
@@ -793,10 +799,11 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload >/dev/null 2>&1; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box --no-block >/dev/null 2>&1 || true
     fi
-    local pid=""; info "服务状态校验中..."
     for i in {1..30}; do
-        pid=$(pidof sing-box | awk '{print $1}')
-        [ -n "$pid" ] && [ -e "/proc/$pid" ] && break
+        pid=$(pgrep -f "sing-box run" 2>/dev/null || \
+              pidof sing-box 2>/dev/null | awk '{print $1}' || \
+              ps -ef | grep "sing-box run" | grep -v grep | awk '{for(i=1;i<=2;i++) if($i ~ /^[0-9]+$/) {print $i; break}}')
+        if [[ "$pid" =~ ^[0-9]+$ ]] && [ -d "/proc/$pid" ]; then break; fi
         sleep 0.3
     done
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
@@ -805,7 +812,7 @@ EOF
     else
         warn "服务拉起异常，尝试自愈重启..."
         if [ "$OS" = "alpine" ]; then
-            rc-service sing-box start >/dev/null 2>&1 &
+            rc-service sing-box start >/dev/null 2>&1
         else
             systemctl start sing-box --no-block >/dev/null 2>&1 || true
         fi
