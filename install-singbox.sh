@@ -106,48 +106,41 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p input check_cmd
-    # 自动探测工具
+    local p input check_cmd is_busy
+    # 局部关闭错误退出，确保检测逻辑自主受控
+    set +e
+    
+    # 自动识别工具
     if command -v ss >/dev/null 2>&1; then check_cmd="ss -ulnt"
     elif command -v netstat >/dev/null 2>&1; then check_cmd="netstat -ulnt"
     else check_cmd=""; fi
 
     while :; do
-        # 提示语重定向到 stderr (>&2)，确保变量捕获时不卡住
         read -r -p "请输入端口 [1025-65535] (回车随机生成): " input >&2
         
         if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1025 ] && [ "$input" -le 65535 ]; then
             p="$input"
         else
-            # 兼容性随机生成逻辑
-            if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
-            else p=$((1025 + RANDOM % 64511)); fi
+            # 采用更轻量的随机方案
+            p=$((1025 + RANDOM % 64511))
         fi
 
-        # 核心冲突检测：使用 if 包裹 grep，这是防止 set -e 中断的最稳妥手段
-        local is_busy=0
-        if [ -z "$check_cmd" ]; then
-            is_busy=0
-        else
-            # 如果 grep 找到东西（端口占用），执行 then；找不到（端口可用），执行 else
-            if $check_cmd 2>/dev/null | grep -qE ":${p}[[:space:]]"; then
-                is_busy=1
-            else
-                is_busy=0
-            fi
+        is_busy=0
+        if [ -n "$check_cmd" ]; then
+            # 这里的 grep 不会因为 set +e 杀掉脚本
+            $check_cmd | grep -qE ":${p}[[:space:]]" && is_busy=1
         fi
 
         if [ "$is_busy" -eq 1 ]; then
-            echo -e "\033[1;31m[占用]\033[0m 端口 $p 已被占用，正在重选..." >&2
-            input="" # 强制下次循环进入随机生成
-            continue
+            echo -e "\033[1;31m[占用]\033[0m 端口 $p 已被占用，请重试" >&2
+            input=""
         else
-            if [ -z "$input" ]; then
-                echo -e "\033[1;32m[INFO]\033[0m 已自动分配可用端口: $p" >&2
-            else
-                echo -e "\033[1;32m[OK]\033[0m 端口 $p 校验通过" >&2
-            fi
-            # 最终只将端口号输出到 stdout，供变量捕获
+            # 打印提示到 stderr
+            [ -z "$input" ] && echo -e "\033[1;32m[INFO]\033[0m 随机分配端口: $p" >&2
+            
+            # 恢复 set -e 环境，确保后续安装逻辑严谨
+            set -e
+            # 最终输出并退出
             echo "$p"
             return 0
         fi
