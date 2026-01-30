@@ -718,7 +718,7 @@ EOF
 # 服务配置
 # ==========================================
 setup_service() {
-    local real_c="$CPU_CORE" core_range=""
+    local real_c="$CPU_CORE" core_range="" pid=""
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
     local cur_nice="${VAR_SYSTEMD_NICE:--5}"; local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"
@@ -794,7 +794,6 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload >/dev/null 2>&1; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box --no-block >/dev/null 2>&1 || true
     fi
-    local pid=""; info "服务状态校验中..."
     for i in {1..30}; do
         pid=$(pidof sing-box | awk '{print $1}')
         [ -n "$pid" ] && [ -e "/proc/$pid" ] && break
