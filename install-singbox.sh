@@ -106,50 +106,46 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local PORT=""
-    local INPUT=""
+    local input p is_busy
     
-    # 1. 交互输入 (关键：提示语重定向到 >&2，防止被变量捕获导致"卡死")
-    # 如果是非交互模式(如自动脚本)，则跳过 read，直接随机
-    if [ -t 0 ]; then
-        read -r -p "请输入端口 [1025-65535] (回车随机): " INPUT >&2
-    fi
-
-    # 2. 基础校验：如果输入不是纯数字或越界，视为无效，后续自动随机
-    if [[ "$INPUT" =~ ^[0-9]+$ ]] && [ "$INPUT" -ge 1025 ] && [ "$INPUT" -le 65535 ]; then
-        PORT="$INPUT"
-    fi
-
-    # 3. 循环检测与生成 (直到找到空闲端口)
-    while true; do
-        # A. 如果端口为空(未输入或已占用重置)，则随机生成
-        if [ -z "$PORT" ]; then
-            # 兼容性极佳的随机生成 (1025-65000)，适配没有 shuf 的精简系统
-            PORT=$(awk -v min=1025 -v max=65000 'BEGIN{srand(); print int(min+rand()*(max-min+1))}')
-            # 仅在自动生成且原先有输入(即发生冲突)时提示
-            [ -n "$INPUT" ] && echo -e "\033[1;33m[提示]\033[0m 端口冲突或无效，已自动切换为: $PORT" >&2
-        fi
-
-        # B. 占用检测 (同时支持 ss 和 netstat，兼顾新旧系统)
-        local is_busy=0
-        if command -v ss >/dev/null 2>&1; then
-            # 检查 UDP 和 TCP，精确匹配 :端口
-            if ss -ulnt | grep -qE ":${PORT}[[:space:]]"; then is_busy=1; fi
-        elif command -v netstat >/dev/null 2>&1; then
-            if netstat -ulnt | grep -qE ":${PORT}[[:space:]]"; then is_busy=1; fi
-        fi
-
-        # C. 决策逻辑
-        if [ "$is_busy" -eq 1 ]; then
-            # 如果是用户手输的端口被占用，提示一下
-            if [ "$PORT" == "$INPUT" ]; then
-                echo -e "\033[1;31m[占用]\033[0m 端口 $PORT 已被其他进程占用" >&2
-            fi
-            PORT="" # 清空端口，触发下一次循环的随机生成
+    # 所有的交互提示必须重定向到 >&2，否则会被变量捕获导致看不到提示
+    while :; do
+        read -r -p "请输入端口 [1025-65535] (回车随机生成): " input >&2
+        
+        # 1. 判定输入
+        if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1025 ] && [ "$input" -le 65535 ]; then
+            p="$input"
         else
-            # 端口可用，输出结果并退出函数
-            echo "$PORT"
-            return 0
+            # 使用 awk 生成随机数，确保在没有 shuf 的小鸡上也兼容
+            p=$(awk -v min=1025 -v max=65000 'BEGIN{srand(); print int(min+rand()*(max-min+1))}')
+        fi
+
+        # 2. 占用检测 (set +e 环境下 grep -q 是安全的)
+        is_busy=0
+        if command -v ss >/dev/null 2>&1; then
+            ss -ulnt | grep -qE ":$p[[:space:]]" && is_busy=1 || true
+        elif command -v netstat >/dev/null 2>&1; then
+            netstat -ulnt | grep -qE ":$p[[:space:]]" && is_busy=1 || true
+        fi
+
+        # 3. 冲突逻辑处理
+        if [ "$is_busy" -eq 1 ]; then
+            if [ "$p" == "$input" ]; then
+                echo -e "\033[1;31m[占用]\033[0m 端口 $p 已被占用，尝试随机生成..." >&2
+                input="" # 重置输入，强制下一次循环进入随机逻辑
+            fi
+            # 继续循环重新生成
+        else
+            # 成功找到可用端口
+            if [ -z "$input" ]; then
+                echo -e "\033[1;32m[INFO]\033[0m 已随机分配可用端口: $p" >&2
+            else
+                echo -e "\033[1;32m[OK]\033[0m 端口 $p 校验通过" >&2
+            fi
+            
+            # 只有这一行是发送给 stdout 的，它会被赋值给 USER_PORT
+            echo "$p"
+            break
         fi
     done
 }
