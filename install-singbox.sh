@@ -57,29 +57,33 @@ detect_os() {
 # 依赖安装 (容错增强版)
 install_dependencies() {
     info "正在检查系统类型..."
-    if command -v apk >/dev/null 2>&1; then PM="apk"
-    elif command -v apt-get >/dev/null 2>&1; then PM="apt"
-    elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then PM="yum"
+    local PM=""; local DEPS="curl jq openssl ca-certificates iproute2 ethtool iptables bash"
+    if command -v apk >/dev/null 2>&1; then PM="apk" && DEPS="$DEPS netcat-openbsd procps util-linux"
+    elif command -v apt-get >/dev/null 2>&1; then PM="apt" && DEPS="$DEPS netcat-openbsd procps kmod util-linux"
+    elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then PM="yum" && DEPS="$DEPS nc procps-ng util-linux"
     else err "未检测到支持的包管理器 (apk/apt-get/yum)，请手动安装依赖"; exit 1; fi
 
+    for cmd in grep tar stat; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            [ "$cmd" = "stat" ] && DEPS="$DEPS coreutils" || DEPS="$DEPS $cmd"
+        fi
+    done
     case "$PM" in
         apk) info "检测到 Alpine 系统，正在同步仓库并安装依赖..."
              apk update >/dev/null 2>&1 || true
-             apk add --no-cache bash curl jq openssl iproute2 coreutils grep ca-certificates tar ethtool iptables \
-                || { err "apk 安装依赖失败"; exit 1; } ;;
+             apk add --no-cache $DEPS || { err "apk 安装依赖失败"; exit 1; } ;;
         apt) info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..."
              export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1 || true
-             apt-get install -y --no-install-recommends curl jq openssl ca-certificates procps iproute2 coreutils grep tar ethtool iptables kmod \
-                || { err "apt 安装依赖失败"; exit 1; } ;;
+             apt-get install -y --no-install-recommends $DEPS || { err "apt 安装依赖失败"; exit 1; } ;;
         yum) info "检测到 RHEL/CentOS 系统，正在安装依赖..."
-             M=$(command -v dnf || echo "yum")
-             $M install -y curl jq openssl ca-certificates procps-ng iproute tar ethtool iptables \
-                || { err "$M 安装依赖失败"; exit 1; } ;;
+             local M=$(command -v dnf || echo "yum")
+             $M install -y $DEPS || { err "$M 安装依赖失败"; exit 1; } ;;
     esac
-
-    # [优化] 针对小鸡常见的 CA 证书缺失问题进行强制刷新
+    # 针对小鸡常见的 CA 证书缺失问题进行强制刷新
     [ -f /etc/ssl/certs/ca-certificates.crt ] || update-ca-certificates 2>/dev/null || true
-    for cmd in jq curl tar; do command -v "$cmd" >/dev/null 2>&1 || { err "核心依赖 $cmd 安装失败"; exit 1; }; done
+    for cmd in jq curl tar nc bash; do 
+        command -v "$cmd" >/dev/null 2>&1 || { err "核心依赖 $cmd 安装失败，请检查网络或源"; exit 1; }
+    done
     succ "所需依赖已就绪"
 }
 
@@ -100,14 +104,14 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p hex_port input_p
+    local p input_p
     while :; do
         read -r -p "请输入端口 [1025-65535] (回车随机): " input_p
         p=${input_p:-$(shuf -i 1025-65000 -n 1)}
         if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
             while :; do
-                hex_port=$(printf ':%04X ' "$p")
-                if ! grep -q "$hex_port" /proc/net/tcp* /proc/net/udp* 2>/dev/null; then
+                (echo > /dev/tcp/127.0.0.1/"$p") >/dev/null 2>&1
+                if [ $? -ne 0 ]; then
                     [ -n "$input_p" ] && [ "$p" != "$input_p" ] && echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已自动更换"
                     USER_PORT="$p"; echo -e "\033[1;32m[OK]\033[0m 使用端口: $USER_PORT"; return 0
                 fi
@@ -727,7 +731,7 @@ setup_service() {
     [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
     [ "$mem_total" -lt 200 ] && io_prio=7 # 极低内存下进一步降低 IO 优先级，防止死锁
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
-    info "正在写入服务配置..."
+    info "正在写入服务配置并启动，请稍后..."
 
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
