@@ -799,7 +799,8 @@ EOF
         systemctl daemon-reload >/dev/null 2>&1; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box --no-block >/dev/null 2>&1 || true
     fi
     for i in {1..30}; do
-        pid=$(pidof sing-box | awk '{print $1}')
+        pid=$(pidof sing-box 2>/dev/null | awk '{print $1}')
+        [ -z "$pid" ] && pid=$(ps -ef | grep "sing-box run" | grep -v grep | awk '{print $1}' | head -n1)
         [ -n "$pid" ] && [ -e "/proc/$pid" ] && break
         sleep 0.3
     done
