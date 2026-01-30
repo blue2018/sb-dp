@@ -106,17 +106,22 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p rand
+    local p input_p
     while :; do
-        read -r -p "请输入端口 [1025-65535] (回车随机生成): " p
-        if [ -z "$p" ]; then
-            if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
-            elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' '); p=$((1025 + rand % 64511))
-            else p=$((1025 + RANDOM % 64511)); fi
-            echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $p" >&2; echo "$p"; return 0
+        read -r -p "请输入端口 [1025-65535] (回车随机): " input_p
+        p=${input_p:-$(shuf -i 1025-65000 -n 1)}
+        if [ "$p" -eq "$p" ] 2>/dev/null && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
+            while :; do
+                if { command -v ss >/dev/null && ss -tuln | grep -q ":$p "; } || \
+                   { command -v netstat >/dev/null && netstat -tuln | grep -q ":$p "; } || \
+                   { nc -z -w1 127.0.0.1 "$p" 2>/dev/null || nc -zu -w1 127.0.0.1 "$p" 2>/dev/null; }; then
+                    [ -n "$input_p" ] && { echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已更换"; input_p=""; }
+                    ((p++)); [ "$p" -gt 65535 ] && p=1025; continue
+                fi
+                USER_PORT="$p"; echo -e "\033[1;32m[OK]\033[0m 使用端口: $USER_PORT"; echo "$p"; return 0
+            done
+        else echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字"
         fi
-        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then echo "$p"; return 0
-        else echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字或直接回车" >&2; fi
     done
 }
 
@@ -666,34 +671,28 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local PORT_HY2="${1:-}"
+    local port="${1:-}"
 	local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
 	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
 	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
-    
-    # 1. 端口确定逻辑
-    if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
-        else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
-    fi
-    
-    # 2. PSK (密码) 确定逻辑
+     
+    # 1. PSK (密码) 确定逻辑
     local PSK
     if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
     elif [ -f /proc/sys/kernel/random/uuid ]; then PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     else local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; fi
 
-    # 3. Salamander 混淆密码确定逻辑
+    # 2. Salamander 混淆密码确定逻辑
     local SALA_PASS=""
     if [ -f /etc/sing-box/config.json ]; then
         SALA_PASS=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     fi
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 4. 写入 Sing-box 配置文件
+    # 3. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -702,7 +701,7 @@ create_config() {
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
-    "listen_port": $PORT_HY2,
+    "listen_port": $port,
     "users": [ { "password": "$PSK" } ],
     "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
@@ -1042,7 +1041,7 @@ CPU_CORE=$(get_cpu_core)
 export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
-USER_PORT=$(prompt_for_port)
+prompt_for_port
 optimize_system
 install_singbox "install"
 generate_cert
