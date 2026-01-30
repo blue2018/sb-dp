@@ -110,29 +110,21 @@ prompt_for_port() {
     while :; do
         read -r -p "请输入端口 [1025-65535] (回车随机): " input_p
         p=${input_p:-$(shuf -i 1025-65000 -n 1)}
-        
-        # 基础格式校验，确保 p 是数字
         if [ "$p" -eq "$p" ] 2>/dev/null && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
             while :; do
-                # 转换端口为十六进制（内核文件格式，如 57171 -> DF53）
-                local hex_port=$(printf '%04X' "$p")
-                
-                # 只检测 UDP 占用（含 IPv4 和 IPv6，Alpine 系统通常包含这几个文件）
-                # grep 匹配端口后加空格，确保精确匹配 hex 编码
-                if grep -q "[: ]$hex_port " /proc/net/udp /proc/net/udp6 2>/dev/null; then
-                    [ -n "$input_p" ] && { echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p (UDP) 被占用，已更换"; input_p=""; }
+                local hex_p=$(printf '%04X' "$p")
+                if grep -q "[: ]$hex_p " /proc/net/udp /proc/net/udp6 2>/dev/null; then
+                    [ -n "$input_p" ] && { echo -e "\033[1;33m[WARN]\033[0m 端口 $input_p 被占用，已更换" >&2; input_p=""; }
                     ((p++))
                     [ "$p" -gt 65535 ] && p=1025
                     continue
                 fi
-                
-                # 验证通过，直接修改全局变量
-                USER_PORT="$p"
-                echo -e "\033[1;32m[OK]\033[0m 使用端口: $USER_PORT (UDP)"
+                echo -e "\033[1;32m[OK]\033[0m 使用端口: $p" >&2
+                echo "$p"
                 return 0
             done
         else 
-            echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字"
+            echo -e "\033[1;31m[错误]\033[0m 格式无效，请输入 1025-65535 之间的数字" >&2
         fi
     done
 }
