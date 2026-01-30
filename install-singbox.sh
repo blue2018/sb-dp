@@ -666,7 +666,7 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local port="${1:-}"
+    local PORT_HY2="${1:-}"
 	local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"
@@ -675,9 +675,9 @@ create_config() {
 	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
     # 1. 端口确定逻辑
-    if [ -z "$port" ]; then
-        if [ -f /etc/sing-box/config.json ]; then port=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
-        else port=$(shuf -i 10000-60000 -n 1); fi
+    if [ -z "$PORT_HY2" ]; then
+        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
+        else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
     fi
     
     # 2. PSK (密码) 确定逻辑
@@ -702,7 +702,7 @@ create_config() {
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
-    "listen_port": $port,
+    "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
     "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
@@ -723,7 +723,7 @@ EOF
 # 服务配置
 # ==========================================
 setup_service() {
-    local real_c="$CPU_CORE" core_range="" pid=""
+    local real_c="$CPU_CORE" core_range=""
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
     local cur_nice="${VAR_SYSTEMD_NICE:--5}"; local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"
@@ -799,7 +799,8 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload >/dev/null 2>&1; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box --no-block >/dev/null 2>&1 || true
     fi
-    for i in {1..30}; do
+    local pid=""
+	for i in {1..30}; do
         pid=$(pidof sing-box | awk '{print $1}')
         [ -n "$pid" ] && [ -e "/proc/$pid" ] && break
         sleep 0.3
@@ -810,7 +811,7 @@ EOF
     else
         warn "服务拉起异常，尝试自愈重启..."
         if [ "$OS" = "alpine" ]; then
-            rc-service sing-box start >/dev/null 2>&1
+            rc-service sing-box start >/dev/null 2>&1 &
         else
             systemctl start sing-box --no-block >/dev/null 2>&1 || true
         fi
