@@ -674,6 +674,12 @@ create_config() {
 	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
 	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
+    # 1. 端口确定逻辑
+    if [ -z "$port" ]; then
+        if [ -f /etc/sing-box/config.json ]; then port=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
+        else port=$(shuf -i 10000-60000 -n 1); fi
+    fi
+    
     # 2. PSK (密码) 确定逻辑
     local PSK
     if [ -f /etc/sing-box/config.json ]; then PSK=$(jq -r '.inbounds[0].users[0].password' /etc/sing-box/config.json)
