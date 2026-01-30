@@ -1052,8 +1052,8 @@ install_singbox "install"
 generate_cert
 create_config
 create_sb_tool
-get_env_data
 setup_service
+get_env_data
 echo -e "\n\033[1;34m==========================================\033[0m"
 display_system_status
 echo -e "\033[1;34m------------------------------------------\033[0m"
