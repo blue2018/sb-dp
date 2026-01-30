@@ -723,7 +723,7 @@ EOF
 # 服务配置
 # ==========================================
 setup_service() {
-    local real_c="$CPU_CORE" core_range=""
+    local real_c="$CPU_CORE" core_range="" pid=""
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
     local cur_nice="${VAR_SYSTEMD_NICE:--5}"; local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"
@@ -799,8 +799,7 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload >/dev/null 2>&1; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box --no-block >/dev/null 2>&1 || true
     fi
-    local pid=""
-	for i in {1..30}; do
+    for i in {1..30}; do
         pid=$(pidof sing-box | awk '{print $1}')
         [ -n "$pid" ] && [ -e "/proc/$pid" ] && break
         sleep 0.3
@@ -811,7 +810,7 @@ EOF
     else
         warn "服务拉起异常，尝试自愈重启..."
         if [ "$OS" = "alpine" ]; then
-            rc-service sing-box start >/dev/null 2>&1 &
+            rc-service sing-box start >/dev/null 2>&1
         else
             systemctl start sing-box --no-block >/dev/null 2>&1 || true
         fi
