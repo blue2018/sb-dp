@@ -967,7 +967,7 @@ elif [[ "${1:-}" == "--show-only" ]]; then
     get_env_data; echo -e "\n\033[1;34m==========================================\033[0m"
     display_system_status; display_links
 elif [[ "${1:-}" == "--reset-port" ]]; then
-    optimize_system; create_config "$2"; apply_firewall; setup_service
+    USER_PORT="${2:-$USER_PORT}"; optimize_system; create_config "$USER_PORT"; apply_firewall; setup_service
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
     get_env_data; display_links
@@ -1024,7 +1024,7 @@ while true; do
                service_ctrl restart && succ "配置已更新，网络画像与防火墙已同步刷新"
            else info "配置未作变更"; fi
            read -r -p $'\n按回车键返回菜单...' ;;
-        3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
+        3) prompt_for_port; source "\$SBOX_CORE" --reset-port "\$USER_PORT"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
         6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
