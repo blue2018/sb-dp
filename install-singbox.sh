@@ -717,7 +717,7 @@ EOF
 # 服务配置
 # ==========================================
 setup_service() {
-    local real_c="$CPU_CORE" core_range=""
+    local real_c="$CPU_CORE" core_range="" pid=""
     local taskset_bin=$(command -v taskset 2>/dev/null || echo "taskset")
     local ionice_bin=$(command -v ionice 2>/dev/null || echo "")
     local cur_nice="${VAR_SYSTEMD_NICE:--5}"; local io_class="${VAR_SYSTEMD_IOSCHED:-best-effort}"
@@ -802,7 +802,6 @@ EOF
         systemctl restart sing-box >/dev/null 2>&1 &
     fi
     set +e     # 关闭 set -e，这是防止脚本在 pidof 失败时直接退出的关键核心
-    local pid=""
     for i in {1..40}; do
         pid=$(pgrep -x "sing-box" 2>/dev/null | head -n 1)
         [ -z "${pid}" ] && pid=$(pgrep -f "sing-box run" | awk '{print $1}' | head -n 1)
