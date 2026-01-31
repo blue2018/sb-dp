@@ -685,7 +685,7 @@ create_config() {
     # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
-        else PORT_HY2=$(shuf -i 10000-60000 -n 1); fi
+        else PORT_HY2=$(printf "\n" | prompt_for_port); fi
     fi
     
     # 2. PSK (密码) 确定逻辑
