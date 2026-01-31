@@ -1028,7 +1028,7 @@ while true; do
            if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
                systemctl stop sing-box zram-swap 2>/dev/null; rc-service sing-box stop 2>/dev/null
-               swapoff -a 2>/dev/null; [ -f /sys/block/zram0/reset ] && echo 1 > /sys/block/zram0/reset
+               swapoff -a 2>/dev/null; [ -f /sys/block/zram0/reset ] && echo 1 > /sys/block/zram0/reset 2>/dev/null
                rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} \
                       /etc/systemd/system/{sing-box,zram-swap}.service /etc/init.d/{sing-box,zram-swap} \
                       /etc/sysctl.d/99-sing-box.conf /tmp/sb_* ~/.acme.sh /swapfile
