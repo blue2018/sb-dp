@@ -780,7 +780,7 @@ Type=simple
 User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
-ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
+ExecStartPre=/bin/sh -c '/usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_err.log 2>&1'
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
 ${systemd_nice_line}
 ${io_config}
