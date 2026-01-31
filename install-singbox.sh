@@ -744,8 +744,8 @@ respawn_max=5
 respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
-command="/usr/bin/taskset"
-command_args="-c ${core_range} /usr/bin/sing-box run -c /etc/sing-box/config.json"
+command="/usr/bin/sing-box"
+command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
 supervise_daemon_args="--nicelevel ${final_nice}"
@@ -753,7 +753,13 @@ rc_ulimit="-n 1000000"
 rc_nice="${final_nice}"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
-start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; }
+start_pre() {
+    # 启动前强制检查，如果失败直接打印原因
+    /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_err.log 2>&1 || {
+        echo "Configuration check failed:" && cat /tmp/sb_err.log
+        return 1
+    }
+}
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true
