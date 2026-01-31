@@ -831,45 +831,57 @@ EOF
     set -e
 }
 
-# ==========================================
-# WARP管理
-# ==========================================
+# 1. 获取/缓存 WARP 凭据
+get_warp_conf() {
+    local cache="/etc/sing-box/warp.json"
+    if [ -s "\$cache" ]; then
+        cat "\$cache"
+    else
+        info "正在申请 WARP 凭据..."
+        local priv=\$(openssl rand -base64 32)
+        local pub=\$(echo "\$priv" | openssl pkey -inform base64 -outform DER | openssl pkey -inform DER -pubout -outform DER | tail -c 32 | openssl base64)
+        local res=\$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" -d "{\"key\":\"\$pub\",\"type\":\"Android\",\"tos\":\"\$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
+        local v6=\$(echo "\$res" | jq -r '.result.config.interface.addresses.v6 // empty')
+        [ -z "\$v6" ] && { err "WARP 注册失败"; return 1; }
+        echo "{\"priv\":\"\$priv\",\"v6\":\"\$v6\"}" | tee "\$cache"
+    fi
+}
 
-# 2. WARP 管理主函数
+# 2. WARP 管理主函数 (集成切换与分流)
 warp_manager() {
     local conf="/etc/sing-box/config.json"
     while true; do
         local status="\033[1;31m已禁用\033[0m"
-        grep -q "warp-out" "\${conf}" && status="\033[1;32m已启用\033[0m"
-        echo -e "\n--- WARP 策略管理 (状态: \${status}) ---"
+        grep -q "warp-out" "\$conf" && status="\033[1;32m已启用\033[0m"
+        echo -e "\n--- WARP 策略管理 (状态: \$status) ---"
         echo "1. 启用/禁用 WARP"
         echo "2. 添加分流域名"
         echo "0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
-        case "\${wc}" in
+        case "\$wc" in
             1)
-                if grep -q "warp-out" "\${conf}"; then
+                if grep -q "warp-out" "\$conf"; then
                     info "正在禁用 WARP..."
-                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "\${conf}" > "\${conf}.tmp" && mv "\${conf}.tmp" "\${conf}"
+                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "\$conf" > "\${conf}.tmp" && mv "\${conf}.tmp" "\$conf"
                     succ "WARP 已禁用"
                 else
                     local cred=\$(get_warp_conf) || continue
-                    local priv=\$(echo "\${cred}" | jq -r .priv)
-                    local v6=\$(echo "\${cred}" | jq -r .v6)
+                    local priv=\$(echo "\$cred" | jq -r .priv)
+                    local v6=\$(echo "\$cred" | jq -r .v6)
                     local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"\$v6"'"],"private_key":"'"\$priv"'","mtu":1280}'
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
-                    jq --argjson out "\$out" --argjson rule "\$rule" '.outbounds += [\$out] | .route.rules = [\$rule] + .route.rules' "\${conf}" > "\${conf}.tmp" && mv "\${conf}.tmp" "\${conf}"
+                    jq --argjson out "\$out" --argjson rule "\$rule" '.outbounds += [\$out] | .route.rules = [\$rule] + .route.rules' "\$conf" > "\${conf}.tmp" && mv "\${conf}.tmp" "\$conf"
                     succ "WARP 已启用"
                 fi
                 systemctl restart sing-box 2>/dev/null || rc-service sing-box restart 2>/dev/null
                 ;;
             2)
-                if ! grep -q "warp-out" "\${conf}"; then err "请先启用 WARP"; continue; fi
+                if ! grep -q "warp-out" "\$conf"; then err "请先启用 WARP"; continue; fi
                 read -r -p "输入要分流的域名: " dom
-                [ -z "\${dom}" ] && continue
-                jq --arg dom "\${dom}" '(.route.rules[] | select(.outbound == "warp-out").domain) += [\$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "\${conf}" > "\${conf}.tmp" && mv "\${conf}.tmp" "\${conf}"
+                [ -z "\$dom" ] && continue
+                jq --arg dom "\$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [\$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "\$conf" > "\${conf}.tmp" && mv "\${conf}.tmp" "\$conf"
                 systemctl restart sing-box 2>/dev/null || rc-service sing-box restart 2>/dev/null
-                succ "域名 \${dom} 分流成功"
+                succ "域名 \$dom 分流成功"
                 ;;
             0) break ;;
             *) err "无效选择" ;;
@@ -948,7 +960,7 @@ display_system_status() {
 }
 
 # ==========================================
-# 管理脚本生成
+# 管理脚本生成 (最终固化放行版)
 # ==========================================
 create_sb_tool() {
     mkdir -p /etc/sing-box
@@ -986,7 +998,7 @@ EOF
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
 create_config setup_service install_singbox info err warn succ optimize_system \
-apply_userspace_adaptive_profile apply_nic_core_boost get_warp_conf warp_manager \
+apply_userspace_adaptive_profile apply_nic_core_boost \
 setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
 
     for f in "${funcs[@]}"; do
@@ -1056,12 +1068,12 @@ while true; do
     echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "-------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
-    echo "4. 更新内核    5. 重启服务    6. warp管理"
-    echo "7. 卸载脚本    0. 退出"
+    echo "4. 更新内核    5. 重启服务    6. 卸载脚本"
+    echo "0. 退出"
     echo ""  
-    read -r -p "请选择 [0-7]: " opt
+    read -r -p "请选择 [0-6]: " opt
     opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
-    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-7]$ ]]; then
+    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-6]$ ]]; then
         echo -e "\033[1;31m输入有误 [\$opt]，请重新输入\033[0m"; sleep 1; continue
     fi
     case "\$opt" in
@@ -1074,8 +1086,7 @@ while true; do
         3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-		6) warp_manager ;;
-        7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
            if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
                systemctl stop sing-box zram-swap 2>/dev/null; rc-service sing-box stop 2>/dev/null
