@@ -761,7 +761,7 @@ EOF
         rc-service sing-box restart >/dev/null 2>&1 &
     else
         local mem_config=""; local cpu_quota=$((real_c * 100))
-        local io_config="IOSchedulingClass=$io_class"$'\n'"IOSchedulingPriority=$io_prio"
+        local io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
@@ -780,8 +780,8 @@ Type=simple
 User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
-ExecStartPre=/bin/sh -c '/usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_err.log 2>&1'
-ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
+ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
+ExecStart=${taskset_bin} -c ${core_range} /usr/bin/sing-box run -c /etc/sing-box/config.json
 ${systemd_nice_line}
 ${io_config}
 LimitNOFILE=1000000
@@ -803,9 +803,10 @@ EOF
     fi
     set +e     # 关闭 set -e，这是防止脚本在 pidof 失败时直接退出的关键核心
     local pid=""
-    for i in {1..30}; do
-        pid=$(pgrep -f "/usr/bin/sing-box run" | awk '{print $1}')
-        [ -n "$pid" ] && [ -e "/proc/$pid" ] && break
+    for i in {1..40}; do
+        pid=$(pgrep -x "sing-box" 2>/dev/null | head -n 1)
+        [ -z "${pid}" ] && pid=$(pgrep -f "sing-box run" | awk '{print $1}' | head -n 1)
+        [ -n "${pid}" ] && [ -e "/proc/${pid}" ] && break
         sleep 0.3
     done
     # 异步补课逻辑。在进程确认拉起后，从脚本主体执行一次优化，这样既保证了优化生效，又不会因为优化脚本运行时间长而导致服务启动超时
