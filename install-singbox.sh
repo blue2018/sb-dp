@@ -109,10 +109,22 @@ prompt_for_port() {
             if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
             elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' '); p=$((1025 + rand % 64511))
             else p=$((1025 + RANDOM % 64511)); fi
-            echo -e "\033[1;32m[INFO]\033[0m 已自动分配端口: $p" >&2; echo "$p"; return 0
         fi
-        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then echo "$p"; return 0
-        else echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字或直接回车" >&2; fi
+        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
+            local occupied=""
+            if command -v ss >/dev/null 2>&1; then occupied=$(ss -tunlp | grep -w ":$p")
+            elif command -v netstat >/dev/null 2>&1; then occupied=$(netstat -tunlp | grep -w ":$p")
+            elif command -v lsof >/dev/null 2>&1; then occupied=$(lsof -i :"$p")
+            fi
+            if [ -n "$occupied" ]; then
+                echo -e "\033[1;33m[WARN]\033[0m 端口 $p 已被占用，请更换端口或直接回车重新生成" >&2
+                p=""; continue
+            fi
+            echo -e "\033[1;32m[INFO]\033[0m 使用端口: $p" >&2
+            echo "$p"; return 0
+        else
+            echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字" >&2
+        fi
     done
 }
 
