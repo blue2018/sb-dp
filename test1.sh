@@ -1062,15 +1062,15 @@ service_ctrl() {
 }
 
 while true; do
-    echo "========================" 
+    echo "========================"
     echo " Sing-box HY2 管理 (sb)"
     echo "-------------------------------------------------"
     echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "-------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
-    echo "4. 更新内核    5. 重启服务    6. WARP"
+    echo "4. 更新内核    5. 重启服务    6. warp管理"
     echo "7. 卸载脚本    0. 退出"
-    echo ""  
+    echo ""
     read -r -p "请选择 [0-7]: " opt
     opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
     if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-7]$ ]]; then
@@ -1086,7 +1086,7 @@ while true; do
         3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-		6) warp_manager ;;
+        6) warp_manager ;;
         7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
            if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
