@@ -863,12 +863,14 @@ display_links() {
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m"
     [ -n "${RAW_IP4:-}" ] && {
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v4"
-        echo -ne "\033[1;35m[IPv4节点链接]\033[0m$(get_status_label "$RAW_IP4")\n$LINK_V4\n\n"
+        local v4_status=$(get_status_label "$RAW_IP4")
+        echo -e "\033[1;35m[IPv4节点链接]\033[0m$v4_status\n$LINK_V4\n"
         FULL_CLIP="$LINK_V4"
     }
     [ -n "${RAW_IP6:-}" ] && {
         LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v6"
-        echo -ne "\033[1;36m[IPv6节点链接]\033[0m$(get_status_label "$RAW_IP6")\n$LINK_V6\n"
+        local v6_status=$(get_status_label "$RAW_IP6")
+        echo -e "\033[1;36m[IPv6节点链接]\033[0m$v6_status\n$LINK_V6\n"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
     }
     echo -e "\033[1;34m==========================================\033[0m"
