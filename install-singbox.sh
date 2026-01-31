@@ -724,10 +724,10 @@ setup_service() {
     local mem_total=$(probe_memory_total); local io_prio=4
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
     [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
-    [ "$mem_total" -lt 200 ] && io_prio=7 # 极低内存下进一步降低 IO 优先级，防止死锁
+    [ "$mem_total" -lt 200 ] && io_prio=7 
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
     info "正在写入服务配置并启动，请稍后..."
-
+    sync   # 确保环境文件落盘，防止启动瞬时读取失败
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
         local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
@@ -749,17 +749,18 @@ rc_ulimit="-n 1000000"
 rc_nice="$cur_nice"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
-start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 & }
-start_post() { (sleep 3; [ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 & }
+start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; }
 EOF
         chmod +x /etc/init.d/sing-box
-        rc-update add sing-box default >/dev/null 2>&1 || true; rc-service sing-box restart >/dev/null 2>&1 &
+        rc-update add sing-box default >/dev/null 2>&1 || true
+        rc-service sing-box restart >/dev/null 2>&1 &
     else
         local mem_config=""; local cpu_quota=$((real_c * 100))
-		local io_config="IOSchedulingClass=$io_class"$'\n'"IOSchedulingPriority=$io_prio"
+        local io_config="IOSchedulingClass=$io_class"$'\n'"IOSchedulingPriority=$io_prio"
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
+        
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
@@ -774,9 +775,7 @@ User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
-ExecStartPre=-/bin/bash -c '[ -f \$SBOX_CORE ] && /bin/bash \$SBOX_CORE --apply-cwnd'
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
-ExecStartPost=-/bin/bash -c '(sleep 3; /bin/bash \$SBOX_CORE --apply-cwnd) &'
 Nice=$cur_nice
 $io_config
 LimitNOFILE=1000000
@@ -791,28 +790,28 @@ TimeoutStopSec=15
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload >/dev/null 2>&1; systemctl enable sing-box >/dev/null 2>&1 || true; systemctl restart sing-box --no-block >/dev/null 2>&1 || true
+        systemctl daemon-reload >/dev/null 2>&1
+        systemctl enable sing-box >/dev/null 2>&1 || true
+        systemctl restart sing-box >/dev/null 2>&1 &
     fi
+    set +e     # 关闭 set -e，这是防止脚本在 pidof 失败时直接退出的关键核心
     local pid=""
     for i in {1..30}; do
-        pid=$(pidof sing-box | awk '{print $1}')
+        pid=$(pgrep -f "/usr/bin/sing-box run" | awk '{print $1}')
         [ -n "$pid" ] && [ -e "/proc/$pid" ] && break
         sleep 0.3
     done
+    # 异步补课逻辑。在进程确认拉起后，从脚本主体执行一次优化，这样既保证了优化生效，又不会因为优化脚本运行时间长而导致服务启动超时
+    ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 &
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
     else
-        warn "服务拉起异常，尝试自愈重启..."
-        if [ "$OS" = "alpine" ]; then
-            rc-service sing-box start >/dev/null 2>&1 &
-        else
-            systemctl start sing-box --no-block >/dev/null 2>&1 || true
-        fi
-        for i in {1..20}; do pid=$(pidof sing-box | awk '{print $1}'); [ -n "$pid" ] && break; sleep 0.5; done
-        [ -z "$pid" ] && { err "启动失败，日志如下："; [ "$OS" = "alpine" ] && logread 2>/dev/null | tail -n 10 || journalctl -u sing-box -n 10 --no-pager 2>/dev/null; exit 1; }
-        succ "服务已通过自愈模式就绪"
+        err "服务拉起超时，请检查日志："
+        [ "$OS" = "alpine" ] && { [ -f /var/log/messages ] && tail -n 10 /var/log/messages || logread | tail -n 10; } || journalctl -u sing-box -n 10 --no-pager 2>/dev/null
+        set -e; exit 1
     fi
+    set -e
 }
 
 # ==========================================
