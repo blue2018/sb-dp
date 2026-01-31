@@ -57,29 +57,31 @@ detect_os() {
 # 依赖安装 (容错增强版)
 install_dependencies() {
     info "正在检查系统类型..."
-    if command -v apk >/dev/null 2>&1; then PM="apk"
-    elif command -v apt-get >/dev/null 2>&1; then PM="apt"
-    elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then PM="yum"
+    local PM=""; local DEPS="curl jq openssl ca-certificates iproute2 ethtool iptables bash tzdata"
+    if command -v apk >/dev/null 2>&1; then PM="apk"; DEPS="${DEPS} netcat-openbsd procps util-linux"
+    elif command -v apt-get >/dev/null 2>&1; then PM="apt"; DEPS="${DEPS} netcat-openbsd procps kmod util-linux"
+    elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then PM="yum"; DEPS="${DEPS} nc procps-ng util-linux"
     else err "未检测到支持的包管理器 (apk/apt-get/yum)，请手动安装依赖"; exit 1; fi
+    # 基础工具补漏逻辑
+    for cmd in tar stat pgrep; do
+        if ! command -v "${cmd}" >/dev/null 2>&1; then
+            case "${cmd}" in
+                stat) DEPS="${DEPS} coreutils" ;;
+                pgrep) [ "${PM}" = "apk" ] && DEPS="${DEPS} procps" || DEPS="${DEPS} procps-ng" ;;
+                *) DEPS="${DEPS} ${cmd}" ;;
+            esac
+        fi
+    done
 
-    case "$PM" in
-        apk) info "检测到 Alpine 系统，正在同步仓库并安装依赖..."
-             apk update >/dev/null 2>&1 || true
-             apk add --no-cache bash curl jq openssl iproute2 coreutils grep ca-certificates tar ethtool iptables \
-                || { err "apk 安装依赖失败"; exit 1; } ;;
-        apt) info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..."
-             export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1 || true
-             apt-get install -y --no-install-recommends curl jq openssl ca-certificates procps iproute2 coreutils grep tar ethtool iptables kmod \
-                || { err "apt 安装依赖失败"; exit 1; } ;;
-        yum) info "检测到 RHEL/CentOS 系统，正在安装依赖..."
-             M=$(command -v dnf || echo "yum")
-             $M install -y curl jq openssl ca-certificates procps-ng iproute tar ethtool iptables \
-                || { err "$M 安装依赖失败"; exit 1; } ;;
+    case "${PM}" in
+        apk) info "检测到 Alpine 系统，正在同步仓库并安装依赖..." && apk update >/dev/null 2>&1; apk add --no-cache ${DEPS} || { err "apk 安装依赖失败"; exit 1; } ;;
+        apt) info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..." && export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1; apt-get install -y --no-install-recommends ${DEPS} || { err "apt 安装依赖失败"; exit 1; } ;;
+        yum) info "检测到 RHEL/CentOS 系统，正在安装依赖..." && { local M=$(command -v dnf || echo "yum"); ${M} install -y ${DEPS} || { err "${M} 安装依赖失败"; exit 1; }; } ;;
     esac
 
-    # [优化] 针对小鸡常见的 CA 证书缺失问题进行强制刷新
-    [ -f /etc/ssl/certs/ca-certificates.crt ] || update-ca-certificates 2>/dev/null || true
-    for cmd in jq curl tar; do command -v "$cmd" >/dev/null 2>&1 || { err "核心依赖 $cmd 安装失败"; exit 1; }; done
+    [ -d /usr/share/zoneinfo ] || { [ "${PM}" = "apk" ] && apk add --no-cache tzdata; }
+    update-ca-certificates 2>/dev/null || true
+    for cmd in jq curl tar bash pgrep; do command -v "${cmd}" >/dev/null 2>&1 || { err "核心依赖 ${cmd} 安装失败，请检查网络或源"; exit 1; }; done
     succ "所需依赖已就绪"
 }
 
