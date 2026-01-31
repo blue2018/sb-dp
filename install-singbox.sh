@@ -853,19 +853,24 @@ display_links() {
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
-    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m"
 
+    get_status_label() {
+        [ -z "$1" ] || ! command -v nc >/dev/null 2>&1 && return
+        nc -z -u -w 2 "$1" "$RAW_PORT" >/dev/null 2>&1 && \
+        echo -e " \033[1;32m(已连通)\033[0m" || echo -e " \033[1;33m(本地受阻)\033[0m"
+    }
+	
+    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m"
     [ -n "${RAW_IP4:-}" ] && {
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v4"
-        echo -e "\n\033[1;35m[IPv4节点链接]\033[0m\n$LINK_V4\n"
+        echo -ne "\033[1;35m[IPv4节点链接]\033[0m$(get_status_label "$RAW_IP4")\n$LINK_V4\n\n"
         FULL_CLIP="$LINK_V4"
     }
     [ -n "${RAW_IP6:-}" ] && {
         LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v6"
-        echo -e "\033[1;36m[IPv6节点链接]\033[0m\n$LINK_V6"
+        echo -ne "\033[1;36m[IPv6节点链接]\033[0m$(get_status_label "$RAW_IP6")\n$LINK_V6\n"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
     }
-
     echo -e "\033[1;34m==========================================\033[0m"
     [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m 证书 SHA256 指纹已集成，支持强校验"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
