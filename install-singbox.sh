@@ -857,7 +857,7 @@ display_links() {
     _do_probe() {
         [ -z "$1" ] && return
         nc -z -u -w 1 "$1" "$RAW_PORT" >/dev/null 2>&1 && \
-        echo -e " \033[1;32m[已连通]\033[0m" || echo -e " \033[1;33m[本地受阻]\033[0m"
+        echo -e " \033[1;32m(已连通)\033[0m" || echo -e " \033[1;33m(本地受阻)\033[0m"
     }
     command -v nc >/dev/null 2>&1 && { v4_status=$(_do_probe "${RAW_IP4:-}"); v6_status=$(_do_probe "${RAW_IP6:-}"); }
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m\n"
