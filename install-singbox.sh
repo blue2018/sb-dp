@@ -834,57 +834,57 @@ EOF
 # ==========================================
 # WARP管理
 # ==========================================
-# 获取/缓存 WARP 凭据
+# 1. 获取/缓存 WARP 凭据
 get_warp_conf() {
     local cache="/etc/sing-box/warp.json"
-    if [ -s "\$cache" ]; then
-        cat "\$cache"
+    if [ -s "\${cache}" ]; then
+        cat "\${cache}"
     else
         info "正在申请 WARP 凭据..."
         local priv=\$(openssl rand -base64 32)
-        local pub=\$(echo "\$priv" | openssl pkey -inform base64 -outform DER | openssl pkey -inform DER -pubout -outform DER | tail -c 32 | openssl base64)
-        local res=\$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" -d "{\"key\":\"\$pub\",\"type\":\"Android\",\"tos\":\"\$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
-        local v6=\$(echo "\$res" | jq -r '.result.config.interface.addresses.v6 // empty')
-        [ -z "\$v6" ] && { err "WARP 注册失败"; return 1; }
-        echo "{\"priv\":\"\$priv\",\"v6\":\"\$v6\"}" | tee "\$cache"
+        local pub=\$(echo "\${priv}" | openssl pkey -inform base64 -outform DER | openssl pkey -inform DER -pubout -outform DER | tail -c 32 | openssl base64)
+        local res=\$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" -d "{\"key\":\"\${pub}\",\"type\":\"Android\",\"tos\":\"\$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
+        local v6=\$(echo "\${res}" | jq -r '.result.config.interface.addresses.v6 // empty')
+        [ -z "\${v6}" ] && { err "WARP 注册失败"; return 1; }
+        echo "{\"priv\":\"\${priv}\",\"v6\":\"\${v6}\"}" | tee "\${cache}"
     fi
 }
 
-# WARP 管理主函数 (集成切换与分流)
+# 2. WARP 管理主函数
 warp_manager() {
     local conf="/etc/sing-box/config.json"
     while true; do
         local status="\033[1;31m已禁用\033[0m"
-        grep -q "warp-out" "\$conf" && status="\033[1;32m已启用\033[0m"
-        echo -e "\n--- WARP 策略管理 (状态: \$status) ---"
+        grep -q "warp-out" "\${conf}" && status="\033[1;32m已启用\033[0m"
+        echo -e "\n--- WARP 策略管理 (状态: \${status}) ---"
         echo "1. 启用/禁用 WARP"
         echo "2. 添加分流域名"
         echo "0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
-        case "\$wc" in
+        case "\${wc}" in
             1)
-                if grep -q "warp-out" "\$conf"; then
+                if grep -q "warp-out" "\${conf}"; then
                     info "正在禁用 WARP..."
-                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "\$conf" > "\${conf}.tmp" && mv "\${conf}.tmp" "\$conf"
+                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "\${conf}" > "\${conf}.tmp" && mv "\${conf}.tmp" "\${conf}"
                     succ "WARP 已禁用"
                 else
                     local cred=\$(get_warp_conf) || continue
-                    local priv=\$(echo "\$cred" | jq -r .priv)
-                    local v6=\$(echo "\$cred" | jq -r .v6)
+                    local priv=\$(echo "\${cred}" | jq -r .priv)
+                    local v6=\$(echo "\${cred}" | jq -r .v6)
                     local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"\$v6"'"],"private_key":"'"\$priv"'","mtu":1280}'
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
-                    jq --argjson out "\$out" --argjson rule "\$rule" '.outbounds += [\$out] | .route.rules = [\$rule] + .route.rules' "\$conf" > "\${conf}.tmp" && mv "\${conf}.tmp" "\$conf"
+                    jq --argjson out "\$out" --argjson rule "\$rule" '.outbounds += [\$out] | .route.rules = [\$rule] + .route.rules' "\${conf}" > "\${conf}.tmp" && mv "\${conf}.tmp" "\${conf}"
                     succ "WARP 已启用"
                 fi
                 systemctl restart sing-box 2>/dev/null || rc-service sing-box restart 2>/dev/null
                 ;;
             2)
-                if ! grep -q "warp-out" "\$conf"; then err "请先启用 WARP"; continue; fi
+                if ! grep -q "warp-out" "\${conf}"; then err "请先启用 WARP"; continue; fi
                 read -r -p "输入要分流的域名: " dom
-                [ -z "\$dom" ] && continue
-                jq --arg dom "\$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [\$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "\$conf" > "\${conf}.tmp" && mv "\${conf}.tmp" "\$conf"
+                [ -z "\${dom}" ] && continue
+                jq --arg dom "\${dom}" '(.route.rules[] | select(.outbound == "warp-out").domain) += [\$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "\${conf}" > "\${conf}.tmp" && mv "\${conf}.tmp" "\${conf}"
                 systemctl restart sing-box 2>/dev/null || rc-service sing-box restart 2>/dev/null
-                succ "域名 \$dom 分流成功"
+                succ "域名 \${dom} 分流成功"
                 ;;
             0) break ;;
             *) err "无效选择" ;;
