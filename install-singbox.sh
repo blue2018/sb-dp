@@ -850,9 +850,13 @@ display_links() {
     [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
 	
-    _do_probe() { [ -n "$1" ] && (echo -n | nc -u -w 1 "$1" "$RAW_PORT" >/dev/null 2>&1 && echo -e " \033[1;32m(已连通)\033[0m" || echo -e " \033[1;33m(本地受阻)\033[0m"); }
+    _do_probe() {
+        [ -z "$1" ] && return
+        nc -z -u -w 1 "$1" "$RAW_PORT" >/dev/null 2>&1 && \
+        echo -e "\033[1;32m(已连通)\033[0m" || echo -e "\033[1;33m(本地受阻)\033[0m"
+    }
     if command -v nc >/dev/null 2>&1; then
-        _do_probe "$RAW_IP4" > /tmp/sb_v4 & _do_probe "$RAW_IP6" > /tmp/sb_v6 & wait
+        _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
         v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
     fi
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m\n"
@@ -1028,7 +1032,8 @@ while true; do
            if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
                systemctl stop sing-box zram-swap 2>/dev/null; rc-service sing-box stop 2>/dev/null
-               swapoff -a 2>/dev/null; [ -f /sys/block/zram0/reset ] && echo 1 > /sys/block/zram0/reset 2>/dev/null
+               swapoff -a 2>/dev/null
+               [ -w /sys/block/zram0/reset ] && echo 1 > /sys/block/zram0/reset 2>/dev/null
                rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} \
                       /etc/systemd/system/{sing-box,zram-swap}.service /etc/init.d/{sing-box,zram-swap} \
                       /etc/sysctl.d/99-sing-box.conf /tmp/sb_* ~/.acme.sh /swapfile
