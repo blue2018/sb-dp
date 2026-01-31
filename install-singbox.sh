@@ -727,11 +727,9 @@ setup_service() {
     [ "$mem_total" -lt 200 ] && io_prio=7 
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
     info "正在写入服务配置并启动，请稍后..."
-    sync   # 确保环境文件落盘，防止启动瞬时读取失败
+    
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
-        local exec_cmd="nice -n $cur_nice $taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json"
-        [ -n "$ionice_bin" ] && [ "$mem_total" -ge 200 ] && exec_cmd="$ionice_bin -c 2 -n $io_prio $exec_cmd"
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
@@ -739,20 +737,37 @@ description="Sing-box Service"
 supervisor="supervise-daemon"
 respawn_delay=10
 respawn_max=5
-respawn_period=60
+
+# 【标记：保留】原有环境加载
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
-command="/bin/sh"
-command_args="-c \"$exec_cmd\""
+
+command="/usr/bin/sing-box"
+command_args="run -c /etc/sing-box/config.json"
+command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
+
+# 【修正】Alpine 最佳实践：使用 supervisor 参数控制权重
+supervise_daemon_args="--nicelevel $cur_nice"
+# 绑定 CPU 核心
+command_exec="taskset"
+command_args_foreground="-c $core_range \$command \$command_args"
+
 rc_ulimit="-n 1000000"
 rc_nice="$cur_nice"
 rc_oom_score_adj="-500"
+
 depend() { need net; after firewall; }
-start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; }
+
+start_pre() { 
+    /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_err.log 2>&1 || { 
+        cat /tmp/sb_err.log; return 1; 
+    }
+}
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true
+		sync   # 确保环境文件落盘，防止启动瞬时读取失败
         rc-service sing-box restart >/dev/null 2>&1 &
     else
         local mem_config=""; local cpu_quota=$((real_c * 100))
