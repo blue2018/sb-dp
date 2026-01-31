@@ -744,15 +744,13 @@ respawn_max=5
 respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
-command="/usr/bin/sing-box"
-command_args="run -c /etc/sing-box/config.json"
+command="/usr/bin/taskset"
+command_args="-c ${core_range} /usr/bin/sing-box run -c /etc/sing-box/config.json"
 command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
-supervise_daemon_args="--nicelevel $final_nice"
-command_exec="taskset"
-command_args_foreground="-c $core_range \$command \$command_args"
+supervise_daemon_args="--nicelevel ${final_nice}"
 rc_ulimit="-n 1000000"
-rc_nice="$final_nice"
+rc_nice="${final_nice}"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
 start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; }
@@ -767,9 +765,8 @@ EOF
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
-        local systemd_nice_line="Nice=$final_nice"
-        [ "$final_nice" -eq 0 ] && systemd_nice_line="# Nice=0 (Environment restricted)"
-        
+        local systemd_nice_line="Nice=${final_nice}"
+        [ "${final_nice}" -eq 0 ] && systemd_nice_line="# Nice=0 (Environment restricted)"
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
 Description=Sing-box Service
@@ -785,7 +782,7 @@ EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
-$systemd_nice_line
+${systemd_nice_line}
 ${io_config}
 LimitNOFILE=1000000
 LimitMEMLOCK=infinity
