@@ -834,33 +834,6 @@ EOF
 # ==========================================
 # WARP管理
 # ==========================================
-# 1. 获取/缓存 WARP 凭据
-get_warp_conf() {
-    local cache="/etc/sing-box/warp.json"
-    if [ -s "\${cache}" ]; then
-        cat "\${cache}"
-    else
-        info "正在申请 WARP 凭据..."
-        local priv=\$(openssl rand -base64 32)
-        # 拆解私钥转公钥的嵌套，避免括号冲突
-        local pub_der=\$(echo "\${priv}" | openssl pkey -inform base64 -outform DER)
-        local pub_raw=\$(echo "\${pub_der}" | openssl pkey -inform DER -pubout -outform DER | tail -c 32)
-        local pub=\$(echo "\${pub_raw}" | openssl base64)
-        
-        # 拆解日期获取，确保 API 请求字符串干净
-        local now_date=\$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-        local reg_data="{\"key\":\"\${pub}\",\"type\":\"Android\",\"tos\":\"\${now_date}\"}"
-        
-        local res=\$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" -d "\${reg_data}")
-        local v6=\$(echo "\${res}" | jq -r '.result.config.interface.addresses.v6 // empty')
-        
-        if [ -z "\${v6}" ]; then
-            err "WARP 注册失败"
-            return 1
-        fi
-        echo "{\"priv\":\"\${priv}\",\"v6\":\"\${v6}\"}" | tee "\${cache}"
-    fi
-}
 
 # 2. WARP 管理主函数
 warp_manager() {
