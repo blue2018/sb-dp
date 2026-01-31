@@ -849,25 +849,26 @@ get_env_data() {
 }
 
 display_links() {
-    local LINK_V4="" LINK_V6="" FULL_CLIP="" 
+    local LINK_V4="" LINK_V6="" FULL_CLIP="" v4_status="" v6_status=""
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
-    get_status_label() {
-        [ -z "$1" ] || ! command -v nc >/dev/null 2>&1 && return
-        nc -z -u -w 2 "$1" "$RAW_PORT" >/dev/null 2>&1 && \
-        echo -e " \033[1;32m(已连通)\033[0m" || echo -e " \033[1;33m(本地受阻)\033[0m"
+
+    _do_probe() {
+        [ -z "$1" ] && return
+        nc -z -u -w 1 "$1" "$RAW_PORT" >/dev/null 2>&1 && \
+        echo -e " \033[1;32m[已连通]\033[0m" || echo -e " \033[1;33m[本地受阻]\033[0m"
     }
+    command -v nc >/dev/null 2>&1 && { v4_status=$(_do_probe "${RAW_IP4:-}"); v6_status=$(_do_probe "${RAW_IP6:-}"); }
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m\n"
+	
     [ -n "${RAW_IP4:-}" ] && {
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v4"
-        local v4_status=$(get_status_label "$RAW_IP4")
         echo -e "\033[1;35m[IPv4节点链接]\033[0m$v4_status\n$LINK_V4\n"
         FULL_CLIP="$LINK_V4"
     }
     [ -n "${RAW_IP6:-}" ] && {
         LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v6"
-        local v6_status=$(get_status_label "$RAW_IP6")
         echo -e "\033[1;36m[IPv6节点链接]\033[0m$v6_status\n$LINK_V6\n"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
     }
