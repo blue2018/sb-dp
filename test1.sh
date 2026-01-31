@@ -1068,7 +1068,7 @@ while true; do
     echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "-------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
-    echo "4. 更新内核    5. 重启服务    6. warp管理"
+    echo "4. 更新内核    5. 重启服务    6. WARP 管理"
     echo "7. 卸载脚本    0. 退出"
     echo ""
     read -r -p "请选择 [0-7]: " opt
@@ -1095,7 +1095,7 @@ while true; do
                [ -w /sys/block/zram0/reset ] && echo 1 > /sys/block/zram0/reset 2>/dev/null
                rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} \
                       /etc/systemd/system/{sing-box,zram-swap}.service /etc/init.d/{sing-box,zram-swap} \
-                      /etc/sysctl.d/99-sing-box.conf /tmp/sb_* ~/.acme.sh /swapfile
+                      /etc/sysctl.d/99-sing-box.conf /tmp/sb_* ~/.acme.sh /swapfile /etc/sing-box/warp.json
                sed -i '/swapfile/d' /etc/fstab; crontab -l 2>/dev/null | grep -v "acme.sh" | crontab - 2>/dev/null
                printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
                sysctl -p >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "深度卸载完成"; exit 0
