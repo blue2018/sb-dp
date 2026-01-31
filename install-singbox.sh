@@ -725,9 +725,13 @@ setup_service() {
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
     [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
     [ "$mem_total" -lt 200 ] && io_prio=7 
+    local final_nice="$cur_nice"
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
+    if ! renice "$cur_nice" $$ >/dev/null 2>&1; then
+        warn "当前环境禁止高优先级调度，已自动回退至默认权重 (Nice 0)"
+        final_nice=0
+    fi
     info "正在写入服务配置并启动，请稍后..."
-    
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
         cat > /etc/init.d/sing-box <<EOF
@@ -737,37 +741,25 @@ description="Sing-box Service"
 supervisor="supervise-daemon"
 respawn_delay=10
 respawn_max=5
-
-# 【标记：保留】原有环境加载
+respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
-
 command="/usr/bin/sing-box"
 command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
-
-# 【修正】Alpine 最佳实践：使用 supervisor 参数控制权重
-supervise_daemon_args="--nicelevel $cur_nice"
-# 绑定 CPU 核心
+supervise_daemon_args="--nicelevel $final_nice"
 command_exec="taskset"
 command_args_foreground="-c $core_range \$command \$command_args"
-
 rc_ulimit="-n 1000000"
-rc_nice="$cur_nice"
+rc_nice="$final_nice"
 rc_oom_score_adj="-500"
-
 depend() { need net; after firewall; }
-
-start_pre() { 
-    /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_err.log 2>&1 || { 
-        cat /tmp/sb_err.log; return 1; 
-    }
-}
+start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1 || return 1; }
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true
-		sync   # 确保环境文件落盘，防止启动瞬时读取失败
+        sync   # 确保环境文件与服务脚本落盘，防止启动瞬时读取失败
         rc-service sing-box restart >/dev/null 2>&1 &
     else
         local mem_config=""; local cpu_quota=$((real_c * 100))
@@ -775,6 +767,8 @@ EOF
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
+        local systemd_nice_line="Nice=$final_nice"
+        [ "$final_nice" -eq 0 ] && systemd_nice_line="# Nice=0 (Environment restricted)"
         
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
@@ -791,8 +785,8 @@ EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStart=$taskset_bin -c $core_range /usr/bin/sing-box run -c /etc/sing-box/config.json
-Nice=$cur_nice
-$io_config
+$systemd_nice_line
+${io_config}
 LimitNOFILE=1000000
 LimitMEMLOCK=infinity
 ${mem_config}CPUQuota=${cpu_quota}%
@@ -807,6 +801,7 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload >/dev/null 2>&1
         systemctl enable sing-box >/dev/null 2>&1 || true
+        sync   # 确保环境文件与服务配置落盘
         systemctl restart sing-box >/dev/null 2>&1 &
     fi
     set +e     # 关闭 set -e，这是防止脚本在 pidof 失败时直接退出的关键核心
