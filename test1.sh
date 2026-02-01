@@ -900,14 +900,27 @@ get_warp_conf() {
     local cache="/etc/sing-box/warp.json" log="/tmp/warp_debug.log"
     echo "--- 自动注册 $(date) ---" > "$log"
     command -v wg >/dev/null || apk add wireguard-tools >>"$log" 2>&1
-    local pr=$(wg genkey) pu=$(echo "$pr" | wg pubkey)
-    local res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" -d "{\"key\":\"$pu\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
+    
+    # 明确变量，不使用缩写赋值
+    local pr_key=$(wg genkey)
+    local pu_key=$(echo "$pr_key" | wg pubkey)
+    
+    # 这里的 -d 参数和 Header 顺序严格按照能成功的那个版本还原
+    local res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
+        -H "User-Agent: okhttp/3.12.1" \
+        -H "Content-Type: application/json" \
+        -d "{\"key\":\"$pu_key\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
+
     local id=$(echo "$res" | jq -r '.id // .result.id // empty')
     if [ -n "$id" ] && [ "$id" != "null" ]; then
-        local v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
-        [[ "$v6" != */* ]] && v6="${v6}/128"
-        [ -z "$v6" ] || [ "$v6" == "/128" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
-        echo "{\"priv\":\"$pr\",\"v6\":\"$v6\"}" > "$cache" && echo "$pr|$v6"
+        local v6_addr=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
+        [[ "$v6_addr" != */* ]] && v6_addr="${v6_addr}/128"
+        [ -z "$v6_addr" ] || [ "$v6_addr" == "/128" ] && v6_addr="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
+        
+        # 写入物理缓存
+        echo "{\"priv\":\"$pr_key\",\"v6\":\"$v6_addr\"}" > "$cache"
+        # 明确输出结果，用作函数返回值
+        echo "${pr_key}|${v6_addr}"
     else
         echo "API 失败: $res" >> "$log" && cat "$log" >&2 && return 1
     fi
@@ -916,19 +929,29 @@ get_warp_conf() {
 warp_manager() {
     local conf="/etc/sing-box/config.json"
     while true; do
-        local st="\033[1;31m已禁用\033[0m"; grep -q "warp-out" "$conf" && st="\033[1;32m已启用\033[0m"
-        echo -e "\n--- WARP 全自动管理 (状态: $st) ---\n1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
+        local st="\033[1;31m已禁用\033[0m"
+        grep -q "warp-out" "$conf" && st="\033[1;32m已启用\033[0m"
+        echo -e "\n--- WARP 全自动管理 (状态: $st) ---"
+        echo -e "1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
             1)
                 if grep -q "warp-out" "$conf"; then
-                    info "正在禁用..." && jq 'del(.outbounds[] | select(.tag == "warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    info "正在禁用..."
+                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
-                    info "执行全自动配置..." && rm -f "/etc/sing-box/warp.json"
-                    local cred=$(get_warp_conf) || continue
-                    local priv=$(echo "$cred" | cut -d'|' -f1) v6=$(echo "$cred" | cut -d'|' -f2)
-                    [ -z "$priv" ] && continue
-                    local out=$(jq -n --arg pr "$priv" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
+                    info "执行全自动配置..."
+                    rm -f "/etc/sing-box/warp.json"
+                    # 这里是关键：用结果变量捕捉，不直接在逻辑判断里调用
+                    local warp_cred
+                    warp_cred=$(get_warp_conf)
+                    [ $? -ne 0 ] && { err "配置获取失败"; continue; }
+                    
+                    local final_pr=$(echo "$warp_cred" | cut -d'|' -f1)
+                    local final_v6=$(echo "$warp_cred" | cut -d'|' -f2)
+                    
+                    # 注入配置
+                    local out=$(jq -n --arg pr "$final_pr" --arg v6 "$final_v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","tiktok.com"],"outbound":"warp-out"}'
                     jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + (.route.rules // [])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 fi
