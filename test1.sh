@@ -958,7 +958,7 @@ warp_manager() {
                     [ -z "$priv" ] && { err "错误：未能获取有效私钥"; continue; }
 
                     # 构造完整的 WARP 出站
-                    local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1120}'
+                    local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
                     # 构造路由规则
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
                     
