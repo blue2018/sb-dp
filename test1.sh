@@ -846,20 +846,10 @@ display_links() {
     [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
 	
     _do_probe() {
-    local target="$1"
-    [ -z "$target" ] && return
-
-    # 自动判断是否为 IPv6 地址并添加 -6 参数
-    local proto_flag=""
-    [[ "$target" == *":"* ]] && proto_flag="-6"
-
-    # 使用更加健壮的探测逻辑
-    if nc $proto_flag -z -u -w 1 "$target" "$RAW_PORT" >/dev/null 2>&1; then
-        echo -e "\033[1;32m(已连通)\033[0m"
-    else
-        echo -e "\033[1;33m(本地受阻)\033[0m"
-    fi
-}
+        [ -z "$1" ] && return
+        nc -z -u -w 1 "$1" "$RAW_PORT" >/dev/null 2>&1 && \
+        echo -e "\033[1;32m(已连通)\033[0m" || echo -e "\033[1;33m(本地受阻)\033[0m"
+    }
     if command -v nc >/dev/null 2>&1; then
         _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
         v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
