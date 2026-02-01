@@ -899,57 +899,35 @@ display_system_status() {
 get_warp_conf() {
     local cache="/etc/sing-box/warp.json"
     local log="/tmp/warp_debug.log"
-    echo "--- 自动注册 $(date) ---" > "$log"
-
-    # 1. 确保环境依赖
-    command -v wg >/dev/null || apk add wireguard-tools >>"$log" 2>&1
-    command -v jq >/dev/null || apk add jq >>"$log" 2>&1
-
-    # 2. 生成私钥并物理落地（解决 pr: unbound variable 的终极方案）
-    # 不再使用 local pr=$(wg genkey)，而是直接写文件
+    
+    # 强制清场，重新注册
     rm -f /tmp/warp_gen.key
     wg genkey > /tmp/warp_gen.key
-    
-    # 3. 读取私钥并生成公钥
-    local pr_val
-    local pu_val
-    pr_val=$(cat /tmp/warp_gen.key)
-    pu_val=$(wg pubkey < /tmp/warp_gen.key)
+    local pr_val=$(cat /tmp/warp_gen.key)
+    local pu_val=$(wg pubkey < /tmp/warp_gen.key)
 
-    # 4. 调用 API 注册
-    local res
-    res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
-        -H "User-Agent: okhttp/3.12.1" \
+    local res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
         -H "Content-Type: application/json" \
         -d "{\"key\":\"$pu_val\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
 
-    # 5. 解析结果
-    local id
-    id=$(echo "$res" | jq -r '.id // .result.id // empty')
-
+    local id=$(echo "$res" | jq -r '.id // .result.id // empty')
     if [ -n "$id" ] && [ "$id" != "null" ]; then
-        local v6
-        v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
+        # 提取并严格处理 IPv6
+        local v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
         
-        # 格式化 IPv6 掩码
-        if [[ -n "$v6" && "$v6" != "null" ]]; then
-            [[ "$v6" != */* ]] && v6="${v6}/128"
-        else
+        # 核心修复点：确保 IPv6 带有 /128 掩码
+        if [[ -z "$v6" || "$v6" == "null" ]]; then
             v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
+        elif [[ "$v6" != */* ]]; then
+            v6="${v6}/128"
         fi
 
-        # 写入持久化缓存
         echo "{\"priv\":\"$pr_val\",\"v6\":\"$v6\"}" > "$cache"
-        
-        # 清理临时文件
-        rm -f /tmp/warp_gen.key
-        
-        # 返回标准格式供主函数 cut
         echo "${pr_val}|${v6}"
+        rm -f /tmp/warp_gen.key
         return 0
     else
-        echo "API 失败响应: $res" >> "$log"
-        cat "$log" >&2
+        echo "API 失败: $res" >> "$log"
         rm -f /tmp/warp_gen.key
         return 1
     fi
@@ -967,59 +945,43 @@ warp_manager() {
         case "$wc" in
             1)
                 if grep -q "warp-out" "$conf"; then
-                    info "正在禁用..."
-                    # 仅删除 warp 相关的出站和规则，保留其他内容
                     jq 'del(.outbounds[] | select(.tag=="warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
                     info "执行全自动配置..."
-                    # 1. 强制安装依赖
-                    command -v wg >/dev/null || apk add wireguard-tools
+                    local cred=$(get_warp_conf) || { echo "注册失败"; sleep 2; continue; }
+                    local pr=$(echo "$cred" | cut -d'|' -f1)
+                    local v6=$(echo "$cred" | cut -d'|' -f2)
                     
-                    # 2. 稳健生成密钥（分行处理，防变量丢失）
-                    wg genkey > /tmp/warp.priv
-                    local pr=$(cat /tmp/warp.priv)
-                    local pu=$(wg pubkey < /tmp/warp.priv)
+                    # 使用 jq 的 --argjson 确保 local_address 是标准的字符串数组
+                    local warp_out=$(jq -n \
+                        --arg pr "$pr" \
+                        --arg v4 "172.16.0.2/32" \
+                        --arg v6 "$v6" \
+                        '{
+                            "type": "wireguard",
+                            "tag": "warp-out",
+                            "server": "162.159.193.10",
+                            "server_port": 1701,
+                            "local_address": [$v4, $v6],
+                            "private_key": $pr,
+                            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                            "mtu": 1280
+                        }')
                     
-                    # 3. 注册 WARP
-                    local res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" -H "Content-Type: application/json" -d "{\"key\":\"$pu\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
-                    local id=$(echo "$res" | jq -r '.id // .result.id // empty')
-                    
-                    if [ -z "$id" ] || [ "$id" = "null" ]; then
-                        err "注册失败，请检查网络"
-                        rm -f /tmp/warp.priv; sleep 2; continue
-                    fi
-                    
-                    local v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // "2606:4700:110:8283:1102:f37b:af8b:a65d/128"')
-                    
-                    # 4. 构造 Outbound (1.12.x 兼容格式)
-                    local warp_out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{
-                        "type": "wireguard",
-                        "tag": "warp-out",
-                        "server": "162.159.193.10",
-                        "server_port": 1701,
-                        "local_address": ["172.16.0.2/32", $v6],
-                        "private_key": $pr,
-                        "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-                        "mtu": 1280
-                    }')
-                    
-                    # 5. 构造分流规则
                     local rule='{"domain":["google.com","openai.com","chatgpt.com","ip.sb"],"outbound":"warp-out"}'
                     
-                    # 6. 增量写入：保留原有 inbounds
-                    jq --argjson out "$warp_out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + (.route.rules // [])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    # 增量写入，不破坏原有 Hysteria2 入口
+                    jq --argjson out "$warp_out" --argjson rule "$rule" \
+                        '.outbounds += [$out] | .route.rules = [$rule] + (.route.rules // [])' \
+                        "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                     
-                    # 7. 注入环境变量到 OpenRC
+                    # 环境变量注入
                     [ -f "$conf_d" ] && ! grep -q "ENABLE_DEPRECATED" "$conf_d" && echo 'export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true' >> "$conf_d"
-                    rm -f /tmp/warp.priv
                 fi
-                # 重启服务并检查
-                rc-service sing-box restart && succ "操作完成" && sleep 1
-                ;;
-            2)
-                # 域名分流代码同上...
+                rc-service sing-box restart && echo "操作完成" && sleep 1
                 ;;
             0) return 0 ;;
+            *) echo "无效选择"; sleep 1 ;;
         esac
     done
 }
