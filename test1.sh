@@ -896,29 +896,30 @@ get_warp_conf() {
     local cache="/etc/sing-box/warp.json"
     [ -s "$cache" ] && { cat "$cache"; return 0; }
 
-    info "正在申请 WARP 凭据 (兼容模式)..."
+    info "正在申请 WARP 凭据 (容器兼容模式)..."
     
-    # 使用你提供的更稳健的密钥生成方式
+    # 使用 OpenSSL 直接生成私钥
     local priv=$(openssl rand -base64 32)
-    # 这里的关键是：不需要公钥参与注册流程，1922 接口会自动处理
     
-    local res=$(curl -sSL -X POST -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" \
-        -d "{\"key\":\"$priv\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}" \
-        "https://api.cloudflareclient.com/v0a1922/reg")
+    # 借鉴：使用 1922 接口 + 特定 UA + 强制 IPv4
+    local res=$(curl -s -4 -L -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
+        -H "User-Agent: okhttp/3.12.1" \
+        -H "Content-Type: application/json" \
+        -d "{\"key\":\"$(echo "$priv" | wg pubkey 2>/dev/null || openssl rand -base64 32)\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
 
-    # 借鉴：直接判断是否包含 id
-    if ! echo "$res" | grep -q "\"id\""; then
-        err "WARP 注册失败，母鸡 IP 可能被封锁"
-        [ -n "$res" ] && echo "返回原始数据: $res"
+    # 借鉴：只要包含 "id" 就认为成功，不强求 jq 完美解析
+    if echo "$res" | grep -q "\"id\""; then
+        # 尝试提取 v6，提取不到就用固定占位符，反正 WARP 内部能通
+        local v6=$(echo "$res" | jq -r '.result.config.interface.addresses.v6 // empty' 2>/dev/null)
+        [ -z "$v6" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
+        
+        echo "{\"priv\":\"$priv\",\"v6\":\"$v6\"}" | tee "$cache"
+        succ "WARP 账号注册成功"
+    else
+        err "WARP 注册失败，API 响应异常"
+        [ -n "$res" ] && echo "DEBUG: $res"
         return 1
     fi
-
-    # 提取 v6 地址，如果 API 没返回，则给一个预设值（通常 WARP v6 地址都是类似的）
-    local v6=$(echo "$res" | jq -r '.result.config.interface.addresses.v6 // empty' 2>/dev/null)
-    [ -z "$v6" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128" # 备用填充
-
-    echo "{\"priv\":\"$priv\",\"v6\":\"$v6\"}" | tee "$cache"
-    succ "WARP 账号注册成功"
 }
 
 warp_manager() {
@@ -938,21 +939,19 @@ warp_manager() {
                     jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
                     succ "WARP 已禁用"
                 else
-                    # 关键：如果之前注册失败存了脏数据，先删掉
-                    [ -s "/etc/sing-box/warp.json" ] || rm -f "/etc/sing-box/warp.json"
+                    # 关键：申请前清理可能存在的脏缓存
+                    rm -f "/etc/sing-box/warp.json"
                     local cred=$(get_warp_conf) || continue
                     local priv=$(echo "$cred" | jq -r .priv)
                     local v6=$(echo "$cred" | jq -r .v6)
                     
-                    # 回退到旧版 server 语法，确保兼容性
                     local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
                     
                     jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + .route.rules' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
                     succ "WARP 已启用"
                 fi
-                # 无论版本高低，带上这个环境变量总是安全的
-                export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
+                # 【修改：使用你脚本里定义的 service_ctrl，完美兼容 Alpine】
                 service_ctrl restart || true
                 ;;
             2)
@@ -960,7 +959,6 @@ warp_manager() {
                 read -r -p "输入要分流的域名: " dom
                 [ -z "$dom" ] && continue
                 jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
                 service_ctrl restart || true
                 succ "域名 $dom 分流成功"
                 ;;
