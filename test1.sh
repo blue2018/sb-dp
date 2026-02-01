@@ -894,38 +894,36 @@ display_system_status() {
 
 get_warp_conf() {
     local cache="/etc/sing-box/warp.json"
-    [ -s "$cache" ] && { cat "$cache"; return 0; }
+    local log="/tmp/warp_debug.log"
+    rm -f "$log" # 清理旧日志
 
-    info "[DEBUG] 开始申请 WARP 凭据..."
+    echo "--- 调试开始 $(date) ---" > "$log"
     
-    # 1. 生成密钥
-    local priv=$(openssl rand -base64 32)
-    [ -z "$priv" ] && { err "[DEBUG] OpenSSL 生成私钥失败"; return 1; }
-    info "[DEBUG] 私钥生成成功"
+    # 1. 检查 openssl
+    local priv=$(openssl rand -base64 32 2>>"$log")
+    echo "生成的私钥: $priv" >> "$log"
 
-    # 2. 发送请求 (捕获错误流)
-    info "[DEBUG] 正在请求 Cloudflare API (v0a1922)..."
-    local res=$(curl -s -4 -L -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
+    # 2. 发送请求并记录完整响应
+    echo "正在请求 API..." >> "$log"
+    local res=$(curl -is -4 -L -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
         -H "User-Agent: okhttp/3.12.1" \
         -H "Content-Type: application/json" \
-        -d "{\"key\":\"$(openssl rand -base64 32)\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}" 2>&1)
+        -d "{\"key\":\"$(openssl rand -base64 32)\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}" 2>>"$log")
+    
+    echo "API 原始响应内容:" >> "$log"
+    echo "$res" >> "$log"
 
-    # 3. 检查响应内容
+    # 3. 逻辑判断
     if echo "$res" | grep -q "\"id\""; then
-        info "[DEBUG] API 返回成功标识"
         local v6=$(echo "$res" | jq -r '.result.config.interface.addresses.v6 // empty' 2>/dev/null)
-        [ -z "$v6" ] || [ "$v6" = "null" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
-        
-        info "[DEBUG] 提取的 IPv6: $v6"
-        echo "{\"priv\":\"$priv\",\"v6\":\"$v6\"}" | tee "$cache"
-        succ "WARP 账号注册成功"
+        [ -z "$v6" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
+        local final_json="{\"priv\":\"$priv\",\"v6\":\"$v6\"}"
+        echo "$final_json" | tee "$cache"
+        return 0
     else
-        err "WARP 注册失败！"
-        echo "---------------------- DEBUG INFO ----------------------"
-        echo "响应内容: $res"
-        echo "检查项: 是否包含 id 字段 -> 失败"
-        echo "检查项: 网络连接状态 -> $([ -z "$res" ] && echo "空响应，可能被防火墙拦截" || echo "收到非预期响应")"
-        echo "--------------------------------------------------------"
+        echo "判定结果: 注册失败 (未发现 id)" >> "$log"
+        # 这种情况下，我们将日志内容弹射到屏幕上
+        cat "$log" >&2 
         return 1
     fi
 }
