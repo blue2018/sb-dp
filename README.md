@@ -12,5 +12,5 @@ bash -c "$(curl -fsSL https://github.com/blue2018/sb-dp/raw/refs/heads/main/inst
 ```
 TEST:
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/blue2018/sb-dp/refs/heads/main/test1.sh)"
+bash -c "$(curl -fsSL -H "Cache-Control: no-cache" https://raw.githubusercontent.com/blue2018/sb-dp/refs/heads/main/test1.sh?$(date +%s))"
 ```
