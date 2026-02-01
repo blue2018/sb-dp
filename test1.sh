@@ -948,52 +948,6 @@ display_system_status() {
     echo -e "IPv6地址: \033[1;33m${RAW_IP6:-无}\033[0m"
 }
 
-# 获取/缓存 WARP 凭据
-get_warp_conf() {
-    local cache="/etc/sing-box/warp.json"
-    [ -s "${cache}" ] && { cat "${cache}"; return 0; }
-    info "正在申请 WARP 凭据..."
-    local priv=$(openssl rand -base64 32)
-    local pub=$(echo "${priv}" | openssl pkey -inform base64 -pubout -outform DER | tail -c 32 | openssl base64)
-    local res=$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" -d "{\"key\":\"${pub}\",\"type\":\"Android\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
-    local v6=$(echo "${res}" | jq -r '.result.config.interface.addresses.v6 // empty')
-    [ -z "${v6}" ] && { err "WARP 注册失败"; return 1; }
-    echo "{\"priv\":\"${priv}\",\"v6\":\"${v6}\"}" | tee "${cache}"
-}
-
-# WARP 管理主菜单
-warp_manager() {
-    local conf="/etc/sing-box/config.json"
-    while true; do
-        local status="\033[1;31m已禁用\033[0m"
-        grep -q "warp-out" "$conf" && status="\033[1;32m已启用\033[0m"
-        echo -e "\n--- WARP 策略管理 (状态: $status) ---"
-        echo -e "1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
-        read -r -p "请选择 [0-2]: " wc
-        case "$wc" in
-            1)
-                if grep -q "warp-out" "$conf"; then
-                    info "正在禁用 WARP..."
-                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                    succ "WARP 已禁用"
-                else
-                    local cred=$(get_warp_conf) || continue
-                    local priv=$(echo "$cred" | jq -r .priv); local v6=$(echo "$cred" | jq -r .v6)
-                    local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
-                    local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
-                    jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + .route.rules' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                    succ "WARP 已启用"
-                fi; service_ctrl restart ;;
-            2)
-                grep -q "warp-out" "$conf" || { err "请先启用 WARP"; continue; }
-                read -r -p "输入域名: " dom
-                [ -n "$dom" ] && jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf" && service_ctrl restart && succ "$dom 分流成功" ;;
-            0) break ;;
-            *) err "无效选择" ;;
-        esac
-    done
-}
-
 # ==========================================
 # 管理脚本生成 (最终固化放行版)
 # ==========================================
@@ -1076,30 +1030,46 @@ elif [[ "${1:-}" == "--apply-cwnd" ]]; then
     apply_userspace_adaptive_profile >/dev/null 2>&1 || true
     apply_initcwnd_optimization "true" || true; apply_firewall
 fi
-EOF
-    mv "$CORE_TMP" "$SBOX_CORE"
-    chmod 700 "$SBOX_CORE"
 
-    # 生成交互管理脚本 /usr/local/bin/sb
-    local SB_PATH="/usr/local/bin/sb"
-    cat > "$SB_PATH" <<'EOF'
-#!/usr/bin/env bash
-set -uo pipefail
-SBOX_CORE="/etc/sing-box/core_script.sh"
-if [ ! -f "$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
-[[ $# -gt 0 ]] && { /bin/bash "$SBOX_CORE" "$@"; exit 0; }
-source "$SBOX_CORE" --detect-only
-
-service_ctrl() {
-    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "$1" && return
-    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "$1" sing-box
+get_warp_conf() {
+    local cache="/etc/sing-box/warp.json"
+    [ -s "${cache}" ] && { cat "${cache}"; return; }
+    echo -e "\033[1;33m正在申请 WARP 凭据...\033[0m"
+    local priv=$(openssl rand -base64 32)
+    local pub=$(echo "$priv" | openssl pkey -inform base64 -pubout -outform DER | tail -c 32 | openssl base64)
+    local res=$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" -d "{\"key\":\"$pub\",\"type\":\"Android\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
+    local v6=$(echo "$res" | jq -r '.result.config.interface.addresses.v6 // empty')
+    [ -z "$v6" ] && { echo -e "\033[1;31mWARP 注册失败\033[0m"; return 1; }
+    echo "{\"priv\":\"$priv\",\"v6\":\"$v6\"}" | tee "$cache"
 }
-EOF
 
-    declare -f get_warp_conf >> "$SB_PATH"
-    declare -f warp_manager >> "$SB_PATH"
+warp_manager() {
+    local conf="/etc/sing-box/config.json"
+    while true; do
+        local status="\033[1;31m已禁用\033[0m"
+        grep -q "warp-out" "$conf" && status="\033[1;32m已启用\033[0m"
+        echo -e "\n--- WARP 管理 (状态: $status) ---"
+        echo -e "1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
+        read -r -p "选择: " wc
+        case "$wc" in
+            1)
+                if grep -q "warp-out" "$conf"; then
+                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
+                else
+                    local cred=$(get_warp_conf) || continue
+                    local priv=$(echo "$cred" | jq -r .priv); local v6=$(echo "$cred" | jq -r .v6)
+                    local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
+                    local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
+                    jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + .route.rules' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
+                fi; service_ctrl restart ;;
+            2)
+                read -r -p "输入域名: " dom
+                [ -n "$dom" ] && jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf" && service_ctrl restart ;;
+            0) break ;;
+        esac
+    done
+}
 
-    cat >> "$SB_PATH" <<'EOF'
 while true; do
     echo "========================"
     echo " Sing-box HY2 管理 (sb)"
