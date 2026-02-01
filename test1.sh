@@ -1030,6 +1030,24 @@ elif [[ "${1:-}" == "--apply-cwnd" ]]; then
     apply_userspace_adaptive_profile >/dev/null 2>&1 || true
     apply_initcwnd_optimization "true" || true; apply_firewall
 fi
+EOF
+
+    mv "$CORE_TMP" "$SBOX_CORE"
+    chmod 700 "$SBOX_CORE"
+
+	local SB_PATH="/usr/local/bin/sb"
+    cat > "$SB_PATH" <<'EOF'
+#!/usr/bin/env bash
+set -uo pipefail
+SBOX_CORE="/etc/sing-box/core_script.sh"
+[ ! -f "$SBOX_CORE" ] && { echo "核心文件丢失"; exit 1; }
+[[ $# -gt 0 ]] && { /bin/bash "$SBOX_CORE" "$@"; exit 0; }
+source "$SBOX_CORE" --detect-only
+
+service_ctrl() {
+    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "$1" && return
+    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "$1" sing-box
+}
 
 get_warp_conf() {
     local cache="/etc/sing-box/warp.json"
