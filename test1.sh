@@ -57,12 +57,12 @@ detect_os() {
 # 依赖安装 (容错增强版)
 install_dependencies() {
     info "正在检查系统类型..."
-    local PM="" DEPS="curl jq openssl ca-certificates iproute2 ethtool iptables bash tzdata tar kmod resolvconf wireguard-tools"
+    local PM="" DEPS="curl jq openssl ca-certificates iproute2 ethtool iptables bash tzdata tar kmod wireguard-tools"
     command -v apk >/dev/null 2>&1 && PM="apk" || { command -v apt-get >/dev/null 2>&1 && PM="apt" || PM="yum"; }
     [ "$PM" = "apk" ] && DEPS="$DEPS netcat-openbsd procps coreutils util-linux-misc" || DEPS="$DEPS netcat-openbsd procps util-linux"
     [ "$PM" = "yum" ] && DEPS="${DEPS//netcat-openbsd/nc}" && DEPS="${DEPS//procps/procps-ng}"
 
-    sync && echo 3 > /proc/sys/vm/drop_caches
+    [ -w /proc/sys/vm/drop_caches ] && sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
     case "$PM" in
         apk) info "检测到 Alpine 系统，执行分批安装依赖..."; apk update >/dev/null 2>&1; for pkg in $DEPS; do apk info -e "$pkg" >/dev/null || apk add --no-cache "$pkg" || warn "组件 $pkg 安装异常"; done; rm -rf /var/cache/apk/* ;;
         apt) info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..."; export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1; apt-get install -y --no-install-recommends $DEPS || err "依赖安装失败"; apt-get clean ;;
