@@ -898,29 +898,35 @@ display_system_status() {
 
 get_warp_conf() {
     local cache="/etc/sing-box/warp.json" log="/tmp/warp_debug.log"
-    echo "--- 调试开始 $(date) ---" > "$log"
-    command -v wg >/dev/null || apk add wireguard-tools >>"$log" 2>&1
+    echo "--- 全自动注册开始 $(date) ---" > "$log"
     
-    # 生成密钥对
+    # 确保工具存在
+    command -v wg >/dev/null || apk add wireguard-tools >>"$log" 2>&1
+    command -v jq >/dev/null || apk add jq >>"$log" 2>&1
+
+    # 1. 生成确定的密钥对
     local pr=$(wg genkey)
     local pu=$(echo "$pr" | wg pubkey)
     
-    # 核心修复：更严谨的 API 请求头和格式
+    # 2. 全自动请求 (使用经过验证的静态 TOS 和 Header)
+    # 注意：这里去掉了动态 date 命令，直接用硬编码的格式，防止系统时区导致的格式错误
     local res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
         -H "User-Agent: okhttp/3.12.1" \
         -H "Content-Type: application/json" \
-        -H "Accept: application/json" \
-        -d "{\"key\":\"$pu\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
+        -d "{\"key\":\"$pu\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
 
+    # 3. 解析 ID (支持多种 API 返回格式)
     local id=$(echo "$res" | jq -r '.id // .result.id // empty')
-    if [ -n "$id" ]; then
+
+    if [ -n "$id" ] && [ "$id" != "null" ]; then
         local v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // "2606:4700:110:8283:1102:f37b:af8b:a65d/128"')
-        # 写入缓存文件
+        # 写入缓存并返回标准格式字符串供上级解析
         echo "{\"priv\":\"$pr\",\"v6\":\"$v6\"}" > "$cache"
-        # 返回给上级变量使用
         echo "$pr|$v6"
     else
-        echo "注册失败: $res" >> "$log" && cat "$log" >&2 && return 1
+        echo "API 报错内容: $res" >> "$log"
+        cat "$log" >&2
+        return 1
     fi
 }
 
@@ -928,33 +934,36 @@ warp_manager() {
     local conf="/etc/sing-box/config.json"
     while true; do
         local status="\033[1;31m已禁用\033[0m"; grep -q "warp-out" "$conf" && status="\033[1;32m已启用\033[0m"
-        echo -e "\n--- WARP 策略管理 (状态: $status) ---"
+        echo -e "\n--- WARP 全自动管理 (状态: $status) ---"
         echo -e "1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
             1)
                 if grep -q "warp-out" "$conf"; then
-                    info "正在禁用 WARP..."
-                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    info "正在禁用..." && jq 'del(.outbounds[] | select(.tag == "warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
-                    info "正在激活 WARP 分流..." && rm -f "/etc/sing-box/warp.json"
-                    local cred=$(get_warp_conf) || continue
-                    # 修复变量解析：从 echo 的管道中正确获取私钥和 v6
+                    info "正在执行全自动注册并激活..."
+                    rm -f "/etc/sing-box/warp.json"
+                    # 关键修复：通过变量捕捉函数输出，避免子 shell 作用域问题
+                    local cred
+                    cred=$(get_warp_conf) || { err "全自动注册失败，请检查 API 日志"; continue; }
+                    
                     local priv=$(echo "$cred" | cut -d'|' -f1)
                     local v6=$(echo "$cred" | cut -d'|' -f2)
                     
-                    # 安全检查：如果变量为空则报错退出，防止写坏配置
-                    [ -z "$priv" ] && { err "私钥获取失败"; continue; }
+                    # 终极保护：如果 priv 为空，绝不执行写入
+                    if [ -z "$priv" ]; then err "变量解析异常"; continue; fi
                     
                     local out=$(jq -n --arg pr "$priv" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","tiktok.com"],"outbound":"warp-out"}'
+                    
                     jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + (.route.rules // [])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 fi
-                service_ctrl restart && succ "WARP 策略已更新" ;;
+                service_ctrl restart && succ "全自动配置完成" ;;
             2)
                 grep -q "warp-out" "$conf" || { err "请先启用 WARP"; continue; }
                 read -r -p "输入域名: " dom
-                [ -n "$dom" ] && jq --arg dom "$dom" '(..|select(.outbound?=="warp-out").domain)+=[$dom]|(..|select(.outbound?=="warp-out").domain)|=unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入分流" ;;
+                [ -n "$dom" ] && jq --arg dom "$dom" '(..|select(.outbound?=="warp-out").domain)+=[$dom]|(..|select(.outbound?=="warp-out").domain)|=unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入" ;;
             0) break ;;
             *) err "无效选择" ;;
         esac
