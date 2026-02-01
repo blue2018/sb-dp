@@ -897,20 +897,22 @@ get_warp_conf() {
     [ -s "$cache" ] && { cat "$cache"; return 0; }
 
     info "正在申请 WARP 凭据..."
-    # 使用 wg 命令生成密钥，这是最稳的
+    # 确保依赖存在
+    command -v wg >/dev/null 2>&1 || apk add --no-cache wireguard-tools >/dev/null 2>&1
+    
     local priv=$(wg genkey)
     local pub=$(echo "$priv" | wg pubkey)
     
-    [ -z "$pub" ] && { err "密钥生成失败，请检查 wireguard-tools"; return 1; }
-
-    local res=$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" \
+    # 尝试注册，增加 -4 强制使用 IPv4 (容器环境常见 IPv6 路由不通)
+    local res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a2158/reg" \
         -H "Content-Type: application/json" \
         -d "{\"key\":\"$pub\",\"type\":\"Android\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
     
     local v6=$(echo "$res" | jq -r '.result.config.interface.addresses.v6 // empty')
     
     if [ -z "$v6" ] || [ "$v6" = "null" ]; then
-        err "WARP 注册失败，请检查网络或稍后再试"
+        err "WARP 注册失败！"
+        echo "API 原始响应: $res" # 打印出来看看到底是什么报错
         return 1
     fi
     echo "{\"priv\":\"$priv\",\"v6\":\"$v6\"}" | tee "$cache"
