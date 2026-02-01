@@ -979,46 +979,46 @@ EOF
 
     # 生成交互管理脚本 /usr/local/bin/sb
     local SB_PATH="/usr/local/bin/sb"
-    cat > "$SB_PATH" <<EOF
+    cat > "$SB_PATH" <<'EOF'
 #!/usr/bin/env bash
 set -uo pipefail
 SBOX_CORE="/etc/sing-box/core_script.sh"
-if [ ! -f "\$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
-[[ \$# -gt 0 ]] && { /bin/bash "\$SBOX_CORE" "\$@"; exit 0; }
-source "\$SBOX_CORE" --detect-only
+if [ ! -f "$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
+[[ $# -gt 0 ]] && { /bin/bash "$SBOX_CORE" "$@"; exit 0; }
+source "$SBOX_CORE" --detect-only
 
 service_ctrl() {
-    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "\$1" && return
-    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "\$1" sing-box
+    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "$1" && return
+    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "$1" sing-box
 }
 
 while true; do
     echo "========================" 
     echo " Sing-box HY2 管理 (sb)"
     echo "-------------------------------------------------"
-    echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
+    echo " Level: ${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: $([[ "$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "-------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
     echo "4. 更新内核    5. 重启服务    6. 卸载脚本"
     echo "0. 退出"
     echo ""  
     read -r -p "请选择 [0-6]: " opt
-    opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
-    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-6]$ ]]; then
-        echo -e "\033[1;31m输入有误 [\$opt]，请重新输入\033[0m"; sleep 1; continue
+    opt=$(echo "$opt" | xargs echo -n 2>/dev/null || echo "$opt")
+    if [[ -z "$opt" ]] || [[ ! "$opt" =~ ^[0-6]$ ]]; then
+        echo -e "\033[1;31m输入有误 [$opt]，请重新输入\033[0m"; sleep 1; continue
     fi
-    case "\$opt" in
-        1) source "\$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
-        2) f="/etc/sing-box/config.json"; old=\$(md5sum \$f 2>/dev/null)
-           vi \$f; if [ "\$old" != "\$(md5sum \$f 2>/dev/null)" ]; then
-               service_ctrl restart && succ "配置已更新，网络画像与防火墙已同步刷新"
-           else info "配置未作变更"; fi
-           read -r -p $'\n按回车键返回菜单...' ;;
-        3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
-        4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
+    case "$opt" in
+        1) source "$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
+        2) f="/etc/sing-box/config.json"; old=$(md5sum $f 2>/dev/null)
+            vi $f; if [ "$old" != "$(md5sum $f 2>/dev/null)" ]; then
+                service_ctrl restart && succ "配置已更新，网络画像与防火墙已同步刷新"
+            else info "配置未作变更"; fi
+            read -r -p $'\n按回车键返回菜单...' ;;
+        3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
+        4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
         6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
-           if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
+           if [ "${cf:-n}" = "y" ] || [ "${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
                systemctl stop sing-box zram-swap 2>/dev/null; rc-service sing-box stop 2>/dev/null
                swapoff -a 2>/dev/null
