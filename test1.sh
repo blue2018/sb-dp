@@ -898,46 +898,74 @@ display_system_status() {
 
 get_warp_conf() {
     local cache="/etc/sing-box/warp.json" log="/tmp/warp_debug.log"
-    echo "--- 全自动注册 $(date) ---" > "$log"
+    echo "--- 自动注册 $(date) ---" > "$log"
+    
+    # 环境预检
     command -v wg >/dev/null || apk add wireguard-tools >>"$log" 2>&1
     
-    local pr=$(wg genkey) pu=$(echo "$pr" | wg pubkey)
+    local pr=$(wg genkey)
+    local pu=$(echo "$pr" | wg pubkey)
+    
+    # 执行 API 请求
     local res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
-        -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" \
+        -H "User-Agent: okhttp/3.12.1" \
+        -H "Content-Type: application/json" \
         -d "{\"key\":\"$pu\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
 
     local id=$(echo "$res" | jq -r '.id // .result.id // empty')
+    
     if [ -n "$id" ] && [ "$id" != "null" ]; then
+        # 核心修复：提取 v6 地址并强制检查是否带有 / 掩码
         local v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
-        # 核心修复：如果 v6 不包含 /，则强行补上 /128
-        [[ "$v6" != */* ]] && v6="${v6}/128"
-        # 兜底：如果 API 没返回 v6，给个默认值
-        [ -z "$v6" ] || [ "$v6" == "/128" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
         
+        # 逻辑处理：如果地址存在且不含 '/', 则追加 /128
+        if [ -n "$v6" ]; then
+            [[ "$v6" != */* ]] && v6="${v6}/128"
+        else
+            # 备选固定地址（以防 API 完全没返回 v6）
+            v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
+        fi
+        
+        # 最终保存
         echo "{\"priv\":\"$pr\",\"v6\":\"$v6\"}" > "$cache"
         echo "$pr|$v6"
     else
-        echo "API 失败: $res" >> "$log" && cat "$log" >&2 && return 1
+        echo "API 失败响应: $res" >> "$log"
+        cat "$log" >&2
+        return 1
     fi
 }
 
 warp_manager() {
     local conf="/etc/sing-box/config.json"
     while true; do
-        local status="\033[1;31m已禁用\033[0m"; grep -q "warp-out" "$conf" && status="\033[1;32m已启用\033[0m"
+        local status="\033[1;31m已禁用\033[0m"
+        grep -q "warp-out" "$conf" && status="\033[1;32m已启用\033[0m"
         echo -e "\n--- WARP 全自动管理 (状态: $status) ---"
         echo -e "1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
             1)
                 if grep -q "warp-out" "$conf"; then
-                    info "正在禁用..." && jq 'del(.outbounds[] | select(.tag == "warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    info "正在禁用..."
+                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
-                    info "执行全自动配置..." && rm -f "/etc/sing-box/warp.json"
-                    local cred=$(get_warp_conf) || continue
-                    local priv=$(echo "$cred" | cut -d'|' -f1) v6=$(echo "$cred" | cut -d'|' -f2)
-                    [ -z "$priv" ] && continue
+                    info "执行全自动配置中..."
+                    rm -f "/etc/sing-box/warp.json"
                     
+                    # 获取注册结果
+                    local cred
+                    cred=$(get_warp_conf) || { err "自动注册由于 API 原因失败"; continue; }
+                    
+                    local priv=$(echo "$cred" | cut -d'|' -f1)
+                    local v6=$(echo "$cred" | cut -d'|' -f2)
+                    
+                    # 严谨性检查：确保变量不为空且格式正确
+                    if [ -z "$priv" ] || [[ "$v6" != */* ]]; then
+                        err "配置格式异常，取消写入"; continue
+                    fi
+                    
+                    # 注入配置：注意 MTU 1120 是我们测试出的 LXC 最稳数值
                     local out=$(jq -n --arg pr "$priv" --arg v6 "$v6" '{
                         "type": "wireguard",
                         "tag": "warp-out",
@@ -948,14 +976,16 @@ warp_manager() {
                         "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
                         "mtu": 1120
                     }')
+                    
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","tiktok.com"],"outbound":"warp-out"}'
+                    
                     jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + (.route.rules // [])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 fi
-                service_ctrl restart && succ "全自动配置完成" ;;
+                service_ctrl restart && succ "全自动激活成功" ;;
             2)
                 grep -q "warp-out" "$conf" || { err "请先启用 WARP"; continue; }
-                read -r -p "域名: " dom
-                [ -n "$dom" ] && jq --arg dom "$dom" '(..|select(.outbound?=="warp-out").domain)+=[$dom]|(..|select(.outbound?=="warp-out").domain)|=unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入" ;;
+                read -r -p "输入域名: " dom
+                [ -n "$dom" ] && jq --arg dom "$dom" '(..|select(.outbound?=="warp-out").domain)+=[$dom]|(..|select(.outbound?=="warp-out").domain)|=unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入分流" ;;
             0) break ;;
             *) err "无效选择" ;;
         esac
