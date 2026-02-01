@@ -1082,7 +1082,7 @@ EOF
 
     # 生成交互管理脚本 /usr/local/bin/sb
     local SB_PATH="/usr/local/bin/sb"
-cat >> "/usr/local/bin/sb" <<'EOF'
+    cat > "$SB_PATH" <<'EOF'
 #!/usr/bin/env bash
 set -uo pipefail
 SBOX_CORE="/etc/sing-box/core_script.sh"
@@ -1096,10 +1096,10 @@ service_ctrl() {
 }
 EOF
 
-declare -f get_warp_conf >> "/usr/local/bin/sb"
-declare -f warp_manager >> "/usr/local/bin/sb"
+    declare -f get_warp_conf >> "$SB_PATH"
+    declare -f warp_manager >> "$SB_PATH"
 
-cat >> "/usr/local/bin/sb" <<'EOF'
+    cat >> "$SB_PATH" <<'EOF'
 while true; do
     echo "========================"
     echo " Sing-box HY2 管理 (sb)"
