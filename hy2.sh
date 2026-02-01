@@ -57,31 +57,20 @@ detect_os() {
 # 依赖安装 (容错增强版)
 install_dependencies() {
     info "正在检查系统类型..."
-    local PM=""; local DEPS="curl jq openssl ca-certificates iproute2 ethtool iptables bash tzdata"
-    if command -v apk >/dev/null 2>&1; then PM="apk"; DEPS="${DEPS} netcat-openbsd procps util-linux"
-    elif command -v apt-get >/dev/null 2>&1; then PM="apt"; DEPS="${DEPS} netcat-openbsd procps kmod util-linux"
-    elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then PM="yum"; DEPS="${DEPS} nc procps-ng util-linux"
-    else err "未检测到支持的包管理器 (apk/apt-get/yum)，请手动安装依赖"; exit 1; fi
-    # 基础工具补漏逻辑
-    for cmd in tar stat pgrep; do
-        if ! command -v "${cmd}" >/dev/null 2>&1; then
-            case "${cmd}" in
-                stat) DEPS="${DEPS} coreutils" ;;
-                pgrep) [ "${PM}" = "apk" ] && DEPS="${DEPS} procps" || DEPS="${DEPS} procps-ng" ;;
-                *) DEPS="${DEPS} ${cmd}" ;;
-            esac
-        fi
-    done
+    local PM="" DEPS="curl jq openssl ca-certificates iproute2 ethtool iptables bash tzdata tar kmod resolvconf wireguard-tools"
+    command -v apk >/dev/null 2>&1 && PM="apk" || { command -v apt-get >/dev/null 2>&1 && PM="apt" || PM="yum"; }
+    [ "$PM" = "apk" ] && DEPS="$DEPS netcat-openbsd procps coreutils util-linux-misc" || DEPS="$DEPS netcat-openbsd procps util-linux"
+    [ "$PM" = "yum" ] && DEPS="${DEPS//netcat-openbsd/nc}" && DEPS="${DEPS//procps/procps-ng}"
 
-    case "${PM}" in
-        apk) info "检测到 Alpine 系统，正在同步仓库并安装依赖..." && apk update >/dev/null 2>&1; apk add --no-cache ${DEPS} || { err "apk 安装依赖失败"; exit 1; } ;;
-        apt) info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..." && export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1; apt-get install -y --no-install-recommends ${DEPS} || { err "apt 安装依赖失败"; exit 1; } ;;
-        yum) info "检测到 RHEL/CentOS 系统，正在安装依赖..." && { local M=$(command -v dnf || echo "yum"); ${M} install -y ${DEPS} || { err "${M} 安装依赖失败"; exit 1; }; } ;;
+    sync && echo 3 > /proc/sys/vm/drop_caches
+    case "$PM" in
+        apk) info "检测到 Alpine 系统，执行分批安装依赖..."; apk update >/dev/null 2>&1; for pkg in $DEPS; do apk info -e "$pkg" >/dev/null || apk add --no-cache "$pkg" || warn "组件 $pkg 安装异常"; done; rm -rf /var/cache/apk/* ;;
+        apt) info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..."; export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1; apt-get install -y --no-install-recommends $DEPS || err "依赖安装失败"; apt-get clean ;;
+        yum) info "检测到 RHEL/CentOS 系统，正在同步仓库并安装依赖..."; $(command -v dnf || echo "yum") install -y $DEPS || err "依赖安装失败"; ;;
     esac
 
-    [ -d /usr/share/zoneinfo ] || { [ "${PM}" = "apk" ] && apk add --no-cache tzdata; }
     update-ca-certificates 2>/dev/null || true
-    for cmd in jq curl tar bash pgrep; do command -v "${cmd}" >/dev/null 2>&1 || { err "核心依赖 ${cmd} 安装失败，请检查网络或源"; exit 1; }; done
+    for cmd in jq curl tar bash pgrep taskset; do command -v "$cmd" >/dev/null 2>&1 || { [ "$PM" = "apk" ] && apk add --no-cache util-linux >/dev/null 2>&1 || { err "核心依赖 ${cmd} 安装失败，请检查网络或源"; exit 1; }; } done
     succ "所需依赖已就绪"
 }
 
