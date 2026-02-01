@@ -896,28 +896,36 @@ get_warp_conf() {
     local cache="/etc/sing-box/warp.json"
     [ -s "$cache" ] && { cat "$cache"; return 0; }
 
-    info "正在申请 WARP 凭据 (容器兼容模式)..."
+    info "[DEBUG] 开始申请 WARP 凭据..."
     
-    # 使用 OpenSSL 直接生成私钥
+    # 1. 生成密钥
     local priv=$(openssl rand -base64 32)
-    
-    # 借鉴：使用 1922 接口 + 特定 UA + 强制 IPv4
+    [ -z "$priv" ] && { err "[DEBUG] OpenSSL 生成私钥失败"; return 1; }
+    info "[DEBUG] 私钥生成成功"
+
+    # 2. 发送请求 (捕获错误流)
+    info "[DEBUG] 正在请求 Cloudflare API (v0a1922)..."
     local res=$(curl -s -4 -L -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
         -H "User-Agent: okhttp/3.12.1" \
         -H "Content-Type: application/json" \
-        -d "{\"key\":\"$(echo "$priv" | wg pubkey 2>/dev/null || openssl rand -base64 32)\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
+        -d "{\"key\":\"$(openssl rand -base64 32)\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}" 2>&1)
 
-    # 借鉴：只要包含 "id" 就认为成功，不强求 jq 完美解析
+    # 3. 检查响应内容
     if echo "$res" | grep -q "\"id\""; then
-        # 尝试提取 v6，提取不到就用固定占位符，反正 WARP 内部能通
+        info "[DEBUG] API 返回成功标识"
         local v6=$(echo "$res" | jq -r '.result.config.interface.addresses.v6 // empty' 2>/dev/null)
-        [ -z "$v6" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
+        [ -z "$v6" ] || [ "$v6" = "null" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
         
+        info "[DEBUG] 提取的 IPv6: $v6"
         echo "{\"priv\":\"$priv\",\"v6\":\"$v6\"}" | tee "$cache"
         succ "WARP 账号注册成功"
     else
-        err "WARP 注册失败，API 响应异常"
-        [ -n "$res" ] && echo "DEBUG: $res"
+        err "WARP 注册失败！"
+        echo "---------------------- DEBUG INFO ----------------------"
+        echo "响应内容: $res"
+        echo "检查项: 是否包含 id 字段 -> 失败"
+        echo "检查项: 网络连接状态 -> $([ -z "$res" ] && echo "空响应，可能被防火墙拦截" || echo "收到非预期响应")"
+        echo "--------------------------------------------------------"
         return 1
     fi
 }
@@ -935,31 +943,37 @@ warp_manager() {
         case "$wc" in
             1)
                 if grep -q "warp-out" "$conf"; then
-                    info "正在禁用 WARP..."
+                    info "[DEBUG] 执行禁用流程..."
                     jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
                     succ "WARP 已禁用"
                 else
-                    # 关键：申请前清理可能存在的脏缓存
+                    info "[DEBUG] 执行启用流程..."
                     rm -f "/etc/sing-box/warp.json"
-                    local cred=$(get_warp_conf) || continue
-                    local priv=$(echo "$cred" | jq -r .priv)
-                    local v6=$(echo "$cred" | jq -r .v6)
+                    local cred=$(get_warp_conf) || { err "[DEBUG] 凭据获取函数返回非零状态"; continue; }
                     
+                    local priv=$(echo "$cred" | jq -r .priv 2>/dev/null)
+                    local v6=$(echo "$cred" | jq -r .v6 2>/dev/null)
+                    
+                    info "[DEBUG] 最终合成私钥长度: ${#priv}"
+                    [ -z "$priv" ] && { err "[DEBUG] 错误：私钥为空，无法写入配置"; continue; }
+
                     local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
                     
+                    info "[DEBUG] 正在写入 JSON 配置..."
                     jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + .route.rules' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
                     succ "WARP 已启用"
                 fi
-                # 【修改：使用你脚本里定义的 service_ctrl，完美兼容 Alpine】
-                service_ctrl restart || true
+                info "[DEBUG] 正在重启服务..."
+                service_ctrl restart
                 ;;
             2)
                 if ! grep -q "warp-out" "$conf"; then err "请先启用 WARP"; continue; fi
                 read -r -p "输入要分流的域名: " dom
                 [ -z "$dom" ] && continue
+                info "[DEBUG] 正在添加域名 $dom 到分流列表..."
                 jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                service_ctrl restart || true
+                service_ctrl restart
                 succ "域名 $dom 分流成功"
                 ;;
             0) break ;;
