@@ -942,38 +942,24 @@ warp_manager() {
             1)
                 if grep -q "warp-out" "$conf"; then
                     info "正在禁用 WARP..."
-                    # 禁用：删除标记为 warp-out 的出站和路由规则
                     jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                    succ "WARP 已禁用"
                 else
+                    info "正在激活 WARP 分流..."
+                    # 清理旧凭据尝试新注册
                     rm -f "/etc/sing-box/warp.json"
                     local cred=$(get_warp_conf) || continue
                     local priv=$(echo "$cred" | jq -r .priv)
                     local v6=$(echo "$cred" | jq -r .v6)
                     
-                    [ -z "$priv" ] && { err "错误：未能获取有效私钥"; continue; }
-
-                    # 构造完整的 WARP 出站
                     local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
-                    # 构造路由规则
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
                     
-                    info "正在注入 WARP 配置到文件..."
-                    # 健壮性改进：确保 route 结构存在，并将规则置顶
-                    jq --argjson out "$out" --argjson rule "$rule" \
-                    'if .route == null then .route = {"rules": []} else . end | 
-                     .outbounds += [$out] | 
-                     .route.rules = [$rule] + (.route.rules // [])' \
-                    "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                    
-                    # 检查是否写入成功
-                    if grep -q "warp-out" "$conf"; then
-                        succ "WARP 配置已成功写入文件"
-                    else
-                        err "文件写入失败，请检查 /etc/sing-box 权限"
-                    fi
+                    # 注入配置
+                    jq --argjson out "$out" --argjson rule "$rule" 'if .route == null then .route = {"rules": []} else . end | .outbounds += [$out] | .route.rules = [$rule] + (.route.rules // [])' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
                 fi
+                # 使用你定义好的 service_ctrl 重启
                 service_ctrl restart
+                succ "WARP 策略已更新"
                 ;;
             2)
                 if ! grep -q "warp-out" "$conf"; then err "请先启用 WARP"; continue; fi
@@ -981,7 +967,7 @@ warp_manager() {
                 [ -z "$dom" ] && continue
                 jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
                 service_ctrl restart
-                succ "域名 $dom 分流成功"
+                succ "域名 $dom 已加入 WARP 分流"
                 ;;
             0) break ;;
             *) err "无效选择" ;;
