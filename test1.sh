@@ -743,6 +743,7 @@ respawn_max=5
 respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
+export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 command="/usr/bin/sing-box"
 command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
@@ -779,6 +780,7 @@ Type=simple
 User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
+Environment=ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStart=${taskset_bin} -c ${core_range} /usr/bin/sing-box run -c /etc/sing-box/config.json
 ${systemd_nice_line}
@@ -896,11 +898,27 @@ get_warp_conf() {
         cat "$cache"
     else
         info "正在申请 WARP 凭据..."
+        # 兼容性更好的生成方式，不再使用 pkey 转换
         local priv=$(openssl rand -base64 32)
-        local pub=$(echo "$priv" | openssl pkey -inform base64 -outform DER | openssl pkey -inform DER -pubout -outform DER | tail -c 32 | openssl base64)
-        local res=$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" -d "{\"key\":\"$pub\",\"type\":\"Android\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
+        # 使用更通用的方式计算公钥
+        local pub=$(echo "$priv" | wg pubkey 2>/dev/null || echo "failed")
+        if [ "$pub" = "failed" ]; then
+             # 如果没有 wg 命令，尝试用 openssl 兜底
+             pub=$(echo "$priv" | openssl pkey -inform base64 -outform DER 2>/dev/null | openssl pkey -inform DER -pubout -outform DER 2>/dev/null | tail -c 32 | openssl base64 2>/dev/null || echo "")
+        fi
+        
+        [ -z "$pub" ] && { err "密钥对生成失败，请检查 openssl/wireguard-tools"; return 1; }
+
+        local res=$(curl -s -L -X POST "https://api.cloudflareclient.com/v0a2158/reg" \
+            -H "Content-Type: application/json" \
+            -d "{\"key\":\"$pub\",\"type\":\"Android\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
+        
         local v6=$(echo "$res" | jq -r '.result.config.interface.addresses.v6 // empty')
-        [ -z "$v6" ] && { err "WARP 注册失败"; return 1; }
+        
+        if [ -z "$v6" ] || [ "$v6" = "null" ]; then
+            err "WARP 注册失败，API 返回: $(echo "$res" | cut -c 1-50)"
+            return 1
+        fi
         echo "{\"priv\":\"$priv\",\"v6\":\"$v6\"}" | tee "$cache"
     fi
 }
@@ -925,19 +943,35 @@ warp_manager() {
                     local cred=$(get_warp_conf) || continue
                     local priv=$(echo "$cred" | jq -r .priv)
                     local v6=$(echo "$cred" | jq -r .v6)
-                    local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
+                    
+                    # 【关键：适配 1.11+ 版本的 endpoint 结构】
+                    local out='{
+                        "type": "wireguard",
+                        "tag": "warp-out",
+                        "endpoint": "engage.cloudflareclient.com",
+                        "endpoint_port": 2408,
+                        "local_address": ["172.16.0.2/32", "'"$v6"'"],
+                        "private_key": "'"$priv"'",
+                        "mtu": 1280
+                    }'
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
+                    
                     jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + .route.rules' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                    succ "WARP 已启用"
+                    succ "WARP 已启用 (适配新版语法)"
                 fi
-                systemctl restart sing-box 2>/dev/null || rc-service sing-box restart 2>/dev/null
+                
+                # 【关键：解决 FATAL 报错，在启动命令前注入环境变量】
+                export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
+                service_ctrl restart || rc-service sing-box restart || true
                 ;;
             2)
+                # ...（分流域名部分保持不变）...
                 if ! grep -q "warp-out" "$conf"; then err "请先启用 WARP"; continue; fi
                 read -r -p "输入要分流的域名: " dom
                 [ -z "$dom" ] && continue
                 jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                systemctl restart sing-box 2>/dev/null || rc-service sing-box restart 2>/dev/null
+                export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
+                service_ctrl restart || true
                 succ "域名 $dom 分流成功"
                 ;;
             0) break ;;
