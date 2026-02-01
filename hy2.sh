@@ -62,7 +62,7 @@ install_dependencies() {
     [ "$PM" = "apk" ] && DEPS="$DEPS netcat-openbsd procps coreutils util-linux-misc" || DEPS="$DEPS netcat-openbsd procps util-linux"
     [ "$PM" = "yum" ] && DEPS="${DEPS//netcat-openbsd/nc}" && DEPS="${DEPS//procps/procps-ng}"
 
-    sync && { echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true; }
+    sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
     case "$PM" in
         apk) info "检测到 Alpine 系统，执行分批安装依赖..."; apk update >/dev/null 2>&1; for pkg in $DEPS; do apk info -e "$pkg" >/dev/null || apk add --no-cache "$pkg" || warn "组件 $pkg 安装异常"; done; rm -rf /var/cache/apk/* ;;
         apt) info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..."; export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1; apt-get install -y --no-install-recommends $DEPS || err "依赖安装失败"; apt-get clean ;;
