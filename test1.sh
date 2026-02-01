@@ -900,7 +900,6 @@ get_warp_conf() {
     local cache="/etc/sing-box/warp.json"
     local log="/tmp/warp_debug.log"
     
-    # 强制清场，重新注册
     rm -f /tmp/warp_gen.key
     wg genkey > /tmp/warp_gen.key
     local pr_val=$(cat /tmp/warp_gen.key)
@@ -912,23 +911,26 @@ get_warp_conf() {
 
     local id=$(echo "$res" | jq -r '.id // .result.id // empty')
     if [ -n "$id" ] && [ "$id" != "null" ]; then
-        # 提取并严格处理 IPv6
-        local v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
+        # 提取原始 IPv6，去掉可能存在的双引号或空格
+        local v6_raw
+        v6_raw=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // ""')
         
-        # 核心修复点：确保 IPv6 带有 /128 掩码
-        if [[ -z "$v6" || "$v6" == "null" ]]; then
-            v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
-        elif [[ "$v6" != */* ]]; then
-            v6="${v6}/128"
+        # 核心逻辑：先剥离可能存在的任何后缀，再强行加 /128
+        # 这样能处理 "ip"、"ip/128"、"ip/64" 等所有情况
+        local v6_clean
+        v6_clean=$(echo "${v6_raw}" | cut -d'/' -f1)
+        
+        if [ -z "$v6_clean" ] || [ "$v6_clean" == "null" ]; then
+            v6_clean="2606:4700:110:8283:1102:f37b:af8b:a65d"
         fi
+        
+        local v6_final="${v6_clean}/128"
 
-        echo "{\"priv\":\"$pr_val\",\"v6\":\"$v6\"}" > "$cache"
-        echo "${pr_val}|${v6}"
+        echo "{\"priv\":\"$pr_val\",\"v6\":\"$v6_final\"}" > "$cache"
+        echo "${pr_val}|${v6_final}"
         rm -f /tmp/warp_gen.key
         return 0
     else
-        echo "API 失败: $res" >> "$log"
-        rm -f /tmp/warp_gen.key
         return 1
     fi
 }
