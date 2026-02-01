@@ -900,13 +900,15 @@ get_warp_conf() {
     local cache="/etc/sing-box/warp.json" log="/tmp/warp_debug.log"
     echo "--- 自动注册 $(date) ---" > "$log"
     command -v wg >/dev/null || apk add wireguard-tools >>"$log" 2>&1
-    local pr=$(wg genkey) pu=$(echo "$pr" | wg pubkey)
-    local res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" -d "{\"key\":\"$pu\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
-    local id=$(echo "$res" | jq -r '.id // .result.id // empty')
+    # 修复点：先声明再使用，防止变量在单行中“失踪”
+    local pr pu res id v6
+    pr=$(wg genkey) && pu=$(echo "$pr" | wg pubkey)
+    res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" -d "{\"key\":\"$pu\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
+    id=$(echo "$res" | jq -r '.id // .result.id // empty')
     if [ -n "$id" ] && [ "$id" != "null" ]; then
-        local v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
+        v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
         [[ "$v6" != */* ]] && v6="${v6}/128"
-        [ -z "$v6" ] || [ "$v6" == "/128" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
+        ([ -z "$v6" ] || [ "$v6" == "/128" ]) && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
         echo "{\"priv\":\"$pr\",\"v6\":\"$v6\"}" > "$cache" && echo "${pr}|${v6}"
     else
         echo "API失败: $res" >> "$log" && cat "$log" >&2 && return 1
@@ -928,7 +930,8 @@ warp_manager() {
                     local cred=$(get_warp_conf) || { sleep 2; continue; }
                     local pr=$(echo "$cred" | cut -d'|' -f1) v6=$(echo "$cred" | cut -d'|' -f2)
                     local out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
-                    jq --argjson out "$out" --argjson rule '{"domain":["google.com","netflix.com","chatgpt.com","openai.com","tiktok.com"],"outbound":"warp-out"}' '.outbounds+=[$out]|.route.rules=[$rule]+(.route.rules//[])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","tiktok.com"],"outbound":"warp-out"}'
+                    jq --argjson out "$out" --argjson rule "$rule" '.outbounds+=[$out]|.route.rules=[$rule]+(.route.rules//[])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 fi
                 service_ctrl restart && succ "操作完成" && sleep 1 ;;
             2)
