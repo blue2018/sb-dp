@@ -689,7 +689,7 @@ create_config() {
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "fatal", "timestamp": true },
+  "log": { "level": "info", "timestamp": true },
   "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
@@ -753,7 +753,11 @@ rc_ulimit="-n 1000000"
 rc_nice="${final_nice}"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
-start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_err.log 2>&1 || { echo "Config check failed:" && cat /tmp/sb_err.log && return 1; }; }
+start_pre() { 
+    ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_err.log 2>&1 || { 
+        echo "Config check failed:" && cat /tmp/sb_err.log && return 1 
+    } 
+}
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true
@@ -893,98 +897,49 @@ display_system_status() {
 }
 
 get_warp_conf() {
-    local cache="/etc/sing-box/warp.json"
-    local log="/tmp/warp_debug.log"
-    rm -f "$log" # 清理旧日志
-
-    echo "--- 调试开始 $(date) ---" > "$log"
-    
-    # 1. 检查 openssl
-    local priv=$(openssl rand -base64 32 2>>"$log")
-    echo "生成的私钥: $priv" >> "$log"
-
-    # 2. 发送请求并记录完整响应
-    echo "正在请求 API..." >> "$log"
-    local res=$(curl -is -4 -L -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
-        -H "User-Agent: okhttp/3.12.1" \
-        -H "Content-Type: application/json" \
-        -d "{\"key\":\"$(openssl rand -base64 32)\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}" 2>>"$log")
-    
-    echo "API 原始响应内容:" >> "$log"
-    echo "$res" >> "$log"
-
-    # 3. 逻辑判断
-    if echo "$res" | grep -q "\"id\""; then
-        local v6=$(echo "$res" | jq -r '.result.config.interface.addresses.v6 // empty' 2>/dev/null)
-        [ -z "$v6" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
-        local final_json="{\"priv\":\"$priv\",\"v6\":\"$v6\"}"
-        echo "$final_json" | tee "$cache"
-        return 0
+    local cache="/etc/sing-box/warp.json" log="/tmp/warp_debug.log"
+    echo "--- 自动注册 $(date) ---" > "$log"
+    command -v wg >/dev/null || apk add wireguard-tools >>"$log" 2>&1
+    # 修复点：先声明再使用，防止变量在单行中“失踪”
+    local pr pu res id v6
+    pr=$(wg genkey) && pu=$(echo "$pr" | wg pubkey)
+    res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" -d "{\"key\":\"$pu\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
+    id=$(echo "$res" | jq -r '.id // .result.id // empty')
+    if [ -n "$id" ] && [ "$id" != "null" ]; then
+        v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
+        [[ "$v6" != */* ]] && v6="${v6}/128"
+        ([ -z "$v6" ] || [ "$v6" == "/128" ]) && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
+        echo "{\"priv\":\"$pr\",\"v6\":\"$v6\"}" > "$cache" && echo "${pr}|${v6}"
     else
-        echo "判定结果: 注册失败 (未发现 id)" >> "$log"
-        # 这种情况下，我们将日志内容弹射到屏幕上
-        cat "$log" >&2 
-        return 1
+        echo "API失败: $res" >> "$log" && cat "$log" >&2 && return 1
     fi
 }
 
 warp_manager() {
     local conf="/etc/sing-box/config.json"
     while true; do
-        local status="\033[1;31m已禁用\033[0m"
-        grep -q "warp-out" "$conf" && status="\033[1;32m已启用\033[0m"
-        echo -e "\n--- WARP 策略管理 (状态: $status) ---"
-        echo "1. 启用/禁用 WARP"
-        echo "2. 添加分流域名"
-        echo "0. 返回主菜单"
+        local st="\033[1;31m已禁用\033[0m" && grep -q "warp-out" "$conf" && st="\033[1;32m已启用\033[0m"
+        echo -e "\n--- WARP 全自动管理 (状态: $st) ---\n1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
             1)
                 if grep -q "warp-out" "$conf"; then
-                    info "正在禁用 WARP..."
-                    # 禁用：删除标记为 warp-out 的出站和路由规则
-                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                    succ "WARP 已禁用"
+                    info "正在禁用..." && jq 'del(.outbounds[]|select(.tag=="warp-out"))|.route.rules|=map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
-                    rm -f "/etc/sing-box/warp.json"
-                    local cred=$(get_warp_conf) || continue
-                    local priv=$(echo "$cred" | jq -r .priv)
-                    local v6=$(echo "$cred" | jq -r .v6)
-                    
-                    [ -z "$priv" ] && { err "错误：未能获取有效私钥"; continue; }
-
-                    # 构造完整的 WARP 出站
-                    local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
-                    # 构造路由规则
-                    local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
-                    
-                    info "正在注入 WARP 配置到文件..."
-                    # 健壮性改进：确保 route 结构存在，并将规则置顶
-                    jq --argjson out "$out" --argjson rule "$rule" \
-                    'if .route == null then .route = {"rules": []} else . end | 
-                     .outbounds += [$out] | 
-                     .route.rules = [$rule] + (.route.rules // [])' \
-                    "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                    
-                    # 检查是否写入成功
-                    if grep -q "warp-out" "$conf"; then
-                        succ "WARP 配置已成功写入文件"
-                    else
-                        err "文件写入失败，请检查 /etc/sing-box 权限"
-                    fi
+                    info "执行全自动配置..." && rm -f "/etc/sing-box/warp.json"
+                    local cred=$(get_warp_conf) || { sleep 2; continue; }
+                    local pr=$(echo "$cred" | cut -d'|' -f1) v6=$(echo "$cred" | cut -d'|' -f2)
+                    local out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
+                    local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","tiktok.com"],"outbound":"warp-out"}'
+                    jq --argjson out "$out" --argjson rule "$rule" '.outbounds+=[$out]|.route.rules=[$rule]+(.route.rules//[])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 fi
-                service_ctrl restart
-                ;;
+                service_ctrl restart && succ "操作完成" && sleep 1 ;;
             2)
-                if ! grep -q "warp-out" "$conf"; then err "请先启用 WARP"; continue; fi
-                read -r -p "输入要分流的域名: " dom
-                [ -z "$dom" ] && continue
-                jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                service_ctrl restart
-                succ "域名 $dom 分流成功"
-                ;;
-            0) break ;;
-            *) err "无效选择" ;;
+                grep -q "warp-out" "$conf" || { err "请先启用 WARP"; sleep 2; continue; }
+                read -r -p "域名: " dom
+                [ -n "$dom" ] && jq --arg dom "$dom" '(..|select(.outbound?=="warp-out").domain)+=[$dom]|(..|select(.outbound?=="warp-out").domain)|=unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入" && sleep 1 ;;
+            0) return 0 ;;
+            *) err "无效选择" && sleep 2 ;;
         esac
     done
 }
@@ -1116,7 +1071,7 @@ while true; do
         3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-		6) warp_manager; read -r -p $'\n按回车键返回菜单...' ;;
+		6) warp_manager ;;
         7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
            if [ "${cf:-n}" = "y" ] || [ "${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
