@@ -984,39 +984,15 @@ LOSS_COMPENSATION='$LOSS_COMPENSATION'
 EOF
 
     # 导出函数
-    {
-        declare -f probe_network_rtt
-        declare -f probe_memory_total
-        declare -f apply_initcwnd_optimization
-        declare -f prompt_for_port
-        declare -f get_cpu_core
-        declare -f get_env_data
-        declare -f display_links
-        declare -f display_system_status
-        declare -f detect_os
-        declare -f copy_to_clipboard
-        declare -f create_config
-        declare -f setup_service
-        declare -f install_singbox
-        declare -f info
-        declare -f err
-        declare -f warn
-        declare -f succ
-        declare -f optimize_system
-        declare -f apply_userspace_adaptive_profile
-        declare -f apply_nic_core_boost
-        declare -f get_warp_conf
-        declare -f warp_manager
-        declare -f setup_zrm_swap
-        declare -f safe_rtt
-        declare -f check_tls_domain
-        declare -f generate_cert
-        declare -f verify_cert
-        declare -f cleanup_temp
-        declare -f backup_config
-        declare -f restore_config
-        declare -f load_env_vars
-    } >> "$CORE_TMP" 2>/dev/null
+    local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
+get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
+create_config setup_service install_singbox info err warn succ optimize_system \
+apply_userspace_adaptive_profile apply_nic_core_boost \
+setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
+
+    for f in "${funcs[@]}"; do
+        if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
+    done
 
     cat >> "$CORE_TMP" <<'EOF'
 detect_os; set +e
@@ -1059,94 +1035,55 @@ EOF
     mv "$CORE_TMP" "$SBOX_CORE"
     chmod 700 "$SBOX_CORE"
 
-	local SB_PATH="/usr/local/bin/sb"
-    cat > "$SB_PATH" <<'EOF'
+    # 生成交互管理脚本 /usr/local/bin/sb
+    local SB_PATH="/usr/local/bin/sb"
+    cat > "$SB_PATH" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
 SBOX_CORE="/etc/sing-box/core_script.sh"
-[ ! -f "$SBOX_CORE" ] && { echo "核心文件丢失"; exit 1; }
-[[ $# -gt 0 ]] && { /bin/bash "$SBOX_CORE" "$@"; exit 0; }
-source "$SBOX_CORE" --detect-only
+if [ ! -f "\$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
+[[ \$# -gt 0 ]] && { /bin/bash "\$SBOX_CORE" "\$@"; exit 0; }
+source "\$SBOX_CORE" --detect-only
 
 service_ctrl() {
-    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "$1" && return
-    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "$1" sing-box
-}
-
-get_warp_conf() {
-    local cache="/etc/sing-box/warp.json"
-    [ -s "${cache}" ] && { cat "${cache}"; return; }
-    echo -e "\033[1;33m正在申请 WARP 凭据...\033[0m"
-    local priv=$(openssl rand -base64 32)
-    local pub=$(echo "$priv" | openssl pkey -inform base64 -pubout -outform DER | tail -c 32 | openssl base64)
-    local res=$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" -d "{\"key\":\"$pub\",\"type\":\"Android\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
-    local v6=$(echo "$res" | jq -r '.result.config.interface.addresses.v6 // empty')
-    [ -z "$v6" ] && { echo -e "\033[1;31mWARP 注册失败\033[0m"; return 1; }
-    echo "{\"priv\":\"$priv\",\"v6\":\"$v6\"}" | tee "$cache"
-}
-
-warp_manager() {
-    local conf="/etc/sing-box/config.json"
-    while true; do
-        local status="\033[1;31m已禁用\033[0m"
-        grep -q "warp-out" "$conf" && status="\033[1;32m已启用\033[0m"
-        echo -e "\n--- WARP 管理 (状态: $status) ---"
-        echo -e "1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
-        read -r -p "选择: " wc
-        case "$wc" in
-            1)
-                if grep -q "warp-out" "$conf"; then
-                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                else
-                    local cred=$(get_warp_conf) || continue
-                    local priv=$(echo "$cred" | jq -r .priv); local v6=$(echo "$cred" | jq -r .v6)
-                    local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
-                    local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
-                    jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + .route.rules' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                fi; service_ctrl restart ;;
-            2)
-                read -r -p "输入域名: " dom
-                [ -n "$dom" ] && jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf" && service_ctrl restart ;;
-            0) break ;;
-        esac
-    done
+    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "\$1" && return
+    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "\$1" sing-box
 }
 
 while true; do
-    echo "========================"
+    echo "========================" 
     echo " Sing-box HY2 管理 (sb)"
     echo "-------------------------------------------------"
-    echo " Level: ${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: $([[ "$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
+    echo " Level: \${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: \$([[ "\$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "-------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
-    echo "4. 更新内核    5. 重启服务    6. WARP 管理"
-    echo "7. 卸载脚本    0. 退出"
-    echo ""
-    read -r -p "请选择 [0-7]: " opt
-    opt=$(echo "$opt" | xargs echo -n 2>/dev/null || echo "$opt")
-    if [[ -z "$opt" ]] || [[ ! "$opt" =~ ^[0-7]$ ]]; then
-        echo -e "\033[1;31m输入有误 [$opt]，请重新输入\033[0m"; sleep 1; continue
+    echo "4. 更新内核    5. 重启服务    6. 卸载脚本"
+    echo "0. 退出"
+    echo ""  
+    read -r -p "请选择 [0-6]: " opt
+    opt=\$(echo "\$opt" | xargs echo -n 2>/dev/null || echo "\$opt")
+    if [[ -z "\$opt" ]] || [[ ! "\$opt" =~ ^[0-6]$ ]]; then
+        echo -e "\033[1;31m输入有误 [\$opt]，请重新输入\033[0m"; sleep 1; continue
     fi
-    case "$opt" in
-        1) source "$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
-        2) f="/etc/sing-box/config.json"; old=$(md5sum $f 2>/dev/null)
-           vi $f; if [ "$old" != "$(md5sum $f 2>/dev/null)" ]; then
+    case "\$opt" in
+        1) source "\$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
+        2) f="/etc/sing-box/config.json"; old=\$(md5sum \$f 2>/dev/null)
+           vi \$f; if [ "\$old" != "\$(md5sum \$f 2>/dev/null)" ]; then
                service_ctrl restart && succ "配置已更新，网络画像与防火墙已同步刷新"
            else info "配置未作变更"; fi
            read -r -p $'\n按回车键返回菜单...' ;;
-        3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
-        4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
+        3) source "\$SBOX_CORE" --reset-port "\$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
+        4) source "\$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-        6) warp_manager ;;
-        7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
-           if [ "${cf:-n}" = "y" ] || [ "${cf:-n}" = "Y" ]; then
+        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+           if [ "\${cf:-n}" = "y" ] || [ "\${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
                systemctl stop sing-box zram-swap 2>/dev/null; rc-service sing-box stop 2>/dev/null
                swapoff -a 2>/dev/null
                [ -w /sys/block/zram0/reset ] && echo 1 > /sys/block/zram0/reset 2>/dev/null
                rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} \
                       /etc/systemd/system/{sing-box,zram-swap}.service /etc/init.d/{sing-box,zram-swap} \
-                      /etc/sysctl.d/99-sing-box.conf /tmp/sb_* ~/.acme.sh /swapfile /etc/sing-box/warp.json
+                      /etc/sysctl.d/99-sing-box.conf /tmp/sb_* ~/.acme.sh /swapfile
                sed -i '/swapfile/d' /etc/fstab; crontab -l 2>/dev/null | grep -v "acme.sh" | crontab - 2>/dev/null
                printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
                sysctl -p >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "深度卸载完成"; exit 0
