@@ -896,43 +896,45 @@ display_system_status() {
     echo -e "IPv6地址: \033[1;33m${RAW_IP6:-无}\033[0m"
 }
 
-get_warp_conf() {
-    local cache="/etc/sing-box/warp.json"
-    local log="/tmp/warp_debug.log"
-    
-    rm -f /tmp/warp_gen.key
-    wg genkey > /tmp/warp_gen.key
-    local pr_val=$(cat /tmp/warp_gen.key)
-    local pu_val=$(wg pubkey < /tmp/warp_gen.key)
-
-    local res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
-        -H "Content-Type: application/json" \
-        -d "{\"key\":\"$pu_val\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
-
-    local id=$(echo "$res" | jq -r '.id // .result.id // empty')
-    if [ -n "$id" ] && [ "$id" != "null" ]; then
-        # 提取原始 IPv6，去掉可能存在的双引号或空格
-        local v6_raw
-        v6_raw=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // ""')
-        
-        # 核心逻辑：先剥离可能存在的任何后缀，再强行加 /128
-        # 这样能处理 "ip"、"ip/128"、"ip/64" 等所有情况
-        local v6_clean
-        v6_clean=$(echo "${v6_raw}" | cut -d'/' -f1)
-        
-        if [ -z "$v6_clean" ] || [ "$v6_clean" == "null" ]; then
-            v6_clean="2606:4700:110:8283:1102:f37b:af8b:a65d"
-        fi
-        
-        local v6_final="${v6_clean}/128"
-
-        echo "{\"priv\":\"$pr_val\",\"v6\":\"$v6_final\"}" > "$cache"
-        echo "${pr_val}|${v6_final}"
-        rm -f /tmp/warp_gen.key
-        return 0
-    else
-        return 1
-    fi
+warp_manager() {
+    local conf="/etc/sing-box/config.json"
+    while true; do
+        local st="\033[1;31m已禁用\033[0m"
+        grep -q "warp-out" "$conf" && st="\033[1;32m已启用\033[0m"
+        echo -e "\n--- WARP 全自动管理 (状态: $st) ---\n1. 启用/禁用 WARP\n0. 返回主菜单"
+        read -r -p "选择: " wc
+        case "$wc" in
+            1)
+                if grep -q "warp-out" "$conf"; then
+                    jq 'del(.outbounds[]|select(.tag=="warp-out"))|.route.rules|=map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                else
+                    local cred=$(get_warp_conf) || { echo "注册失败"; continue; }
+                    local pr=$(echo "$cred" | cut -d'|' -f1)
+                    local v6=$(echo "$cred" | cut -d'|' -f2)
+                    
+                    # 关键修改：让 jq 去处理字符串加号拼接
+                    local out=$(jq -n --arg pr "$pr" --arg v4 "172.16.0.2/32" --arg v6 "$v6" '{
+                        "type": "wireguard",
+                        "tag": "warp-out",
+                        "server": "162.159.193.10",
+                        "server_port": 1701,
+                        "local_address": [$v4, ($v6 + "/128")],
+                        "private_key": $pr,
+                        "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                        "mtu": 1280
+                    }')
+                    
+                    jq --argjson out "$out" '.outbounds+=[$out]|.route.rules=[{"domain":["google.com","ip.sb"],"outbound":"warp-out"}]+(.route.rules//[])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    
+                    # 环境变量注入
+                    [ -f /etc/conf.d/sing-box ] && ! grep -q "ENABLE_DEPRECATED" /etc/conf.d/sing-box && echo 'export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true' >> /etc/conf.d/sing-box
+                fi
+                rc-service sing-box restart
+                echo "操作完成" ; sleep 1
+                ;;
+            0) return 0 ;;
+        esac
+    done
 }
 
 warp_manager() {
