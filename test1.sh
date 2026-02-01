@@ -898,35 +898,26 @@ display_system_status() {
 
 get_warp_conf() {
     local cache="/etc/sing-box/warp.json" log="/tmp/warp_debug.log"
-    echo "--- 全自动注册开始 $(date) ---" > "$log"
-    
-    # 确保工具存在
+    echo "--- 全自动注册 $(date) ---" > "$log"
     command -v wg >/dev/null || apk add wireguard-tools >>"$log" 2>&1
-    command -v jq >/dev/null || apk add jq >>"$log" 2>&1
-
-    # 1. 生成确定的密钥对
-    local pr=$(wg genkey)
-    local pu=$(echo "$pr" | wg pubkey)
     
-    # 2. 全自动请求 (使用经过验证的静态 TOS 和 Header)
-    # 注意：这里去掉了动态 date 命令，直接用硬编码的格式，防止系统时区导致的格式错误
+    local pr=$(wg genkey) pu=$(echo "$pr" | wg pubkey)
     local res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
-        -H "User-Agent: okhttp/3.12.1" \
-        -H "Content-Type: application/json" \
+        -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" \
         -d "{\"key\":\"$pu\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
 
-    # 3. 解析 ID (支持多种 API 返回格式)
     local id=$(echo "$res" | jq -r '.id // .result.id // empty')
-
     if [ -n "$id" ] && [ "$id" != "null" ]; then
-        local v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // "2606:4700:110:8283:1102:f37b:af8b:a65d/128"')
-        # 写入缓存并返回标准格式字符串供上级解析
+        local v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
+        # 核心修复：如果 v6 不包含 /，则强行补上 /128
+        [[ "$v6" != */* ]] && v6="${v6}/128"
+        # 兜底：如果 API 没返回 v6，给个默认值
+        [ -z "$v6" ] || [ "$v6" == "/128" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
+        
         echo "{\"priv\":\"$pr\",\"v6\":\"$v6\"}" > "$cache"
         echo "$pr|$v6"
     else
-        echo "API 报错内容: $res" >> "$log"
-        cat "$log" >&2
-        return 1
+        echo "API 失败: $res" >> "$log" && cat "$log" >&2 && return 1
     fi
 }
 
@@ -942,27 +933,28 @@ warp_manager() {
                 if grep -q "warp-out" "$conf"; then
                     info "正在禁用..." && jq 'del(.outbounds[] | select(.tag == "warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
-                    info "正在执行全自动注册并激活..."
-                    rm -f "/etc/sing-box/warp.json"
-                    # 关键修复：通过变量捕捉函数输出，避免子 shell 作用域问题
-                    local cred
-                    cred=$(get_warp_conf) || { err "全自动注册失败，请检查 API 日志"; continue; }
+                    info "执行全自动配置..." && rm -f "/etc/sing-box/warp.json"
+                    local cred=$(get_warp_conf) || continue
+                    local priv=$(echo "$cred" | cut -d'|' -f1) v6=$(echo "$cred" | cut -d'|' -f2)
+                    [ -z "$priv" ] && continue
                     
-                    local priv=$(echo "$cred" | cut -d'|' -f1)
-                    local v6=$(echo "$cred" | cut -d'|' -f2)
-                    
-                    # 终极保护：如果 priv 为空，绝不执行写入
-                    if [ -z "$priv" ]; then err "变量解析异常"; continue; fi
-                    
-                    local out=$(jq -n --arg pr "$priv" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
+                    local out=$(jq -n --arg pr "$priv" --arg v6 "$v6" '{
+                        "type": "wireguard",
+                        "tag": "warp-out",
+                        "server": "162.159.192.1",
+                        "server_port": 2408,
+                        "local_address": ["172.16.0.2/32", $v6],
+                        "private_key": $pr,
+                        "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                        "mtu": 1120
+                    }')
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","tiktok.com"],"outbound":"warp-out"}'
-                    
                     jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + (.route.rules // [])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 fi
                 service_ctrl restart && succ "全自动配置完成" ;;
             2)
                 grep -q "warp-out" "$conf" || { err "请先启用 WARP"; continue; }
-                read -r -p "输入域名: " dom
+                read -r -p "域名: " dom
                 [ -n "$dom" ] && jq --arg dom "$dom" '(..|select(.outbound?=="warp-out").domain)+=[$dom]|(..|select(.outbound?=="warp-out").domain)|=unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入" ;;
             0) break ;;
             *) err "无效选择" ;;
