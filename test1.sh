@@ -941,35 +941,44 @@ warp_manager() {
         case "$wc" in
             1)
                 if grep -q "warp-out" "$conf"; then
-                    info "[DEBUG] 执行禁用流程..."
+                    info "正在禁用 WARP..."
+                    # 禁用：删除标记为 warp-out 的出站和路由规则
                     jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
                     succ "WARP 已禁用"
                 else
-                    info "[DEBUG] 执行启用流程..."
                     rm -f "/etc/sing-box/warp.json"
-                    local cred=$(get_warp_conf) || { err "[DEBUG] 凭据获取函数返回非零状态"; continue; }
+                    local cred=$(get_warp_conf) || continue
+                    local priv=$(echo "$cred" | jq -r .priv)
+                    local v6=$(echo "$cred" | jq -r .v6)
                     
-                    local priv=$(echo "$cred" | jq -r .priv 2>/dev/null)
-                    local v6=$(echo "$cred" | jq -r .v6 2>/dev/null)
-                    
-                    info "[DEBUG] 最终合成私钥长度: ${#priv}"
-                    [ -z "$priv" ] && { err "[DEBUG] 错误：私钥为空，无法写入配置"; continue; }
+                    [ -z "$priv" ] && { err "错误：未能获取有效私钥"; continue; }
 
+                    # 构造完整的 WARP 出站
                     local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
+                    # 构造路由规则
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
                     
-                    info "[DEBUG] 正在写入 JSON 配置..."
-                    jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + .route.rules' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                    succ "WARP 已启用"
+                    info "正在注入 WARP 配置到文件..."
+                    # 健壮性改进：确保 route 结构存在，并将规则置顶
+                    jq --argjson out "$out" --argjson rule "$rule" \
+                    'if .route == null then .route = {"rules": []} else . end | 
+                     .outbounds += [$out] | 
+                     .route.rules = [$rule] + (.route.rules // [])' \
+                    "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
+                    
+                    # 检查是否写入成功
+                    if grep -q "warp-out" "$conf"; then
+                        succ "WARP 配置已成功写入文件"
+                    else
+                        err "文件写入失败，请检查 /etc/sing-box 权限"
+                    fi
                 fi
-                info "[DEBUG] 正在重启服务..."
                 service_ctrl restart
                 ;;
             2)
                 if ! grep -q "warp-out" "$conf"; then err "请先启用 WARP"; continue; fi
                 read -r -p "输入要分流的域名: " dom
                 [ -z "$dom" ] && continue
-                info "[DEBUG] 正在添加域名 $dom 到分流列表..."
                 jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
                 service_ctrl restart
                 succ "域名 $dom 分流成功"
