@@ -896,96 +896,60 @@ display_system_status() {
     echo -e "IPv6地址: \033[1;33m${RAW_IP6:-无}\033[0m"
 }
 
-warp_manager() {
-    local conf="/etc/sing-box/config.json"
-    while true; do
-        local st="\033[1;31m已禁用\033[0m"
-        grep -q "warp-out" "$conf" && st="\033[1;32m已启用\033[0m"
-        echo -e "\n--- WARP 全自动管理 (状态: $st) ---\n1. 启用/禁用 WARP\n0. 返回主菜单"
-        read -r -p "选择: " wc
-        case "$wc" in
-            1)
-                if grep -q "warp-out" "$conf"; then
-                    jq 'del(.outbounds[]|select(.tag=="warp-out"))|.route.rules|=map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
-                else
-                    local cred=$(get_warp_conf) || { echo "注册失败"; continue; }
-                    local pr=$(echo "$cred" | cut -d'|' -f1)
-                    local v6=$(echo "$cred" | cut -d'|' -f2)
-                    
-                    # 关键修改：让 jq 去处理字符串加号拼接
-                    local out=$(jq -n --arg pr "$pr" --arg v4 "172.16.0.2/32" --arg v6 "$v6" '{
-                        "type": "wireguard",
-                        "tag": "warp-out",
-                        "server": "162.159.193.10",
-                        "server_port": 1701,
-                        "local_address": [$v4, ($v6 + "/128")],
-                        "private_key": $pr,
-                        "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-                        "mtu": 1280
-                    }')
-                    
-                    jq --argjson out "$out" '.outbounds+=[$out]|.route.rules=[{"domain":["google.com","ip.sb"],"outbound":"warp-out"}]+(.route.rules//[])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
-                    
-                    # 环境变量注入
-                    [ -f /etc/conf.d/sing-box ] && ! grep -q "ENABLE_DEPRECATED" /etc/conf.d/sing-box && echo 'export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true' >> /etc/conf.d/sing-box
-                fi
-                rc-service sing-box restart
-                echo "操作完成" ; sleep 1
-                ;;
-            0) return 0 ;;
-        esac
-    done
+get_warp_conf() {
+    local cache="/etc/sing-box/warp.json"
+    [ -s "$cache" ] && { cat "$cache"; return 0; }
+
+    info "正在申请 WARP 凭据..."
+    local priv=$(openssl rand -base64 32)
+    local res=$(curl -s -4 -L -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
+        -H "User-Agent: okhttp/3.12.1" \
+        -H "Content-Type: application/json" \
+        -d "{\"key\":\"$(openssl rand -base64 32)\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
+
+    if echo "$res" | grep -q "\"id\""; then
+        local v6=$(echo "$res" | jq -r '.result.config.interface.addresses.v6 // empty' 2>/dev/null)
+        [ -z "$v6" ] || [ "$v6" = "null" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
+        echo "{\"priv\":\"$priv\",\"v6\":\"$v6\"}" | tee "$cache"
+    else
+        err "WARP 注册失败，请检查网络连接"; return 1
+    fi
 }
 
 warp_manager() {
     local conf="/etc/sing-box/config.json"
-    local conf_d="/etc/conf.d/sing-box"
-    
     while true; do
-        local st="\033[1;31m已禁用\033[0m"
-        grep -q "warp-out" "$conf" && st="\033[1;32m已启用\033[0m"
-        echo -e "\n--- WARP 全自动管理 (状态: $st) ---\n1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
-        read -r -p "选择: " wc
+        local status="\033[1;31m已禁用\033[0m"
+        grep -q "warp-out" "$conf" && status="\033[1;32m已启用\033[0m"
+        echo -e "\n--- WARP 策略管理 (状态: $status) ---"
+        echo "1. 启用/禁用 WARP"
+        echo "2. 添加分流域名"
+        echo "0. 返回主菜单"
+        read -r -p "请选择 [0-2]: " wc
         case "$wc" in
             1)
                 if grep -q "warp-out" "$conf"; then
-                    jq 'del(.outbounds[] | select(.tag=="warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    info "正在禁用 WARP..."
+                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
                 else
-                    info "执行全自动配置..."
-                    local cred=$(get_warp_conf) || { echo "注册失败"; sleep 2; continue; }
-                    local pr=$(echo "$cred" | cut -d'|' -f1)
-                    local v6=$(echo "$cred" | cut -d'|' -f2)
-                    
-                    # 使用 jq 的 --argjson 确保 local_address 是标准的字符串数组
-                    local warp_out=$(jq -n \
-                        --arg pr "$pr" \
-                        --arg v4 "172.16.0.2/32" \
-                        --arg v6 "$v6" \
-                        '{
-                            "type": "wireguard",
-                            "tag": "warp-out",
-                            "server": "162.159.193.10",
-                            "server_port": 1701,
-                            "local_address": [$v4, $v6],
-                            "private_key": $pr,
-                            "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
-                            "mtu": 1280
-                        }')
-                    
-                    local rule='{"domain":["google.com","openai.com","chatgpt.com","ip.sb"],"outbound":"warp-out"}'
-                    
-                    # 增量写入，不破坏原有 Hysteria2 入口
-                    jq --argjson out "$warp_out" --argjson rule "$rule" \
-                        '.outbounds += [$out] | .route.rules = [$rule] + (.route.rules // [])' \
-                        "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
-                    
-                    # 环境变量注入
-                    [ -f "$conf_d" ] && ! grep -q "ENABLE_DEPRECATED" "$conf_d" && echo 'export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true' >> "$conf_d"
+                    rm -f "/etc/sing-box/warp.json"
+                    local cred=$(get_warp_conf) || continue
+                    local priv=$(echo "$cred" | jq -r .priv); local v6=$(echo "$cred" | jq -r .v6)
+                    local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
+                    local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
+                    jq --argjson out "$out" --argjson rule "$rule" 'if .route == null then .route = {"rules": []} else . end | .outbounds += [$out] | .route.rules = [$rule] + (.route.rules // [])' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
                 fi
-                rc-service sing-box restart && echo "操作完成" && sleep 1
+                service_ctrl restart; succ "操作已完成"
                 ;;
-            0) return 0 ;;
-            *) echo "无效选择"; sleep 1 ;;
+            2)
+                if ! grep -q "warp-out" "$conf"; then err "请先启用 WARP"; continue; fi
+                read -r -p "输入要分流的域名: " dom
+                [ -z "$dom" ] && continue
+                jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
+                service_ctrl restart; succ "分流记录已更新"
+                ;;
+            0) break ;;
+            *) err "无效选择" ;;
         esac
     done
 }
