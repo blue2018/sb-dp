@@ -926,10 +926,19 @@ warp_manager() {
                 if grep -q "warp-out" "$conf"; then
                     info "正在禁用..." && jq 'del(.outbounds[]|select(.tag=="warp-out"))|.route.rules|=map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
-                    info "执行全自动配置..." && rm -f "/etc/sing-box/warp.json"
+                    info "执行全自动配置 (适配 1.12+)..." && rm -f "/etc/sing-box/warp.json"
                     local cred=$(get_warp_conf) || { sleep 2; continue; }
                     local pr=$(echo "$cred" | cut -d'|' -f1) v6=$(echo "$cred" | cut -d'|' -f2)
-                    local out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
+                    local out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{
+                        "type": "wireguard",
+                        "tag": "warp-out",
+                        "endpoint": "162.159.192.1:2408",
+                        "local_address": ["172.16.0.2/32", $v6],
+                        "private_key": $pr,
+                        "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+                        "mtu": 1120
+                    }')
+                    
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","tiktok.com"],"outbound":"warp-out"}'
                     jq --argjson out "$out" --argjson rule "$rule" '.outbounds+=[$out]|.route.rules=[$rule]+(.route.rules//[])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 fi
