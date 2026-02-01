@@ -743,6 +743,7 @@ respawn_max=5
 respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
+export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 command="/usr/bin/sing-box"
 command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
@@ -779,6 +780,7 @@ Type=simple
 User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
+Environment=ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStart=${taskset_bin} -c ${core_range} /usr/bin/sing-box run -c /etc/sing-box/config.json
 ${systemd_nice_line}
@@ -892,16 +894,37 @@ display_system_status() {
 
 get_warp_conf() {
     local cache="/etc/sing-box/warp.json"
-    if [ -s "$cache" ]; then
-        cat "$cache"
+    local log="/tmp/warp_debug.log"
+    rm -f "$log" # 清理旧日志
+
+    echo "--- 调试开始 $(date) ---" > "$log"
+    
+    # 1. 检查 openssl
+    local priv=$(openssl rand -base64 32 2>>"$log")
+    echo "生成的私钥: $priv" >> "$log"
+
+    # 2. 发送请求并记录完整响应
+    echo "正在请求 API..." >> "$log"
+    local res=$(curl -is -4 -L -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
+        -H "User-Agent: okhttp/3.12.1" \
+        -H "Content-Type: application/json" \
+        -d "{\"key\":\"$(openssl rand -base64 32)\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}" 2>>"$log")
+    
+    echo "API 原始响应内容:" >> "$log"
+    echo "$res" >> "$log"
+
+    # 3. 逻辑判断
+    if echo "$res" | grep -q "\"id\""; then
+        local v6=$(echo "$res" | jq -r '.result.config.interface.addresses.v6 // empty' 2>/dev/null)
+        [ -z "$v6" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
+        local final_json="{\"priv\":\"$priv\",\"v6\":\"$v6\"}"
+        echo "$final_json" | tee "$cache"
+        return 0
     else
-        info "正在申请 WARP 凭据..."
-        local priv=$(openssl rand -base64 32)
-        local pub=$(echo "$priv" | openssl pkey -inform base64 -outform DER | openssl pkey -inform DER -pubout -outform DER | tail -c 32 | openssl base64)
-        local res=$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" -d "{\"key\":\"$pub\",\"type\":\"Android\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
-        local v6=$(echo "$res" | jq -r '.result.config.interface.addresses.v6 // empty')
-        [ -z "$v6" ] && { err "WARP 注册失败"; return 1; }
-        echo "{\"priv\":\"$priv\",\"v6\":\"$v6\"}" | tee "$cache"
+        echo "判定结果: 注册失败 (未发现 id)" >> "$log"
+        # 这种情况下，我们将日志内容弹射到屏幕上
+        cat "$log" >&2 
+        return 1
     fi
 }
 
@@ -918,26 +941,37 @@ warp_manager() {
         case "$wc" in
             1)
                 if grep -q "warp-out" "$conf"; then
-                    info "正在禁用 WARP..."
+                    info "[DEBUG] 执行禁用流程..."
                     jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
                     succ "WARP 已禁用"
                 else
-                    local cred=$(get_warp_conf) || continue
-                    local priv=$(echo "$cred" | jq -r .priv)
-                    local v6=$(echo "$cred" | jq -r .v6)
+                    info "[DEBUG] 执行启用流程..."
+                    rm -f "/etc/sing-box/warp.json"
+                    local cred=$(get_warp_conf) || { err "[DEBUG] 凭据获取函数返回非零状态"; continue; }
+                    
+                    local priv=$(echo "$cred" | jq -r .priv 2>/dev/null)
+                    local v6=$(echo "$cred" | jq -r .v6 2>/dev/null)
+                    
+                    info "[DEBUG] 最终合成私钥长度: ${#priv}"
+                    [ -z "$priv" ] && { err "[DEBUG] 错误：私钥为空，无法写入配置"; continue; }
+
                     local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
+                    
+                    info "[DEBUG] 正在写入 JSON 配置..."
                     jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + .route.rules' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
                     succ "WARP 已启用"
                 fi
-                systemctl restart sing-box 2>/dev/null || rc-service sing-box restart 2>/dev/null
+                info "[DEBUG] 正在重启服务..."
+                service_ctrl restart
                 ;;
             2)
                 if ! grep -q "warp-out" "$conf"; then err "请先启用 WARP"; continue; fi
                 read -r -p "输入要分流的域名: " dom
                 [ -z "$dom" ] && continue
+                info "[DEBUG] 正在添加域名 $dom 到分流列表..."
                 jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                systemctl restart sing-box 2>/dev/null || rc-service sing-box restart 2>/dev/null
+                service_ctrl restart
                 succ "域名 $dom 分流成功"
                 ;;
             0) break ;;
