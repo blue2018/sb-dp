@@ -951,18 +951,14 @@ display_system_status() {
 # 获取/缓存 WARP 凭据
 get_warp_conf() {
     local cache="/etc/sing-box/warp.json"
-    if [ -s "${cache}" ]; then
-        cat "${cache}"
-    else
-        info "正在申请 WARP 凭据..."
-        local priv=$(openssl rand -base64 32)
-        local pub=$(echo "${priv}" | openssl pkey -inform base64 -pubout -outform DER | tail -c 32 | openssl base64)
-        local now_date=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
-        local res=$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" -d "{\"key\":\"${pub}\",\"type\":\"Android\",\"tos\":\"${now_date}\"}")
-        local v6=$(echo "${res}" | jq -r '.result.config.interface.addresses.v6 // empty')
-        [ -z "${v6}" ] && { err "WARP 注册失败"; return 1; }
-        echo "{\"priv\":\"${priv}\",\"v6\":\"${v6}\"}" | tee "${cache}"
-    fi
+    [ -s "${cache}" ] && { cat "${cache}"; return 0; }
+    info "正在申请 WARP 凭据..."
+    local priv=$(openssl rand -base64 32)
+    local pub=$(echo "${priv}" | openssl pkey -inform base64 -pubout -outform DER | tail -c 32 | openssl base64)
+    local res=$(curl -s -X POST "https://api.cloudflareclient.com/v0a2158/reg" -d "{\"key\":\"${pub}\",\"type\":\"Android\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
+    local v6=$(echo "${res}" | jq -r '.result.config.interface.addresses.v6 // empty')
+    [ -z "${v6}" ] && { err "WARP 注册失败"; return 1; }
+    echo "{\"priv\":\"${priv}\",\"v6\":\"${v6}\"}" | tee "${cache}"
 }
 
 # WARP 管理主菜单
@@ -972,7 +968,7 @@ warp_manager() {
         local status="\033[1;31m已禁用\033[0m"
         grep -q "warp-out" "$conf" && status="\033[1;32m已启用\033[0m"
         echo -e "\n--- WARP 策略管理 (状态: $status) ---"
-        echo "1. 启用/禁用 WARP"; echo "2. 添加分流域名"; echo "0. 返回主菜单"
+        echo -e "1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
             1)
@@ -987,14 +983,11 @@ warp_manager() {
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
                     jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + .route.rules' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
                     succ "WARP 已启用"
-                fi
-                service_ctrl restart ;;
+                fi; service_ctrl restart ;;
             2)
                 grep -q "warp-out" "$conf" || { err "请先启用 WARP"; continue; }
-                read -r -p "输入要分流的域名: " dom
-                [ -z "$dom" ] && continue
-                jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                service_ctrl restart; succ "域名 $dom 分流成功" ;;
+                read -r -p "输入域名: " dom
+                [ -n "$dom" ] && jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf" && service_ctrl restart && succ "$dom 分流成功" ;;
             0) break ;;
             *) err "无效选择" ;;
         esac
@@ -1089,7 +1082,7 @@ EOF
 
     # 生成交互管理脚本 /usr/local/bin/sb
     local SB_PATH="/usr/local/bin/sb"
-    cat > "$SB_PATH" <<'EOF'
+cat >> "/usr/local/bin/sb" <<'EOF'
 #!/usr/bin/env bash
 set -uo pipefail
 SBOX_CORE="/etc/sing-box/core_script.sh"
@@ -1103,10 +1096,10 @@ service_ctrl() {
 }
 EOF
 
-declare -f get_warp_conf >> "$SB_PATH"
-declare -f warp_manager >> "$SB_PATH"
+declare -f get_warp_conf >> "/usr/local/bin/sb"
+declare -f warp_manager >> "/usr/local/bin/sb"
 
-cat >> "$SB_PATH" <<'EOF'
+cat >> "/usr/local/bin/sb" <<'EOF'
 while true; do
     echo "========================"
     echo " Sing-box HY2 管理 (sb)"
