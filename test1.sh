@@ -937,10 +937,9 @@ warp_manager() {
                 grep -q "warp-out" "$conf" || { err "请先启用 WARP"; continue; }
                 read -r -p "域名: " dom
                 [ -n "$dom" ] && jq --arg dom "$dom" '(..|select(.outbound?=="warp-out").domain)+=[$dom]|(..|select(.outbound?=="warp-out").domain)|=unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入" ;;
-            0) return 0 ;; # 直接退出函数，不执行任何后续提示
+            0) return 0 ;;
             *) err "无效选择" ;;
         esac
-        # 如果不是选 0，在这里加个短暂停顿，让用户看清“操作完成”的提示
         read -r -p "按回车键返回..." dummy
     done
 }
