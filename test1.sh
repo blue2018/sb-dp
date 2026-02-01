@@ -984,15 +984,39 @@ LOSS_COMPENSATION='$LOSS_COMPENSATION'
 EOF
 
     # 导出函数
-    local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
-get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
-create_config setup_service install_singbox info err warn succ optimize_system \
-apply_userspace_adaptive_profile apply_nic_core_boost get_warp_conf warp_manager \
-setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
-
-    for f in "${funcs[@]}"; do
-        if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
-    done
+    {
+        declare -f probe_network_rtt
+        declare -f probe_memory_total
+        declare -f apply_initcwnd_optimization
+        declare -f prompt_for_port
+        declare -f get_cpu_core
+        declare -f get_env_data
+        declare -f display_links
+        declare -f display_system_status
+        declare -f detect_os
+        declare -f copy_to_clipboard
+        declare -f create_config
+        declare -f setup_service
+        declare -f install_singbox
+        declare -f info
+        declare -f err
+        declare -f warn
+        declare -f succ
+        declare -f optimize_system
+        declare -f apply_userspace_adaptive_profile
+        declare -f apply_nic_core_boost
+        declare -f get_warp_conf
+        declare -f warp_manager
+        declare -f setup_zrm_swap
+        declare -f safe_rtt
+        declare -f check_tls_domain
+        declare -f generate_cert
+        declare -f verify_cert
+        declare -f cleanup_temp
+        declare -f backup_config
+        declare -f restore_config
+        declare -f load_env_vars
+    } >> "$CORE_TMP" 2>/dev/null
 
     cat >> "$CORE_TMP" <<'EOF'
 detect_os; set +e
