@@ -897,82 +897,55 @@ display_system_status() {
 }
 
 get_warp_conf() {
-    local cache="/etc/sing-box/warp.json"
-    local log="/tmp/warp_debug.log"
-    rm -f "$log" # 清理旧日志
-
+    local cache="/etc/sing-box/warp.json" log="/tmp/warp_debug.log"
     echo "--- 调试开始 $(date) ---" > "$log"
+    # 环境检查
+    command -v wg >/dev/null || { echo "安装 wireguard-tools..." >> "$log" && apk add wireguard-tools >>"$log" 2>&1; }
+    [ ! -x "$(command -v wg)" ] && { echo "错误: 密钥工具安装失败" >&2; return 1; }
     
-    # 1. 检查 openssl
-    local priv=$(openssl rand -base64 32 2>>"$log")
+    local priv=$(wg genkey) pub=$(echo "$priv" | wg pubkey)
     echo "生成的私钥: $priv" >> "$log"
-
-    # 2. 发送请求并记录完整响应
-    echo "正在请求 API..." >> "$log"
-    local res=$(curl -is -4 -L -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
-        -H "User-Agent: okhttp/3.12.1" \
-        -H "Content-Type: application/json" \
-        -d "{\"key\":\"$(openssl rand -base64 32)\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}" 2>>"$log")
     
-    echo "API 原始响应内容:" >> "$log"
-    echo "$res" >> "$log"
-
-    # 3. 逻辑判断
-    if echo "$res" | grep -q "\"id\""; then
-        local v6=$(echo "$res" | jq -r '.result.config.interface.addresses.v6 // empty' 2>/dev/null)
-        [ -z "$v6" ] && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
-        local final_json="{\"priv\":\"$priv\",\"v6\":\"$v6\"}"
-        echo "$final_json" | tee "$cache"
-        return 0
+    # API 注册
+    echo "正在请求 Cloudflare API..." >> "$log"
+    local res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
+        -H "Content-Type: application/json" -H "User-Agent: okhttp/3.12.1" \
+        -d "{\"key\":\"$pub\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
+    
+    local id=$(echo "$res" | jq -r '.id // .result.id // empty')
+    if [ -n "$id" ]; then
+        local v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // "2606:4700:110:8283:1102:f37b:af8b:a65d/128"')
+        echo "{\"priv\":\"$priv\",\"v6\":\"$v6\"}" | tee "$cache"
     else
-        echo "判定结果: 注册失败 (未发现 id)" >> "$log"
-        # 这种情况下，我们将日志内容弹射到屏幕上
-        cat "$log" >&2 
-        return 1
+        echo "判定结果: 注册失败" >> "$log" && echo "原始响应: $res" >> "$log" && cat "$log" >&2 && return 1
     fi
 }
 
 warp_manager() {
     local conf="/etc/sing-box/config.json"
     while true; do
-        local status="\033[1;31m已禁用\033[0m"
-        grep -q "warp-out" "$conf" && status="\033[1;32m已启用\033[0m"
+        local status="\033[1;31m已禁用\033[0m"; grep -q "warp-out" "$conf" && status="\033[1;32m已启用\033[0m"
         echo -e "\n--- WARP 策略管理 (状态: $status) ---"
-        echo "1. 启用/禁用 WARP"
-        echo "2. 添加分流域名"
-        echo "0. 返回主菜单"
+        echo -e "1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
             1)
                 if grep -q "warp-out" "$conf"; then
                     info "正在禁用 WARP..."
-                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | del(.route.rules[] | select(.outbound == "warp-out"))' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
+                    jq 'del(.outbounds[] | select(.tag == "warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
-                    info "正在激活 WARP 分流..."
-                    # 清理旧凭据尝试新注册
-                    rm -f "/etc/sing-box/warp.json"
+                    info "正在激活 WARP 分流..." && rm -f "/etc/sing-box/warp.json"
                     local cred=$(get_warp_conf) || continue
-                    local priv=$(echo "$cred" | jq -r .priv)
-                    local v6=$(echo "$cred" | jq -r .v6)
-                    
-                    local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
+                    local priv=$(echo "$cred" | jq -r .priv) v6=$(echo "$cred" | jq -r .v6)
+                    local out=$(jq -n --arg pr "$priv" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
-                    
-                    # 注入配置
-                    jq --argjson out "$out" --argjson rule "$rule" 'if .route == null then .route = {"rules": []} else . end | .outbounds += [$out] | .route.rules = [$rule] + (.route.rules // [])' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
+                    jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + (.route.rules // [])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 fi
-                # 使用你定义好的 service_ctrl 重启
-                service_ctrl restart
-                succ "WARP 策略已更新"
-                ;;
+                service_ctrl restart && succ "WARP 策略已更新" ;;
             2)
-                if ! grep -q "warp-out" "$conf"; then err "请先启用 WARP"; continue; fi
+                grep -q "warp-out" "$conf" || { err "请先启用 WARP"; continue; }
                 read -r -p "输入要分流的域名: " dom
-                [ -z "$dom" ] && continue
-                jq --arg dom "$dom" '(.route.rules[] | select(.outbound == "warp-out").domain) += [$dom] | (.route.rules[] | select(.outbound == "warp-out").domain) |= unique' "$conf" > "${conf}.tmp" && mv "${conf}.tmp" "$conf"
-                service_ctrl restart
-                succ "域名 $dom 已加入 WARP 分流"
-                ;;
+                [ -n "$dom" ] && jq --arg dom "$dom" '(..|select(.outbound?=="warp-out").domain)+=[$dom]|(..|select(.outbound?=="warp-out").domain)|=unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "域名 $dom 已加入 WARP 分流" ;;
             0) break ;;
             *) err "无效选择" ;;
         esac
