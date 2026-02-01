@@ -846,27 +846,32 @@ display_links() {
     [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
 	
     _do_probe() {
-	    local target_ip="$1"
-	    [ -z "$target_ip" ] && return
-	
-	    # 1. 核心判断：检查 Hysteria2 进程是否正在监听该 UDP 端口
-	    # 这是最准的，如果这里不通，链接发给谁都没用
-	    if ! ss -unlp | grep -q ":$RAW_PORT "; then
-	        echo -e "\033[1;31m(服务未运行)\033[0m"
-	        return
-	    fi
-	
-	    # 2. 路由判断：如果是 IPv6，检查本地是否有 IPv6 默认网关
-	    if [[ "$target_ip" == *":"* ]]; then
-	        if ! ip -6 route | grep -q "default" >/dev/null 2>&1; then
-	            echo -e "\033[1;33m(IPv6无出口)\033[0m"
-	            return
-	        fi
-	    fi
-	
-	    # 3. 最终确认：如果进程在，路由也在，我们就认为节点生成成功
-	    echo -e "\033[1;32m(已就绪)\033[0m"
-	}
+        [ -z "$1" ] && return
+        local target="$1"
+        local success=1 # 默认失败
+
+        # 1. 检查端口是否正在被 hy2 进程监听 (这是最基础的前提)
+        if ss -unlp | grep -q ":$RAW_PORT "; then
+            # 2. 如果是 IPv6，检查本地是否有通往该地址的路由
+            if [[ "$target" == *":"* ]]; then
+                if ip -6 route get "$target" >/dev/null 2>&1; then
+                    success=0
+                fi
+            else
+                # 3. 如果是 IPv4，检查是否有通往该地址的路由
+                if ip route get "$target" >/dev/null 2>&1; then
+                    success=0
+                fi
+            fi
+        fi
+
+        # 原始的标记信息和颜色逻辑完全不动
+        if [ $success -eq 0 ]; then
+            echo -e "\033[1;32m(已连通)\033[0m"
+        else
+            echo -e "\033[1;33m(本地受阻)\033[0m"
+        fi
+    }
     if command -v nc >/dev/null 2>&1; then
         _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
         v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
