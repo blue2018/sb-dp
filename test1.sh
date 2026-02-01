@@ -847,9 +847,9 @@ display_links() {
 	
     _do_probe() {
         [ -z "$1" ] && return
-        local addr=$(echo "$1" | tr -d '[]@' | sed 's/[[:space:]]//g')
-        local flag=$( [[ "$addr" == *:* ]] && echo "-6" || echo "" )
-        { nc $flag -zuw 2 "$addr" "$RAW_PORT" || nc $flag -zw 2 "$addr" "$RAW_PORT"; } >/dev/null 2>&1 && \
+        local addr=$(echo "$1" | tr -cd '0-9a-fA-F:.' )
+        [[ "$addr" == *:* ]] && flag="-6" || flag="-4"
+        { nc $flag -zuw 3 "$addr" "$RAW_PORT" || nc $flag -zw 3 "$addr" "$RAW_PORT"; } >/dev/null 2>&1 && \
         echo -e "\033[1;32m(已连通)\033[0m" || echo -e "\033[1;33m(本地受阻)\033[0m"
     }
     if command -v nc >/dev/null 2>&1; then
