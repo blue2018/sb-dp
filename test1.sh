@@ -846,32 +846,20 @@ display_links() {
     [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
 	
     _do_probe() {
-        [ -z "$1" ] && return
-        local target="$1"
-        local success=1 # 默认失败
+    local target="$1"
+    [ -z "$target" ] && return
 
-        # 1. 检查端口是否正在被 hy2 进程监听 (这是最基础的前提)
-        if ss -unlp | grep -q ":$RAW_PORT "; then
-            # 2. 如果是 IPv6，检查本地是否有通往该地址的路由
-            if [[ "$target" == *":"* ]]; then
-                if ip -6 route get "$target" >/dev/null 2>&1; then
-                    success=0
-                fi
-            else
-                # 3. 如果是 IPv4，检查是否有通往该地址的路由
-                if ip route get "$target" >/dev/null 2>&1; then
-                    success=0
-                fi
-            fi
-        fi
+    # 自动判断是否为 IPv6 地址并添加 -6 参数
+    local proto_flag=""
+    [[ "$target" == *":"* ]] && proto_flag="-6"
 
-        # 原始的标记信息和颜色逻辑完全不动
-        if [ $success -eq 0 ]; then
-            echo -e "\033[1;32m(已连通)\033[0m"
-        else
-            echo -e "\033[1;33m(本地受阻)\033[0m"
-        fi
-    }
+    # 使用更加健壮的探测逻辑
+    if nc $proto_flag -z -u -w 1 "$target" "$RAW_PORT" >/dev/null 2>&1; then
+        echo -e "\033[1;32m(已连通)\033[0m"
+    else
+        echo -e "\033[1;33m(本地受阻)\033[0m"
+    fi
+}
     if command -v nc >/dev/null 2>&1; then
         _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
         v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
