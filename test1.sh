@@ -955,7 +955,7 @@ warp_manager() {
                     info "[DEBUG] 最终合成私钥长度: ${#priv}"
                     [ -z "$priv" ] && { err "[DEBUG] 错误：私钥为空，无法写入配置"; continue; }
 
-                    local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1120}'
+                    local out='{"type":"wireguard","tag":"warp-out","server":"engage.cloudflareclient.com","server_port":2408,"local_address":["172.16.0.2/32","'"$v6"'"],"private_key":"'"$priv"'","mtu":1280}'
                     local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
                     
                     info "[DEBUG] 正在写入 JSON 配置..."
