@@ -57,7 +57,7 @@ detect_os() {
 # 依赖安装 (容错增强版)
 install_dependencies() {
     info "正在检查系统类型..."
-    local PM="" DEPS="curl jq openssl ca-certificates iproute2 ethtool iptables bash tzdata tar kmod resolvconf wireguard-tools"
+    local PM="" DEPS="curl jq openssl ca-certificates iproute2 ethtool iptables bash tzdata tar kmod wireguard-tools"
     command -v apk >/dev/null 2>&1 && PM="apk" || { command -v apt-get >/dev/null 2>&1 && PM="apt" || PM="yum"; }
     [ "$PM" = "apk" ] && DEPS="$DEPS netcat-openbsd procps coreutils util-linux-misc" || DEPS="$DEPS netcat-openbsd procps util-linux"
     [ "$PM" = "yum" ] && DEPS="${DEPS//netcat-openbsd/nc}" && DEPS="${DEPS//procps/procps-ng}"
