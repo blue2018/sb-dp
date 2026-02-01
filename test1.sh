@@ -846,10 +846,22 @@ display_links() {
     [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
 	
     _do_probe() {
-        [ -z "$1" ] && return
-        nc -z -u -w 1 "$1" "$RAW_PORT" >/dev/null 2>&1 && \
-        echo -e "\033[1;32m(已连通)\033[0m" || echo -e "\033[1;33m(本地受阻)\033[0m"
-    }
+    [ -z "$1" ] && return
+    local target="$1"
+    local opts="-z -u -w 2"  # 增加到2秒提高稳定性
+    
+    # 自动识别 IPv6 并添加相应参数
+    [[ "$target" == *":"* ]] && opts="$opts -6"
+
+    # 执行探测
+    if nc $opts "$target" "$RAW_PORT" >/dev/null 2>&1; then
+        echo -e "\033[1;32m(已连通)\033[0m"
+    else
+        # 即使 nc 返回非0，有时也是因为没有收到回执，这在 UDP 中很常见
+        # 这里维持原样，但你可以考虑在某些环境下默认显示“待观察”
+        echo -e "\033[1;33m(本地受阻)\033[0m"
+    fi
+}
     if command -v nc >/dev/null 2>&1; then
         _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
         v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
