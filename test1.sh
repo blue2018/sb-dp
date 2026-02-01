@@ -1097,7 +1097,6 @@ elif [[ "${1:-}" == "--apply-cwnd" ]]; then
     apply_initcwnd_optimization "true" || true; apply_firewall
 fi
 EOF
-
     mv "$CORE_TMP" "$SBOX_CORE"
     chmod 700 "$SBOX_CORE"
 
@@ -1117,10 +1116,8 @@ service_ctrl() {
 }
 EOF
 
-# 注入独立定义的 WARP 函数内容
-get_warp_conf >> "$SB_PATH"
-warp_manager >> "$SB_PATH"
-
+declare -f get_warp_conf >> "$SB_PATH"
+declare -f warp_manager >> "$SB_PATH"
 cat >> "$SB_PATH" <<'EOF'
 while true; do
     echo "========================"
