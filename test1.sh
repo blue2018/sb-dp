@@ -899,25 +899,28 @@ display_system_status() {
 get_warp_conf() {
     local cache="/etc/sing-box/warp.json" log="/tmp/warp_debug.log"
     echo "--- 调试开始 $(date) ---" > "$log"
-    # 环境检查
-    command -v wg >/dev/null || { echo "安装 wireguard-tools..." >> "$log" && apk add wireguard-tools >>"$log" 2>&1; }
-    [ ! -x "$(command -v wg)" ] && { echo "错误: 密钥工具安装失败" >&2; return 1; }
+    command -v wg >/dev/null || apk add wireguard-tools >>"$log" 2>&1
     
-    local priv=$(wg genkey) pub=$(echo "$priv" | wg pubkey)
-    echo "生成的私钥: $priv" >> "$log"
+    # 生成密钥对
+    local pr=$(wg genkey)
+    local pu=$(echo "$pr" | wg pubkey)
     
-    # API 注册
-    echo "正在请求 Cloudflare API..." >> "$log"
+    # 核心修复：更严谨的 API 请求头和格式
     local res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" \
-        -H "Content-Type: application/json" -H "User-Agent: okhttp/3.12.1" \
-        -d "{\"key\":\"$pub\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
-    
+        -H "User-Agent: okhttp/3.12.1" \
+        -H "Content-Type: application/json" \
+        -H "Accept: application/json" \
+        -d "{\"key\":\"$pu\",\"type\":\"Linux\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\"}")
+
     local id=$(echo "$res" | jq -r '.id // .result.id // empty')
     if [ -n "$id" ]; then
         local v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // "2606:4700:110:8283:1102:f37b:af8b:a65d/128"')
-        echo "{\"priv\":\"$priv\",\"v6\":\"$v6\"}" | tee "$cache"
+        # 写入缓存文件
+        echo "{\"priv\":\"$pr\",\"v6\":\"$v6\"}" > "$cache"
+        # 返回给上级变量使用
+        echo "$pr|$v6"
     else
-        echo "判定结果: 注册失败" >> "$log" && echo "原始响应: $res" >> "$log" && cat "$log" >&2 && return 1
+        echo "注册失败: $res" >> "$log" && cat "$log" >&2 && return 1
     fi
 }
 
@@ -936,16 +939,22 @@ warp_manager() {
                 else
                     info "正在激活 WARP 分流..." && rm -f "/etc/sing-box/warp.json"
                     local cred=$(get_warp_conf) || continue
-                    local priv=$(echo "$cred" | jq -r .priv) v6=$(echo "$cred" | jq -r .v6)
+                    # 修复变量解析：从 echo 的管道中正确获取私钥和 v6
+                    local priv=$(echo "$cred" | cut -d'|' -f1)
+                    local v6=$(echo "$cred" | cut -d'|' -f2)
+                    
+                    # 安全检查：如果变量为空则报错退出，防止写坏配置
+                    [ -z "$priv" ] && { err "私钥获取失败"; continue; }
+                    
                     local out=$(jq -n --arg pr "$priv" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
-                    local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","disneyplus.com","tiktok.com"],"outbound":"warp-out"}'
+                    local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","tiktok.com"],"outbound":"warp-out"}'
                     jq --argjson out "$out" --argjson rule "$rule" '.outbounds += [$out] | .route.rules = [$rule] + (.route.rules // [])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 fi
                 service_ctrl restart && succ "WARP 策略已更新" ;;
             2)
                 grep -q "warp-out" "$conf" || { err "请先启用 WARP"; continue; }
-                read -r -p "输入要分流的域名: " dom
-                [ -n "$dom" ] && jq --arg dom "$dom" '(..|select(.outbound?=="warp-out").domain)+=[$dom]|(..|select(.outbound?=="warp-out").domain)|=unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "域名 $dom 已加入 WARP 分流" ;;
+                read -r -p "输入域名: " dom
+                [ -n "$dom" ] && jq --arg dom "$dom" '(..|select(.outbound?=="warp-out").domain)+=[$dom]|(..|select(.outbound?=="warp-out").domain)|=unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入分流" ;;
             0) break ;;
             *) err "无效选择" ;;
         esac
