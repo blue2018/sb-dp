@@ -743,7 +743,6 @@ respawn_max=5
 respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
-export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 command="/usr/bin/sing-box"
 command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
@@ -753,11 +752,7 @@ rc_ulimit="-n 1000000"
 rc_nice="${final_nice}"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
-start_pre() { 
-    ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_err.log 2>&1 || { 
-        echo "Config check failed:" && cat /tmp/sb_err.log && return 1 
-    } 
-}
+start_pre() { ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_err.log 2>&1 || { echo "Config check failed:" && cat /tmp/sb_err.log && return 1; }; }
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true
