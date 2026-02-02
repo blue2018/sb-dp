@@ -842,9 +842,13 @@ display_links() {
 	
     _do_probe() {
         [ -z "$1" ] && return
-        nc -z -u -w 1 "$1" "$RAW_PORT" >/dev/null 2>&1 && \
+        nc -z -u -w 1 "$(echo "$1" | tr -d '[]')" "$RAW_PORT" >/dev/null 2>&1 && \
         echo -e "\033[1;32m(已连通)\033[0m" || echo -e "\033[1;33m(本地受阻)\033[0m"
     }
+    if command -v nc >/dev/null 2>&1; then
+        _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
+        v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
+    fi
     if command -v nc >/dev/null 2>&1; then
         _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
         v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
@@ -895,7 +899,6 @@ get_warp_conf() {
     local cache="/etc/sing-box/warp.json" log="/tmp/warp_debug.log"
     echo "--- 自动注册 $(date) ---" > "$log"
     command -v wg >/dev/null || apk add wireguard-tools >>"$log" 2>&1
-    # 修复点：先声明再使用，防止变量在单行中“失踪”
     local pr pu res id v6
     pr=$(wg genkey) && pu=$(echo "$pr" | wg pubkey)
     res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" -d "{\"key\":\"$pu\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
