@@ -410,7 +410,7 @@ apply_nic_core_boost() {
 # 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
 # ==========================================
 optimize_system() {
-    local rtt_res=($(probe_network_rtt)) mem_total=$(probe_memory_total)
+    local rtt_res=($(probe_network_rtt)); local mem_total=$(probe_memory_total)
 	local rtt_avg="${rtt_res[0]:-150}" real_rtt_factors="${rtt_res[1]:-130}" loss_compensation="${rtt_res[2]:-100}"
     local real_c="$CPU_CORE" ct_max=16384 ct_udp_to=30 ct_stream_to=30
     local dyn_buf g_procs g_wnd g_buf net_bgt net_usc tcp_rmem_max
