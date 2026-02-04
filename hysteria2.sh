@@ -410,7 +410,7 @@ apply_nic_core_boost() {
 # 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
 # ==========================================
 optimize_system() {
-    local RTT_AVG=$(probe_network_rtt) 
+    local rtt_avg=$(probe_network_rtt) 
     local mem_total=$(probe_memory_total)
     local real_c="$CPU_CORE" ct_max=16384 ct_udp_to=30 ct_stream_to=30
     local dyn_buf g_procs g_wnd g_buf net_bgt net_usc tcp_rmem_max
@@ -418,7 +418,7 @@ optimize_system() {
     local swappiness_val="${SWAPPINESS_VAL:-10}" busy_poll_val="${BUSY_POLL_VAL:-0}"
     
     setup_zrm_swap "$mem_total"
-	info "系统画像: CPU核心: ${real_c} 核 | 系统内存: ${mem_total} mb | 平均延迟: ${RTT_AVG} ms | RTT补偿: ${REAL_RTT_FACTORS} ms | 丢包补偿: ${LOSS_COMPENSATION}%"
+	info "系统画像: CPU核心: ${real_c} 核 | 系统内存: ${mem_total} mb | 平均延迟: ${rtt_avg} ms | RTT补偿: ${REAL_RTT_FACTORS} ms | 丢包补偿: ${LOSS_COMPENSATION}%"
 
     # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
@@ -493,7 +493,7 @@ optimize_system() {
     if [ "$mem_total" -gt 100 ]; then [ "$min_free_val" -gt 65536 ] && min_free_val=65536; fi
 	
 	# 9. 路况仲裁
-    safe_rtt "$dyn_buf" "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
+    safe_rtt "$dyn_buf" "$rtt_avg" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
 	apply_initcwnd_optimization "false"
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf" "$real_c" "$mem_total"
@@ -560,7 +560,7 @@ net.ipv4.tcp_notsent_lowat = 16384         # 限制发送队列 (防延迟抖动
 net.ipv4.tcp_mtu_probing = 1               # MTU自动探测 (防UDP黑洞)
 net.ipv4.ip_no_pmtu_disc = 0               # 启用路径MTU探测 (寻找最优包大小)
 net.ipv4.tcp_frto = 2                      # 丢包环境重传判断优化
-net.ipv4.tcp_slow_start_after_idle = $([ "$RTT_AVG" -ge 150 ] && echo "1" || echo "0") # 闲置后慢启动开关
+net.ipv4.tcp_slow_start_after_idle = $([ "$rtt_avg" -ge 150 ] && echo "1" || echo "0") # 闲置后慢启动开关
 net.ipv4.tcp_limit_output_bytes = $([ "$mem_total" -ge 200 ] && echo "262144" || echo "131072") # 限制TCP连接占用发送队列
 net.ipv4.udp_gro_enabled = 1               # UDP 分段聚合 (降CPU负载)
 net.ipv4.udp_early_demux = 1               # UDP 早期路由优化
