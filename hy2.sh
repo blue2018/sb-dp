@@ -185,7 +185,7 @@ probe_network_rtt() {
     if [ -n "$ping_res" ]; then
         RTT_VAL=$(echo "$ping_res" | awk -F'/' 'END{print int($5)}')
         loss_val=$(echo "$ping_res" | grep -oE '[0-9]+% packet loss' | grep -oE '[0-9]+' || echo "5")
-        echo -e "\033[1;32m[OK]\033[0m 实测 RTT: ${RTT_VAL} ms | 丢包: ${loss_val}%" >&2
+        echo -e "\033[1;32m[OK]\033[0m 实测 RTT: ${RTT_VAL}ms | 丢包: ${loss_val}%" >&2
     else
         RTT_VAL="150"; echo -e "\033[1;33m[WARN]\033[0m 探测受阻，应用全球预估值: 150ms" >&2
     fi
@@ -444,7 +444,7 @@ optimize_system() {
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
-        VAR_HY2_BW="180"; max_udp_mb=$((mem_total * 60 / 100))
+        VAR_HY2_BW="180"; max_udp_mb=$((mem_total * 56 / 100))
         SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="100"
         SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=2097152
