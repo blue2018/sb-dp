@@ -5,12 +5,12 @@ set -euo pipefail
 # 基础变量声明与环境准备
 # ==========================================
 # === 系统与环境参数初始化 ===
-SBOX_ARCH="";            OS_DISPLAY="";            SBOX_CORE="/etc/sing-box/core_script.sh"
-SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";          SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测"
-SBOX_MEM_HIGH="42M";     CPU_CORE="1";             INITCWND_DONE="false";  VAR_DEF_MEM=""
-VAR_UDP_RMEM="";         VAR_UDP_WMEM="";          VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200"
-VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";      BUSY_POLL_VAL="0";      VAR_BACKLOG="5000"
-REAL_RTT_FACTORS="130";  LOSS_COMPENSATION="100";  USER_PORT="";           RAW_SALA="";        UDP_MEM_SCALE=""
+SBOX_ARCH="";            OS_DISPLAY="";          SBOX_CORE="/etc/sing-box/core_script.sh"
+SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测"
+SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM=""
+VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200"
+VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000"
+USER_PORT="";            RAW_SALA="";            UDP_MEM_SCALE=""
 
 # TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
@@ -171,7 +171,7 @@ get_network_info() {
 
 # === 网络延迟探测模块 ===
 probe_network_rtt() {
-    local rtt_val; local loss_val="5"; set +e
+    local rtt_val; local loss_val="5"; local real_rtt_factors="130"; local loss_compensation="100"; set +e
     echo -e "\033[1;34m[INFO]\033[0m 正在探测网络画像 (RTT/丢包)..." >&2
 	# 1. 扩充探测池：覆盖国内骨干、全球顶级 CDN 及 DNS 节点
     local targets=("223.5.5.5" "119.29.29.29" "114.114.114.114" "1.1.1.1" "8.8.8.8" "8.26.56.26" "208.67.222.222")
@@ -191,11 +191,11 @@ probe_network_rtt() {
     fi
     set -e
     # 画像联动赋值
-    REAL_RTT_FACTORS=$(( rtt_val + 100 ))   # 延迟补偿：实测值 + 100ms (平衡握手开销)
+    real_rtt_factors=$(( rtt_val + 100 ))   # 延迟补偿：实测值 + 100ms (平衡握手开销)
 	# 丢包补偿：每 1% 丢包增加 5% 缓冲区冗余，最高 200%
-    LOSS_COMPENSATION=$(( 100 + loss_val * 5 )); [ "$LOSS_COMPENSATION" -gt 200 ] && LOSS_COMPENSATION=200
+    loss_compensation=$(( 100 + loss_val * 5 )); [ "$loss_compensation" -gt 200 ] && loss_compensation=200
 	# 输出原始 RTT 供脚本其它函数引用
-    echo "$rtt_val"
+    echo "$rtt_val" "$real_rtt_factors" "$loss_compensation"
 }
 
 # 内存资源探测模块
@@ -301,10 +301,10 @@ EOF
 
 # 动态 RTT 内存页钳位
 safe_rtt() {
-    local dyn_buf="$1" rtt_val="$2" max_udp_pages="$3" udp_min="$4" udp_pre="$5" udp_max="$6"
+    local dyn_buf="$1" rtt_val="$2" max_udp_pages="$3" udp_min="$4" udp_pre="$5" udp_max="$6" real_rtt_factors="$7" loss_compensation="$8"
     local dyn_pages=$(( dyn_buf / 4096 ))
     # 1. 计算探测 BDP：使用补偿后的画像值及丢包补偿系数
-    local probe_pages=$(( REAL_RTT_FACTORS * 1024 * LOSS_COMPENSATION / 100 ))
+    local probe_pages=$(( real_rtt_factors * 1024 * loss_compensation / 100 ))
     # 2. 仲裁逻辑：探测值与 dyn_buf 保底值取最大者
     rtt_scale_max=$(( probe_pages > dyn_pages ? probe_pages : dyn_pages ))
     # 3. 延迟梯度补偿：根据实测 RTT 自动切换模式
@@ -410,7 +410,8 @@ apply_nic_core_boost() {
 # 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
 # ==========================================
 optimize_system() {
-    local rtt_avg=$(probe_network_rtt) 
+    local rtt_res=$(probe_network_rtt)
+    local rtt_avg="${rtt_res[0]}"; local real_rtt_factors="${rtt_res[1]}"; local loss_compensation="${rtt_res[2]}"
     local mem_total=$(probe_memory_total)
     local real_c="$CPU_CORE" ct_max=16384 ct_udp_to=30 ct_stream_to=30
     local dyn_buf g_procs g_wnd g_buf net_bgt net_usc tcp_rmem_max
@@ -418,7 +419,7 @@ optimize_system() {
     local swappiness_val="${SWAPPINESS_VAL:-10}" busy_poll_val="${BUSY_POLL_VAL:-0}"
     
     setup_zrm_swap "$mem_total"
-	info "系统画像: CPU核心: ${real_c} 核 | 系统内存: ${mem_total} mb | 平均延迟: ${rtt_avg} ms | RTT补偿: ${REAL_RTT_FACTORS} ms | 丢包补偿: ${LOSS_COMPENSATION}%"
+	info "系统画像: CPU核心: ${real_c} 核 | 系统内存: ${mem_total} mb | 平均延迟: ${rtt_avg} ms | RTT补偿: ${real_rtt_factors} ms | 丢包补偿: ${loss_compensation}%"
 
     # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
@@ -470,7 +471,7 @@ optimize_system() {
     [ "$VAR_BACKLOG" -lt 8192 ] && VAR_BACKLOG=8192
 
     # 4. 联动导出：Sing-box 应用层参数
-    g_wnd=$(( VAR_HY2_BW * LOSS_COMPENSATION / 100 / 8 ))      # 激进窗口，应对 80ms+ 延迟（原为 /10）
+    g_wnd=$(( VAR_HY2_BW * loss_compensation / 100 / 8 ))      # 激进窗口，应对 80ms+ 延迟（原为 /10）
     [ "$g_wnd" -lt 15 ] && g_wnd=15  # 调高起步窗口（原为 12）
     g_buf=$(( dyn_buf / 6 ))         # 应用层 buffer 设为跳板的 1/6（原为 /8）
 
@@ -493,7 +494,7 @@ optimize_system() {
     if [ "$mem_total" -gt 100 ]; then [ "$min_free_val" -gt 65536 ] && min_free_val=65536; fi
 	
 	# 9. 路况仲裁
-    safe_rtt "$dyn_buf" "$rtt_avg" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
+    safe_rtt "$dyn_buf" "$rtt_avg" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max" "$real_rtt_factors" "$loss_compensation"
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
 	apply_initcwnd_optimization "false"
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf" "$real_c" "$mem_total"
@@ -921,8 +922,6 @@ RAW_SALA='$FINAL_SALA'
 RAW_IP4='${RAW_IP4:-}'
 RAW_IP6='${RAW_IP6:-}'
 IS_V6_OK='${IS_V6_OK:-false}'
-REAL_RTT_FACTORS='$REAL_RTT_FACTORS'
-LOSS_COMPENSATION='$LOSS_COMPENSATION'
 EOF
 
     # 导出函数
