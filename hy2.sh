@@ -185,7 +185,7 @@ probe_network_rtt() {
     if [ -n "$ping_res" ]; then
         RTT_VAL=$(echo "$ping_res" | awk -F'/' 'END{print int($5)}')
         loss_val=$(echo "$ping_res" | grep -oE '[0-9]+% packet loss' | grep -oE '[0-9]+' || echo "5")
-        echo -e "\033[1;32m[OK]\033[0m 实测 RTT: ${RTT_VAL}ms | 丢包: ${loss_val}%" >&2
+        echo -e "\033[1;32m[OK]\033[0m 实测 RTT: ${RTT_VAL} ms | 丢包: ${loss_val}%" >&2
     else
         RTT_VAL="150"; echo -e "\033[1;33m[WARN]\033[0m 探测受阻，应用全球预估值: 150ms" >&2
     fi
@@ -331,10 +331,10 @@ apply_userspace_adaptive_profile() {
     # === 1. P 处理器调度 (针对单核小鸡的特殊优化) ===
     # 如果是单核，强行给 2 个 P 能够让网络 IO 和内存回收并行，不至于卡死
     [ "$real_c" -eq 1 ] && export GOMAXPROCS=2 || export GOMAXPROCS="$g_procs"
-    # === 2. 内存回收策略分级 (75M+- 差异化处理) ===
-    [ "$mem_total" -lt 75 ] && \
-    { export GODEBUG="madvdontneed=1,scavenge_target=1"; info "Runtime → 激进回收模式 (75M-)"; } || \
-    { export GODEBUG="madvdontneed=1,asyncpreemptoff=1"; info "Runtime → 性能优先模式 (75M+)"; }
+    # === 2. 内存回收策略分级 (76M+- 差异化处理) ===
+    [ "$mem_total" -lt 76 ] && \
+    { export GODEBUG="madvdontneed=1,scavenge_target=1"; info "Runtime → 激进回收模式 (76m-)"; } || \
+    { export GODEBUG="madvdontneed=1,asyncpreemptoff=1"; info "Runtime → 性能优先模式 (76m+)"; }
     export GOGC="${SBOX_GOGC:-100}" GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}"
     export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" VAR_HY2_BW="${VAR_HY2_BW:-200}"
     export SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"
@@ -361,7 +361,7 @@ EOF
     chmod 644 /etc/sing-box/env
     # === 4. CPU 亲和力优化 (绑定当前脚本到所有可用核心) ===
     [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1 && taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1
-    info "Runtime → GOMAXPROCS: $GOMAXPROCS核 | 内存限额:$GOMEMLIMIT | GC权重:$GOGC | Buffer:$((buf/1024))KB"
+    info "Runtime → GOMAXPROCS: $GOMAXPROCS 核 | 内存限额: $GOMEMLIMIT | GOGC: $GOGC | Buffer: $((buf/1024)) KB"
 }
 
 # 网卡核心负载加速（RPS/XPS/批处理密度）
@@ -403,7 +403,7 @@ apply_nic_core_boost() {
             [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
         done
     fi
-	info "NIC 优化 → 网卡:$IFACE | QLen:$target_qlen | 中断延迟:${tuned_usc:-default}us"
+	info "NIC 优化 → 网卡: $IFACE | QLen: $target_qlen | 中断延迟: ${tuned_usc:-default} us"
 }
 
 # ==========================================
@@ -418,34 +418,34 @@ optimize_system() {
     local swappiness_val="${SWAPPINESS_VAL:-10}" busy_poll_val="${BUSY_POLL_VAL:-0}"
     
     setup_zrm_swap "$mem_total"
-	info "系统画像: CPU核心=${real_c}核 | 系统内存=${mem_total}mb | 平均延迟=${RTT_AVG}ms | RTT补偿=${REAL_RTT_FACTORS}ms | 丢包补偿=${LOSS_COMPENSATION}%"
+	info "系统画像: CPU核心: ${real_c} 核 | 系统内存: ${mem_total} mb | 平均延迟: ${RTT_AVG} ms | RTT补偿: ${REAL_RTT_FACTORS} ms | 丢包补偿: ${LOSS_COMPENSATION}%"
 
     # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
-        VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 70 / 100))
-        SBOX_GOLIMIT="$((mem_total * 80 / 100))MiB"; SBOX_GOGC="200"
+        VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 69 / 100))
+        SBOX_GOLIMIT="$((mem_total * 79 / 100))MiB"; SBOX_GOGC="200"
         SBOX_MEM_HIGH="$((mem_total * 89 / 100))M"; SBOX_MEM_MAX="$((mem_total * 98 / 100))M"
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
         g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
-        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 67 / 100))
-        SBOX_GOLIMIT="$((mem_total * 77 / 100))MiB"; SBOX_GOGC="150"
+        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 66 / 100))
+        SBOX_GOLIMIT="$((mem_total * 76 / 100))MiB"; SBOX_GOGC="150"
         SBOX_MEM_HIGH="$((mem_total * 87 / 100))M"; SBOX_MEM_MAX="$((mem_total * 97 / 100))M"
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
         g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
-        VAR_HY2_BW="220"; max_udp_mb=$((mem_total * 64 / 100))
-        SBOX_GOLIMIT="$((mem_total * 74 / 100))MiB"; SBOX_GOGC="120"
+        VAR_HY2_BW="220"; max_udp_mb=$((mem_total * 63 / 100))
+        SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="120"
         SBOX_MEM_HIGH="$((mem_total * 84 / 100))M"; SBOX_MEM_MAX="$((mem_total * 94 / 100))M"
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         swappiness_val=60; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
-        VAR_HY2_BW="180"; max_udp_mb=$((mem_total * 63 / 100))
-        SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="100"
+        VAR_HY2_BW="180"; max_udp_mb=$((mem_total * 60 / 100))
+        SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="100"
         SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=2097152
         g_procs=1; swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
@@ -498,8 +498,8 @@ optimize_system() {
 	apply_initcwnd_optimization "false"
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf" "$real_c" "$mem_total"
     apply_nic_core_boost "$real_c" "$net_bgt" "$net_usc"
-    info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW}Mbps"
-    info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 ))MB"
+    info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW} Mbps"
+    info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
 	
     # 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
     local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
@@ -842,7 +842,7 @@ display_links() {
     _do_probe() {
         [ -z "$1" ] && return
         nc -z -u -w 1 "$1" "$RAW_PORT" >/dev/null 2>&1 && \
-        echo -e "\033[1;32m(已连通)\033[0m" || echo -e "\033[1;33m(本地受阻)\033[0m"
+        echo -e "\033[1;32m (已连通)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
     }
     if command -v nc >/dev/null 2>&1; then
         _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
