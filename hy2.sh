@@ -335,7 +335,7 @@ apply_userspace_adaptive_profile() {
     [ "$mem_total" -lt 76 ] && \
     { export GODEBUG="madvdontneed=1,scavenge_target=1"; info "Runtime → 激进回收模式 (76m-)"; } || \
     { export GODEBUG="madvdontneed=1,asyncpreemptoff=1"; info "Runtime → 性能优先模式 (76m+)"; }
-    export GOGC="${SBOX_GOGC:-100}" GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}"
+    export GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}" GOGC="${SBOX_GOGC:-100}"
     export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" VAR_HY2_BW="${VAR_HY2_BW:-200}"
     export SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"
     # 针对 100M- 小鸡执行最后一道严谨校准 (Sanity Check)
