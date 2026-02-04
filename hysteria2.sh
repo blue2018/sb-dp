@@ -171,7 +171,7 @@ get_network_info() {
 
 # === 网络延迟探测模块 ===
 probe_network_rtt() {
-    local RTT_VAL; local loss_val="5"; set +e
+    local rtt_val; local loss_val="5"; set +e
     echo -e "\033[1;34m[INFO]\033[0m 正在探测网络画像 (RTT/丢包)..." >&2
 	# 1. 扩充探测池：覆盖国内骨干、全球顶级 CDN 及 DNS 节点
     local targets=("223.5.5.5" "119.29.29.29" "114.114.114.114" "1.1.1.1" "8.8.8.8" "8.26.56.26" "208.67.222.222")
@@ -183,19 +183,19 @@ probe_network_rtt() {
     done
 	# 3. 提取平均 RTT 并解析丢包率 (兼容多系统格式)
     if [ -n "$ping_res" ]; then
-        RTT_VAL=$(echo "$ping_res" | awk -F'/' 'END{print int($5)}')
+        rtt_val=$(echo "$ping_res" | awk -F'/' 'END{print int($5)}')
         loss_val=$(echo "$ping_res" | grep -oE '[0-9]+% packet loss' | grep -oE '[0-9]+' || echo "5")
-        echo -e "\033[1;32m[OK]\033[0m 实测 RTT: ${RTT_VAL}ms | 丢包: ${loss_val}%" >&2
+        echo -e "\033[1;32m[OK]\033[0m 实测 RTT: ${rtt_val}ms | 丢包: ${loss_val}%" >&2
     else
-        RTT_VAL="150"; echo -e "\033[1;33m[WARN]\033[0m 探测受阻，应用全球预估值: 150ms" >&2
+        rtt_val="150"; echo -e "\033[1;33m[WARN]\033[0m 探测受阻，应用全球预估值: 150ms" >&2
     fi
     set -e
     # 画像联动赋值
-    REAL_RTT_FACTORS=$(( RTT_VAL + 100 ))   # 延迟补偿：实测值 + 100ms (平衡握手开销)
+    REAL_RTT_FACTORS=$(( rtt_val + 100 ))   # 延迟补偿：实测值 + 100ms (平衡握手开销)
 	# 丢包补偿：每 1% 丢包增加 5% 缓冲区冗余，最高 200%
     LOSS_COMPENSATION=$(( 100 + loss_val * 5 )); [ "$LOSS_COMPENSATION" -gt 200 ] && LOSS_COMPENSATION=200
 	# 输出原始 RTT 供脚本其它函数引用
-    echo "$RTT_VAL"
+    echo "$rtt_val"
 }
 
 # 内存资源探测模块
@@ -301,14 +301,14 @@ EOF
 
 # 动态 RTT 内存页钳位
 safe_rtt() {
-    local dyn_buf="$1" RTT_VAL="$2" max_udp_pages="$3" udp_min="$4" udp_pre="$5" udp_max="$6"
+    local dyn_buf="$1" rtt_val="$2" max_udp_pages="$3" udp_min="$4" udp_pre="$5" udp_max="$6"
     local dyn_pages=$(( dyn_buf / 4096 ))
     # 1. 计算探测 BDP：使用补偿后的画像值及丢包补偿系数
     local probe_pages=$(( REAL_RTT_FACTORS * 1024 * LOSS_COMPENSATION / 100 ))
     # 2. 仲裁逻辑：探测值与 dyn_buf 保底值取最大者
     rtt_scale_max=$(( probe_pages > dyn_pages ? probe_pages : dyn_pages ))
     # 3. 延迟梯度补偿：根据实测 RTT 自动切换模式
-    if [ "$RTT_VAL" -ge 150 ]; then
+    if [ "$rtt_val" -ge 150 ]; then
         rtt_scale_max=$(( rtt_scale_max * 15 / 10 )); SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (QUIC远航)"
     else
         SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (QUIC竞速)"
