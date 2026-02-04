@@ -423,21 +423,21 @@ optimize_system() {
     # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
         VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 69 / 100))
-        SBOX_GOLIMIT="$((mem_total * 79 / 100))MiB"; SBOX_GOGC="300"
+        SBOX_GOLIMIT="$((mem_total * 79 / 100))MiB"; SBOX_GOGC="200"
         SBOX_MEM_HIGH="$((mem_total * 89 / 100))M"; SBOX_MEM_MAX="$((mem_total * 98 / 100))M"
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
         g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
         VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 66 / 100))
-        SBOX_GOLIMIT="$((mem_total * 76 / 100))MiB"; SBOX_GOGC="200"
+        SBOX_GOLIMIT="$((mem_total * 76 / 100))MiB"; SBOX_GOGC="150"
         SBOX_MEM_HIGH="$((mem_total * 87 / 100))M"; SBOX_MEM_MAX="$((mem_total * 97 / 100))M"
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
         g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
         VAR_HY2_BW="220"; max_udp_mb=$((mem_total * 63 / 100))
-        SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="150"
+        SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="130"
         SBOX_MEM_HIGH="$((mem_total * 84 / 100))M"; SBOX_MEM_MAX="$((mem_total * 94 / 100))M"
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         swappiness_val=60; busy_poll_val=0; ct_max=16384; ct_stream_to=30
@@ -445,7 +445,7 @@ optimize_system() {
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
         VAR_HY2_BW="180"; max_udp_mb=$((mem_total * 56 / 100))
-        SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="130"
+        SBOX_GOLIMIT="$((mem_total * 66 / 100))MiB"; SBOX_GOGC="110"
         SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=2097152
         g_procs=1; swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
