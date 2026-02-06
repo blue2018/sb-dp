@@ -650,13 +650,15 @@ install_singbox() {
     [ "$dl_ok" = false ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "所有下载源均失效，保留旧版"; rm -rf "$TD"; return 0; } || { err "下载失败，安装中断"; exit 1; }; }
 
     # 解压安装
-    tar -xf "$TF" -C "$TD" --strip-components=1
-    pgrep sing-box >/dev/null && { info "停止旧版进程..."; systemctl stop sing-box 2>/dev/null; }
-    
-    [ -f "$TD/sing-box" ] && { 
-        install -m 755 "$TD/sing-box" /usr/bin/sing-box && rm -rf "$TD"
-        succ "内核安装成功: v$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')"
-    } || { rm -rf "$TD"; err "文件解压校验失败"; return 1; }
+    info "正在解压并准备替换内核..."
+    tar -xf "$TF" -C "$TD" >/dev/null 2>&1
+    local NEW_BIN=$(find "$TD" -type f -name "sing-box" | head -n1)
+    if [ -f "$NEW_BIN" ]; then
+        pgrep -x sing-box >/dev/null && { info "停止旧版进程以完成内核替换..."; service_ctrl stop; }
+        install -m 755 "$NEW_BIN" /usr/bin/sing-box && rm -rf "$TD"
+        local VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
+        succ "内核安装成功: v$VER"
+    else rm -rf "$TD" && err "解压校验失败：未找到二进制文件" && return 1; fi
 }
 
 # ==========================================
