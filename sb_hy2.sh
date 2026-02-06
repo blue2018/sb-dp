@@ -961,8 +961,8 @@ setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp 
     done
 
     cat >> "$CORE_TMP" <<'EOF'
-apply_firewall
 detect_os; set +e
+apply_firewall
 if [[ "${1:-}" == "--detect-only" ]]; then :
 elif [[ "${1:-}" == "--show-only" ]]; then
     get_env_data; echo -e "\n\033[1;34m==========================================\033[0m"
