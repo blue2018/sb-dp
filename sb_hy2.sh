@@ -1048,11 +1048,11 @@ export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
 USER_PORT=$(prompt_for_port)
-apply_firewall
 optimize_system
 install_singbox "install"
 generate_cert
 create_config "$USER_PORT"
+apply_firewall
 create_sb_tool
 setup_service
 get_env_data
