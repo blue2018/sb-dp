@@ -863,7 +863,7 @@ display_links() {
 	
     _do_probe() {
         [ -z "$1" ] && return
-        nc -z -u -w 1 "$1" "$RAW_PORT" >/dev/null 2>&1 && \
+		(nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
         echo -e "\033[1;32m (已连通)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
     }
     if command -v nc >/dev/null 2>&1; then
