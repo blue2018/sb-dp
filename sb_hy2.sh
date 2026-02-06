@@ -990,7 +990,6 @@ SBOX_CORE="/etc/sing-box/core_script.sh"
 if [ ! -f "$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
 [[ $# -gt 0 ]] && { /bin/bash "$SBOX_CORE" "$@"; exit 0; }
 source "$SBOX_CORE" --detect-only
-service_ctrl stop
 
 while true; do
     echo "========================" 
