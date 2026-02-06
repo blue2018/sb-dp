@@ -757,7 +757,7 @@ EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true
         sync   # 确保环境文件与服务脚本落盘，防止启动瞬时读取失败
-        rc-service sing-box restart >/dev/null 2>&1 &
+		(rc-service sing-box restart >/dev/null 2>&1 || true) &
     else
         local mem_config=""; local cpu_quota=$((real_c * 100))
         local io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
@@ -798,7 +798,7 @@ EOF
         systemctl daemon-reload >/dev/null 2>&1
         systemctl enable sing-box >/dev/null 2>&1 || true
         sync   # 确保环境文件与服务配置落盘
-        systemctl restart sing-box >/dev/null 2>&1 &
+		(systemctl restart sing-box >/dev/null 2>&1 || true) &
     fi
     set +e     # 关闭 set -e，这是防止脚本在 pidof 失败时直接退出的关键核心
     for i in {1..40}; do
@@ -926,52 +926,53 @@ EOF
     # 导出函数
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
-create_config setup_service install_singbox info err warn succ optimize_system \
+optimize_system install_singbox create_config setup_service service_ctrl apply_firewall info err warn succ \  
 apply_userspace_adaptive_profile apply_nic_core_boost \
 setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
 
-    for f in "${funcs[@]}"; do
+	apply_firewall() {
+	    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+	    [ -z "$port" ] && return
+	    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
+	    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
+	    elif command -v iptables >/dev/null 2>&1; then
+	        iptables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
+	        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+	        command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
+	    fi
+	}
+	
+	service_ctrl() {
+	    local action="$1"
+	    if [ "$action" == "restart" ]; then
+	        optimize_system; setup_service; apply_firewall
+	    else
+	        [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "$action" && return
+	        systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "$action" sing-box
+	    fi
+	}
+	
+    for f in "${funcs[@]}"; do  
         if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
     done
 
     cat >> "$CORE_TMP" <<'EOF'
 detect_os; set +e
-
-# 自动从配置提取端口并放行
-apply_firewall() {
-    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    [ -z "$port" ] && return
-    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
-    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
-    elif command -v iptables >/dev/null 2>&1; then
-        iptables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
-        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
-        command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
-    fi
-}
-
 if [[ "${1:-}" == "--detect-only" ]]; then :
 elif [[ "${1:-}" == "--show-only" ]]; then
     get_env_data; echo -e "\n\033[1;34m==========================================\033[0m"
     display_system_status; display_links
 elif [[ "${1:-}" == "--reset-port" ]]; then
-    optimize_system; create_config "$2"; apply_firewall; setup_service
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
-    get_env_data; display_links
+    create_config "$2"; service_ctrl restart; get_env_data; display_links
 elif [[ "${1:-}" == "--update-kernel" ]]; then
     if install_singbox "update"; then
-        optimize_system; setup_service; apply_firewall
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
-        succ "内核已更新并应用防火墙规则"
+        service_ctrl restart; succ "内核已更新并应用防火墙规则"
     fi
 elif [[ "${1:-}" == "--apply-cwnd" ]]; then
     apply_userspace_adaptive_profile >/dev/null 2>&1 || true
     apply_initcwnd_optimization "true" || true; apply_firewall
 fi
 EOF
-
     mv "$CORE_TMP" "$SBOX_CORE"
     chmod 700 "$SBOX_CORE"
 
@@ -984,11 +985,6 @@ SBOX_CORE="/etc/sing-box/core_script.sh"
 if [ ! -f "$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
 [[ $# -gt 0 ]] && { /bin/bash "$SBOX_CORE" "$@"; exit 0; }
 source "$SBOX_CORE" --detect-only
-
-service_ctrl() {
-    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "$1" && return
-    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "$1" sing-box
-}
 
 while true; do
     echo "========================" 
