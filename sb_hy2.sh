@@ -408,26 +408,22 @@ apply_nic_core_boost() {
 
 #防火墙开放端口
 apply_firewall() {
-	    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-	    [ -z "$port" ] && return
-	    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1  
-	    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
-	    elif command -v iptables >/dev/null 2>&1; then
-	        iptables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
-	        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
-	        command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
-	    fi
-	}
+    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+    [ -z "$port" ] && return
+    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
+    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
+    elif command -v iptables >/dev/null 2>&1; then
+        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+        command -v ip6tables >/dev/null 2>&1 && ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+    fi
+}
 	
 # "全功能调度器"
 service_ctrl() {
-	local action="$1"
-	if [ "$action" == "restart" ]; then
-		optimize_system; setup_service; apply_firewall
-	else
-		[ -x "/etc/init.d/sing-box" ] && rc-service sing-box "$action" && return
-		systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "$action" sing-box
-	fi
+    local action="$1"
+    [[ "$action" == "restart" ]] && { optimize_system >/dev/null 2>&1; setup_service; apply_firewall; }
+    if [ -x "/etc/init.d/sing-box" ]; then rc-service sing-box "$action"
+    else systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box; fi
 }
 
 # ==========================================
