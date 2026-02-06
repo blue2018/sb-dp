@@ -952,7 +952,7 @@ EOF
     # 导出函数
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
 get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
-optimize_system install_singbox create_config setup_service apply_firewall service_ctrl info err warn succ \  
+optimize_system install_singbox create_config setup_service apply_firewall service_ctrl info err warn succ \
 apply_userspace_adaptive_profile apply_nic_core_boost \
 setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
 
