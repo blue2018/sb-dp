@@ -962,6 +962,7 @@ setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp 
 
     cat >> "$CORE_TMP" <<'EOF'
 detect_os; set +e
+apply_firewall
 if [[ "${1:-}" == "--detect-only" ]]; then :
 elif [[ "${1:-}" == "--show-only" ]]; then
     get_env_data; echo -e "\n\033[1;34m==========================================\033[0m"
@@ -1052,7 +1053,6 @@ optimize_system
 install_singbox "install"
 generate_cert
 create_config "$USER_PORT"
-apply_firewall
 create_sb_tool
 setup_service
 get_env_data
