@@ -962,7 +962,6 @@ setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp 
 
     cat >> "$CORE_TMP" <<'EOF'
 detect_os; set +e
-apply_firewall
 if [[ "${1:-}" == "--detect-only" ]]; then :
 elif [[ "${1:-}" == "--show-only" ]]; then
     get_env_data; echo -e "\n\033[1;34m==========================================\033[0m"
@@ -990,6 +989,7 @@ SBOX_CORE="/etc/sing-box/core_script.sh"
 if [ ! -f "$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
 [[ $# -gt 0 ]] && { /bin/bash "$SBOX_CORE" "$@"; exit 0; }
 source "$SBOX_CORE" --detect-only
+service_ctrl
 
 while true; do
     echo "========================" 
@@ -1048,6 +1048,7 @@ export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
 USER_PORT=$(prompt_for_port)
+apply_firewall
 optimize_system
 install_singbox "install"
 generate_cert
