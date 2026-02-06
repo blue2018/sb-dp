@@ -406,6 +406,30 @@ apply_nic_core_boost() {
 	info "NIC 优化 → 网卡: $IFACE | QLen: $target_qlen | 中断延迟: ${tuned_usc:-default} us"
 }
 
+#防火墙开放端口
+apply_firewall() {
+	    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+	    [ -z "$port" ] && return
+	    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1  
+	    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
+	    elif command -v iptables >/dev/null 2>&1; then
+	        iptables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
+	        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+	        command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
+	    fi
+	}
+	
+# "全功能调度器"
+service_ctrl() {
+	local action="$1"
+	if [ "$action" == "restart" ]; then
+		optimize_system; setup_service; apply_firewall
+	else
+		[ -x "/etc/init.d/sing-box" ] && rc-service sing-box "$action" && return
+		systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "$action" sing-box
+	fi
+}
+
 # ==========================================
 # 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
 # ==========================================
@@ -650,7 +674,7 @@ install_singbox() {
     [ "$dl_ok" = false ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "所有下载源均失效，保留旧版"; rm -rf "$TD"; return 0; } || { err "下载失败，安装中断"; exit 1; }; }
 
     # 解压安装
-    info "正在解压并准备替换内核..."
+    info "正在解压并准备安装内核..."
     tar -xf "$TF" -C "$TD" >/dev/null 2>&1
     local NEW_BIN=$(find "$TD" -type f -name "sing-box" | head -n1)
     if [ -f "$NEW_BIN" ]; then
@@ -931,28 +955,6 @@ get_cpu_core get_env_data display_links display_system_status detect_os copy_to_
 optimize_system install_singbox create_config setup_service service_ctrl apply_firewall info err warn succ \  
 apply_userspace_adaptive_profile apply_nic_core_boost \
 setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
-
-	apply_firewall() {
-	    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-	    [ -z "$port" ] && return
-	    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
-	    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
-	    elif command -v iptables >/dev/null 2>&1; then
-	        iptables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
-	        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
-	        command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
-	    fi
-	}
-	
-	service_ctrl() {
-	    local action="$1"
-	    if [ "$action" == "restart" ]; then
-	        optimize_system; setup_service; apply_firewall
-	    else
-	        [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "$action" && return
-	        systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "$action" sing-box
-	    fi
-	}
 	
     for f in "${funcs[@]}"; do  
         if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
