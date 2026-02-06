@@ -961,6 +961,7 @@ setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp 
     done
 
     cat >> "$CORE_TMP" <<'EOF'
+apply_firewall
 detect_os; set +e
 if [[ "${1:-}" == "--detect-only" ]]; then :
 elif [[ "${1:-}" == "--show-only" ]]; then
