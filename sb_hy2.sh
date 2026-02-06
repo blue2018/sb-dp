@@ -602,7 +602,7 @@ install_singbox() {
     local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub"
     [ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
     
-    # 1. 获取版本号
+    # 获取版本号
     info "获取 Sing-Box 最新版本信息..."
     local RJ=$(curl -sL --connect-timeout 10 --max-time 15 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null)
     [ -n "$RJ" ] && LATEST_TAG=$(echo "$RJ" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9.]+"' | head -n1 | cut -d'"' -f4)
@@ -619,7 +619,7 @@ install_singbox() {
         info "发现新版本，开始下载更新..."
     fi
 
-    # 3. 核心优化：多源并行探测与稳健下载
+    # 多源并行探测与稳健下载
     local FILE="sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"
     local URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}"
     local TD=$(mktemp -d); local TF="$TD/sb.tar.gz"; local dl_ok=false
@@ -649,7 +649,7 @@ install_singbox() {
 
     [ "$dl_ok" = false ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "所有下载源均失效，保留旧版"; rm -rf "$TD"; return 0; } || { err "下载失败，安装中断"; exit 1; }; }
 
-    # 4. 解压安装
+    # 解压安装
     tar -xf "$TF" -C "$TD" --strip-components=1
     pgrep sing-box >/dev/null && { info "停止旧版进程..."; systemctl stop sing-box 2>/dev/null; }
     
