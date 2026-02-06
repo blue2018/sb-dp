@@ -421,7 +421,7 @@ apply_firewall() {
 # "全功能调度器"
 service_ctrl() {
     local action="$1"
-    [[ "$action" == "restart" ]] && { optimize_system >/dev/null 2>&1; setup_service; apply_firewall; }
+    [[ "$action" == "restart" ]] && { optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall; return 0; }
     if [ -x "/etc/init.d/sing-box" ]; then rc-service sing-box "$action"
     else systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box; fi
 }
