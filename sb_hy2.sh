@@ -752,7 +752,7 @@ setup_service() {
         warn "当前环境禁止高优先级调度，已自动回退至默认权重 (Nice 0)"
         final_nice=0
     fi
-    info "正在写入服务配置并启动..."
+    info "正在写入配置并启动服务..."
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
         cat > /etc/init.d/sing-box <<EOF
