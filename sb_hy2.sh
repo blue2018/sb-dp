@@ -853,7 +853,7 @@ get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-    read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data"
+	read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
@@ -950,11 +950,11 @@ IS_V6_OK='${IS_V6_OK:-false}'
 EOF
 
     # 导出函数
-    local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
-get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
-optimize_system install_singbox create_config setup_service apply_firewall service_ctrl info err warn succ \
-apply_userspace_adaptive_profile apply_nic_core_boost \
-setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
+    local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port
+        get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard
+        optimize_system install_singbox create_config setup_service apply_firewall service_ctrl info err warn succ
+        apply_userspace_adaptive_profile apply_nic_core_boost
+        setup_zrm_swap safe_rtt generate_cert)
 
     for f in "${funcs[@]}"; do
         if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
