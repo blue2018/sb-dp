@@ -625,10 +625,13 @@ RJ=$(curl -sL –connect-timeout 10 –max-time 15 “https://api.github.com/rep
 [ -n “$RJ” ] && LATEST_TAG=$(echo “$RJ” | grep -oE ‘“tag_name”[[:space:]]*:[[:space:]]*“v[0-9.]+”’ | head -n1 | cut -d’”’ -f4)
 [ -z “$LATEST_TAG” ] && { DOWNLOAD_SOURCE=“官方镜像”; LATEST_TAG=$(curl -sL –connect-timeout 10 “https://sing-box.org/” 2>/dev/null | grep -oE ‘v1.[0-9]+.[0-9]+’ | head -n1); }
 [ -z “$LATEST_TAG” ] && { [ “$LOCAL_VER” != “未安装” ] && { warn “远程获取失败,保持 v$LOCAL_VER”; return 0; } || { err “获取版本失败,请检查网络”; exit 1; }; }
-local REMOTE_VER=”${LATEST_TAG#v}”
 
+local REMOTE_VER=”${LATEST_TAG#v}”
 if [[ “$MODE” == “update” ]]; then
-echo -e “———————————\n当前已装版本: \033[1;33m${LOCAL_VER}\033[0m\n官方最新版本: \033[1;32m${REMOTE_VER}\033[0m (源: $DOWNLOAD_SOURCE)\n———————————”
+echo -e “———————————”
+echo -e “当前已装版本: \033[1;33m${LOCAL_VER}\033[0m”
+echo -e “官方最新版本: \033[1;32m${REMOTE_VER}\033[0m (源: $DOWNLOAD_SOURCE)”
+echo -e “———————————”
 [[ “$LOCAL_VER” == “$REMOTE_VER” ]] && { succ “内核已是最新版本”; return 1; }
 info “发现新版本,开始下载更新…”
 fi
