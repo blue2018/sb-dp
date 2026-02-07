@@ -424,11 +424,8 @@ service_ctrl() {
         optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall
         return 0
     fi
-    if [ -x "/etc/init.d/sing-box" ]; then 
-        rc-service sing-box "$action"
-    else 
-        systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box
-    fi
+    if [ -x "/etc/init.d/sing-box" ]; then rc-service sing-box "$action"
+    else systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box; fi
 }
 
 # ==========================================
