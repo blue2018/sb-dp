@@ -974,7 +974,7 @@ warp_manager() {
 
                 jq --argjson out "$out" --arg dom "$dom" '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | .outbounds |= map(select(.tag!="warp-out")) + [$out] | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":[$dom],"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" || { err "配置生成失败"; sleep 2; continue; }
 
-                if command -v sing-box >/dev/null 2>&1 && ! sing-box check -c "$conf.tmp" >/tmp/sb_warp_check.log 2>&1; then
+                if command -v sing-box >/dev/null 2>&1 && ! ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true sing-box check -c "$conf.tmp" >/tmp/sb_warp_check.log 2>&1; then
                     err "WARP 配置校验失败，已取消应用"
                     cat /tmp/sb_warp_check.log >&2
                     rm -f "$conf.tmp"
