@@ -904,15 +904,31 @@ get_warp_conf() {
             $(command -v dnf || echo "yum") install -y wireguard-tools >>"$log" 2>&1
         fi
     }
+
+    # 已有可用缓存则直接复用，避免重复注册导致不稳定
+    if [ -s "$cache" ]; then
+        local c_pr c_v6
+        c_pr=$(jq -r '.priv // empty' "$cache" 2>/dev/null || echo "")
+        c_v6=$(jq -r '.v6 // empty' "$cache" 2>/dev/null || echo "")
+        if [ -n "$c_pr" ] && [ -n "$c_v6" ]; then
+            [[ "$c_v6" != */* ]] && c_v6="${c_v6}/128"
+            echo "${c_pr}|${c_v6}"
+            return 0
+        fi
+    fi
+
     local pr pu res id v6
     pr=$(wg genkey) && pu=$(echo "$pr" | wg pubkey)
-    res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" -d "{\"key\":\"$pu\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
+    local payload
+    payload=$(jq -nc --arg key "$pu" '{"key":$key,"type":"Linux","tos":"2024-09-01T00:00:00.000Z"}')
+    res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" -d "$payload")
     id=$(echo "$res" | jq -r '.id // .result.id // empty')
     if [ -n "$id" ] && [ "$id" != "null" ]; then
         v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
         [[ "$v6" != */* ]] && v6="${v6}/128"
         ([ -z "$v6" ] || [ "$v6" == "/128" ]) && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
-        echo "{\"priv\":\"$pr\",\"v6\":\"$v6\"}" > "$cache" && echo "${pr}|${v6}"
+        jq -nc --arg priv "$pr" --arg v6 "$v6" '{"priv":$priv,"v6":$v6}' > "$cache"
+        echo "${pr}|${v6}"
     else
         echo "API失败: $res" >> "$log" && cat "$log" >&2 && return 1
     fi
@@ -920,31 +936,43 @@ get_warp_conf() {
 
 warp_manager() {
     local conf="/etc/sing-box/config.json"
+    local cache="/etc/sing-box/warp.json"
 
     _warp_status() {
-        jq -e '(.outbounds // []) | any(.tag=="warp-out" and .type=="wireguard")' "$conf" >/dev/null 2>&1
+        # 仅把“已启用”定义为：存在可用凭据（不修改转发路径，适配虚拟化小鸡）
+        local c_pr c_v6
+        c_pr=$(jq -r '.priv // empty' "$cache" 2>/dev/null || echo "")
+        c_v6=$(jq -r '.v6 // empty' "$cache" 2>/dev/null || echo "")
+        [ -n "$c_pr" ] && [ -n "$c_v6" ]
     }
 
     while true; do
-        local st="\033[1;31m已禁用\033[0m"; _warp_status && st="\033[1;32m已启用\033[0m"
+        local st="[1;31m已禁用[0m"; _warp_status && st="[1;32m已启用[0m"
         echo -e "\n--- WARP 全自动管理 (状态: $st) ---\n1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
             1)
                 if _warp_status; then
-                    info "正在禁用..." && jq '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | del(.outbounds[]|select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    info "正在禁用..."
+                    rm -f "$cache"
+                    jq '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | del(.outbounds[]|select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
-                    info "执行全自动配置..." && rm -f "/etc/sing-box/warp.json"
-                    local cred=$(get_warp_conf) || { sleep 2; continue; }
-                    local pr=$(echo "$cred" | cut -d'|' -f1) v6=$(echo "$cred" | cut -d'|' -f2)
-                    local out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
-                    jq --argjson out "$out" '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | .outbounds |= map(select(.tag!="warp-out")) + [$out]' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    info "执行全自动配置..."
+                    get_warp_conf >/dev/null || { sleep 2; continue; }
                 fi
-                service_ctrl restart && succ "操作完成" && info "仅启用了 WARP 出站，默认不分流任何流量；请用“添加分流域名”按需开启分流" && sleep 1 ;;
+                service_ctrl restart && succ "操作完成" && info "默认不改流量路径；仅在添加分流域名后，相关域名才会走 WARP" && sleep 1 ;;
             2)
                 _warp_status || { err "请先启用 WARP"; sleep 2; continue; }
                 read -r -p "域名: " dom
-                [ -n "$dom" ] && jq --arg dom "$dom" '(.route //= {}) | (.route.rules //= []) | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":[$dom],"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入" && sleep 1 ;;
+                [ -z "$dom" ] && { err "域名不能为空"; sleep 1; continue; }
+
+                local cred pr v6 out
+                cred=$(get_warp_conf) || { sleep 2; continue; }
+                pr=$(echo "$cred" | cut -d'|' -f1)
+                v6=$(echo "$cred" | cut -d'|' -f2)
+                out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
+
+                jq --argjson out "$out" --arg dom "$dom" '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | .outbounds |= map(select(.tag!="warp-out")) + [$out] | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":[$dom],"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入" && sleep 1 ;;
             0) return 0 ;;
             *) err "无效选择" && sleep 2 ;;
         esac
