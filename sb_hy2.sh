@@ -422,8 +422,12 @@ service_ctrl() {
     # 逻辑 A：处理特殊的 restart
     if [[ "$action" == "restart" ]]; then
         echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."
-        optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall
+        optimize_system >/dev/null 2>&1 || true; setup_service; 
+		echo "test1"
+		apply_firewall
+		echo "test2"
         return 0 # 仅退出当前函数，返回到调用处（如 display_links）
+		echo "test3"
     fi
     
     # 逻辑 B：处理 start/stop/status 等常规操作
@@ -432,6 +436,7 @@ service_ctrl() {
     else 
         systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box
     fi
+	echo "test4"
 }
 
 # ==========================================
