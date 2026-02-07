@@ -419,11 +419,7 @@ apply_firewall() {
 # "全功能调度器"
 service_ctrl() {
     local action="$1"
-    if [[ "$action" == "restart" ]]; then
-        echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."
-        optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall
-        return 0
-    fi
+    [[ "$action" == "restart" ]] && { echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."; optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall; return 0; }
     if [ -x "/etc/init.d/sing-box" ]; then rc-service sing-box "$action"
     else systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box; fi
 }
@@ -836,12 +832,12 @@ EOF
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
+		true; set -e; return 0
     else
         err "服务拉起超时，请检查日志："
         [ "$OS" = "alpine" ] && { [ -f /var/log/messages ] && tail -n 10 /var/log/messages || logread | tail -n 10; } || journalctl -u sing-box -n 10 --no-pager 2>/dev/null
         set -e; exit 1
     fi
-    set -e
 }
 
 # ==========================================
