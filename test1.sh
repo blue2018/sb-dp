@@ -618,11 +618,12 @@ SYSCTL
 # 安装/更新 Sing-box 内核
 # ==========================================
 install_singbox() {
-    local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub" FILE="" URL="" TD="/var/tmp/sb_build" TF="" dl_ok=false
+    local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub" 
+    local FILE="" URL="" TD="/var/tmp/sb_build" TF="" dl_ok=false RJ="" best_link="" LINK="" NEW_BIN="" VER=""
     [ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
-    
+	
     info "获取 Sing-Box 最新版本信息..."
-    local RJ=$(curl -sL --connect-timeout 10 --max-time 15 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null)
+    RJ=$(curl -sL --connect-timeout 10 --max-time 15 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null)
     [ -n "$RJ" ] && LATEST_TAG=$(echo "$RJ" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9.]+"' | head -n1 | cut -d'"' -f4)
     [ -z "$LATEST_TAG" ] && { DOWNLOAD_SOURCE="官方镜像"; LATEST_TAG=$(curl -sL --connect-timeout 10 "https://sing-box.org/" 2>/dev/null | grep -oE 'v1\.[0-9]+\.[0-9]+' | head -n1); }
     [ -z "$LATEST_TAG" ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "远程获取失败，保持 v$LOCAL_VER"; return 0; } || { err "获取版本失败"; exit 1; }; }
@@ -636,17 +637,16 @@ install_singbox() {
         [[ "$LOCAL_VER" == "$REMOTE_VER" ]] && { succ "内核已是最新版本"; return 1; }
         info "发现新版本，开始下载更新..."
     fi
-
-    # 修复点：提前初始化变量，确保严格模式不报错
-    FILE="sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"; URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}"
-    rm -rf "$TD"; mkdir -p "$TD"; TF="$TD/sb.tar.gz"; local best_link=""
+    FILE="sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"
+    URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}"
+    rm -rf "$TD" && mkdir -p "$TD" && TF="$TD/sb.tar.gz"
     local LINKS=("$URL" "https://ghproxy.net/$URL" "https://kkgh.tk/$URL" "https://gh-proxy.com/$URL")
-
+	
     info "探测最优节点 (低功耗)..."
     for LINK in "${LINKS[@]}"; do curl -Is --connect-timeout 3 "$LINK" | grep -q "200 OK" && { best_link="$LINK"; break; }; done
     [ -z "$best_link" ] && best_link="${LINKS[0]}"
-    
-    info "选定节点: $(echo $best_link | cut -d'/' -f3)，启动下载..."
+	
+    info "选定节点: $(echo "$best_link" | cut -d'/' -f3)，启动下载..."
     { curl -fkL -C - --connect-timeout 15 --retry 3 "$best_link" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 8000000 ]; } && dl_ok=true || {
         warn "首选源失败，遍历备用源..."
         for LINK in "${LINKS[@]}"; do info "尝试: $(echo "$LINK" | cut -d'/' -f3)..."; curl -fkL --connect-timeout 10 "$LINK" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 8000000 ] && { dl_ok=true; break; }; done
@@ -654,12 +654,16 @@ install_singbox() {
     [ "$dl_ok" = false ] && { err "下载失败"; rm -rf "$TD"; return 1; }
 
     info "解压并安装内核..."; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
-    tar -xf "$TF" -C "$TD" && local NEW_BIN=$(find "$TD" -type f -name "sing-box" | head -n1)
+    tar -xf "$TF" -C "$TD" && NEW_BIN=$(find "$TD" -type f -name "sing-box" | head -n1)
     if [ -f "$NEW_BIN" ]; then
-        chmod +x "$NEW_BIN"; cp -f "$NEW_BIN" /usr/bin/sing-box
+        chmod +x "$NEW_BIN" && cp -f "$NEW_BIN" /usr/bin/sing-box
         pgrep -x sing-box >/dev/null && { info "热重启服务..."; service_ctrl restart || { service_ctrl stop; service_ctrl start; }; }
-        rm -rf "$TD"; succ "内核安装成功: v$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')"
-    else rm -rf "$TD" && { err "解压校验失败"; return 1; }; fi
+        rm -rf "$TD"
+        VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
+        succ "内核安装成功: v$VER"
+    else 
+        rm -rf "$TD" && { err "解压校验失败"; return 1; }
+    fi
 }
 
 # ==========================================
