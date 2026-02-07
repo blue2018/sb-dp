@@ -4,15 +4,12 @@ set -euo pipefail
 # ==========================================
 # 基础变量声明与环境准备
 # ==========================================
-# === 系统与环境参数初始化 ===
 SBOX_ARCH="";            OS_DISPLAY="";          SBOX_CORE="/etc/sing-box/core_script.sh"
 SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测"
-SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM=""
-VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200"
-VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000"
-USER_PORT="";            RAW_SALA="";            UDP_MEM_SCALE=""
+SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM="";      USER_PORT=""
+VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_SALA=""
+VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
-# TLS 域名随机池 (针对中国大陆环境优化)
 TLS_DOMAIN_POOL=(
   "www.bing.com"                # 推荐：全球 IP 分布，合法性高
   "www.microsoft.com"           # 推荐：系统更新流量，极具迷惑性
@@ -42,7 +39,7 @@ copy_to_clipboard() {
     fi
 }
 
-#侦测系统类型
+# 侦测系统类型
 detect_os() {
     if [ -f /etc/os-release ]; then . /etc/os-release; OS_DISPLAY="${PRETTY_NAME:-$ID}"; ID="${ID:-}"; ID_LIKE="${ID_LIKE:-}"; else OS_DISPLAY="Unknown Linux"; ID="unknown"; ID_LIKE=""; fi
     # 增强判定逻辑
@@ -85,7 +82,7 @@ install_dependencies() {
     succ "所需依赖已就绪"
 }
 
-#检测CPU核心数
+# 检测CPU核心数
 get_cpu_core() {
     local n q p c; n=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo || echo 1)
     if [ -r /sys/fs/cgroup/cpu.max ]; then
@@ -128,7 +125,7 @@ prompt_for_port() {
     done
 }
 
-#生成 ECC P-256 高性能证书
+# 生成 ECC P-256 高性能证书
 generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"
     [ -f "$CERT_DIR/fullchain.pem" ] && return 0
@@ -153,7 +150,7 @@ generate_cert() {
     } || { err "证书生成失败"; exit 1; }
 }
 
-#获取公网IP
+# 获取公网IP
 get_network_info() {
     info "获取网络信息..."
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"
@@ -180,7 +177,7 @@ get_network_info() {
     [ "$IS_V6_OK" = "true" ] && succ "IPv6: $RAW_IP6 [✔]" || info "IPv6: 不可用 (单栈 IPv4 环境)"
 }
 
-# === 网络延迟探测模块 ===
+# 网络延迟探测模块
 probe_network_rtt() {
     local rtt_val; local loss_val="5"; local real_rtt_factors="130"; local loss_compensation="100"; set +e
     echo -e "\033[1;34m[INFO]\033[0m 正在探测网络画像 (RTT/丢包)..." >&2
@@ -213,7 +210,6 @@ probe_network_rtt() {
 probe_memory_total() {
     local mem_total=64 mem_cgroup=0
     local mem_host_total=$(free -m | awk '/Mem:/ {print $2}' | tr -cd '0-9')
-
     # 1. 优先级探测: Cgroup v1 -> Cgroup v2 -> /proc/meminfo
     if [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
         local m_limit=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes | tr -cd '0-9')
@@ -224,11 +220,9 @@ probe_memory_total() {
     elif grep -q "MemTotal" /proc/meminfo; then
         mem_cgroup=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
     fi
-
     # 2. 内存边界判定与特殊虚拟化 (OpenVZ) 修正
     [ "$mem_cgroup" -gt 0 ] && [ "$mem_cgroup" -le "$mem_host_total" ] && mem_total=$mem_cgroup || mem_total=$mem_host_total
     [ -f /proc/user_beancounters ] && mem_total=$mem_host_total
-
     # 3. 最终异常值校验 (兜底 64MB)
     ([ -z "$mem_total" ] || [ "$mem_total" -le 0 ] || [ "$mem_total" -gt 64000 ]) && mem_total=64
     echo "$mem_total"
