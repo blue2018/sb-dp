@@ -617,47 +617,47 @@ SYSCTL
 # 安装/更新 Sing-box 内核
 # ==========================================
 install_singbox() {
-    # 1. 初始化所有变量：将路径从内存 /tmp 移至磁盘 /var/tmp (内存避震)
-    local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub" FILE="" URL="" TD="/var/tmp/sb_build" TF="" dl_ok=false RJ="" best_link="" LINK="" NEW_BIN="" VER="" SBOX_ARCH="${SBOX_ARCH:-amd64}"
-    [ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
-    
-    info "获取 Sing-Box 最新版本信息..."
-    RJ=$(curl -sL --connect-timeout 10 --max-time 15 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null)
-    [ -n "$RJ" ] && LATEST_TAG=$(echo "$RJ" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9.]+"' | head -n1 | cut -d'"' -f4)
-    [ -z "$LATEST_TAG" ] && { DOWNLOAD_SOURCE="官方镜像"; LATEST_TAG=$(curl -sL --connect-timeout 10 "https://sing-box.org/" 2>/dev/null | grep -oE 'v1\.[0-9]+\.[0-9]+' | head -n1); }
-    [ -z "$LATEST_TAG" ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "远程获取失败，保持 v$LOCAL_VER"; return 0; } || { err "获取版本失败，请检查网络"; exit 1; }; }
-    local REMOTE_VER="${LATEST_TAG#v}"
-    if [[ "$MODE" == "update" ]]; then
-        echo -e "---------------------------------"
-        echo -e "当前已装版本: \033[1;33m${LOCAL_VER}\033[0m"
-        echo -e "官方最新版本: \033[1;32m${REMOTE_VER}\033[0m (源: $DOWNLOAD_SOURCE)"
-        echo -e "---------------------------------"
-        [[ "$LOCAL_VER" == "$REMOTE_VER" ]] && { succ "内核已是最新版本"; return 1; }
-        info "发现新版本，开始下载更新..."
-    fi
-    # 2. 后台并行探测模式
-    FILE="sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"; URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}"
-    rm -rf "$TD" && mkdir -p "$TD" && TF="$TD/sb.tar.gz"; local LINKS=("$URL" "https://ghproxy.net/$URL" "https://kkgh.tk/$URL" "https://gh.ddlc.top/$URL" "https://gh-proxy.com/$URL")
-    info "正在筛选最优下载节点 (并行模式)..."
-    for LINK in "${LINKS[@]}"; do (curl -Is --connect-timeout 4 --max-time 6 "$LINK" | grep -q "200 OK" && echo "$LINK" > "$TD/best_node") & done
-    wait # 等待所有后台进程
-    best_link=$( [ -f "$TD/best_node" ] && head -n1 "$TD/best_node" || echo "${LINKS[0]}" )
-    
-    # 3. 稳健下载逻辑
-    info "选定节点: $(echo "$best_link" | cut -d'/' -f3)，启动下载..."
-    { curl -fkL -C - --connect-timeout 15 --retry 3 --retry-delay 2 "$best_link" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 8000000 ]; } && dl_ok=true || {
-        warn "首选源体积异常或下载失败，尝试遍历备用源..."
-        for LINK in "${LINKS[@]}"; do info "尝试源: $(echo "$LINK" | cut -d'/' -f3)..."; curl -fkL --connect-timeout 10 --max-time 60 "$LINK" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 8000000 ] && { dl_ok=true; break; }; done
-    }
-    [ "$dl_ok" = false ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "所有源失效，保留旧版"; rm -rf "$TD"; return 0; } || { err "下载失败"; exit 1; }; }
+local MODE=”${1:-install}” LOCAL_VER=“未安装” LATEST_TAG=”” DOWNLOAD_SOURCE=“GitHub” FILE=”” URL=”” TD=”/var/tmp/sb_build” TF=”” dl_ok=false RJ=”” best_link=”” LINK=”” NEW_BIN=”” VER=”” SBOX_ARCH=”${SBOX_ARCH:-amd64}”
+[ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk ‘{print $3}’)
 
-    # 4. 优化解压与安装：拒绝自杀式中断 (防 SSH 断开)
-    info "正在解压并准备安装内核..."; tar -xf "$TF" -C "$TD" >/dev/null 2>&1 && NEW_BIN=$(find "$TD" -type f -name "sing-box" | head -n1)
-    if [ -f "$NEW_BIN" ]; then
-        chmod 755 "$NEW_BIN" && cp -f "$NEW_BIN" /usr/bin/sing-box
-        pgrep -x sing-box >/dev/null && { info "正在热重启服务以完成更新..."; service_ctrl restart || { service_ctrl stop; sleep 1; service_ctrl start; }; }
-        rm -rf "$TD" && VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}') && succ "内核安装成功: v$VER"
-    else rm -rf "$TD" && err "解压校验失败：未找到二进制文件" && return 1; fi
+info “获取 Sing-Box 最新版本信息…”
+RJ=$(curl -sL –connect-timeout 10 –max-time 15 “https://api.github.com/repos/SagerNet/sing-box/releases/latest” 2>/dev/null)
+[ -n “$RJ” ] && LATEST_TAG=$(echo “$RJ” | grep -oE ‘“tag_name”[[:space:]]*:[[:space:]]*“v[0-9.]+”’ | head -n1 | cut -d’”’ -f4)
+[ -z “$LATEST_TAG” ] && { DOWNLOAD_SOURCE=“官方镜像”; LATEST_TAG=$(curl -sL –connect-timeout 10 “https://sing-box.org/” 2>/dev/null | grep -oE ‘v1.[0-9]+.[0-9]+’ | head -n1); }
+[ -z “$LATEST_TAG” ] && { [ “$LOCAL_VER” != “未安装” ] && { warn “远程获取失败,保持 v$LOCAL_VER”; return 0; } || { err “获取版本失败,请检查网络”; exit 1; }; }
+local REMOTE_VER=”${LATEST_TAG#v}”
+
+if [[ “$MODE” == “update” ]]; then
+echo -e “———————————\n当前已装版本: \033[1;33m${LOCAL_VER}\033[0m\n官方最新版本: \033[1;32m${REMOTE_VER}\033[0m (源: $DOWNLOAD_SOURCE)\n———————————”
+[[ “$LOCAL_VER” == “$REMOTE_VER” ]] && { succ “内核已是最新版本”; return 1; }
+info “发现新版本,开始下载更新…”
+fi
+
+FILE=“sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz”; URL=“https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}”
+rm -rf “$TD”; mkdir -p “$TD” || { err “无法创建临时目录”; exit 1; }
+TF=”$TD/sb.tar.gz”; local LINKS=(”$URL” “https://ghproxy.net/$URL” “https://kkgh.tk/$URL” “https://gh.ddlc.top/$URL” “https://gh-proxy.com/$URL”)
+
+info “正在筛选最优下载节点 (并行模式)…”
+for LINK in “${LINKS[@]}”; do (curl -IsL –connect-timeout 4 –max-time 6 “$LINK” 2>/dev/null | grep -q “200 OK” && echo “$LINK” > “$TD/best_node”) & done; wait
+best_link=$([ -f “$TD/best_node” ] && head -n1 “$TD/best_node” || echo “${LINKS[0]}”)
+
+info “选定节点: $(echo “$best_link” | cut -d’/’ -f3),启动下载…”
+curl -fkL -C - –connect-timeout 15 –max-time 120 –retry 3 –retry-delay 2 “$best_link” -o “$TF” 2>/dev/null && [ -f “$TF” ] && [ “$(stat -c%s “$TF” 2>/dev/null || echo 0)” -gt 8000000 ] && dl_ok=true
+if [ “$dl_ok” = false ]; then
+warn “首选源下载失败,尝试遍历备用源…”
+for LINK in “${LINKS[@]}”; do info “尝试源: $(echo “$LINK” | cut -d’/’ -f3)…”; rm -f “$TF”; curl -fkL –connect-timeout 10 –max-time 120 –retry 2 “$LINK” -o “$TF” 2>/dev/null && [ -f “$TF” ] && [ “$(stat -c%s “$TF” 2>/dev/null || echo 0)” -gt 8000000 ] && { dl_ok=true; break; }; sleep 1; done
+fi
+[ “$dl_ok” = false ] && { rm -rf “$TD”; [ “$LOCAL_VER” != “未安装” ] && { warn “所有源失效,保留旧版”; return 0; } || { err “下载失败”; exit 1; }; }
+
+info “正在解压并准备安装内核…”
+tar -tzf “$TF” >/dev/null 2>&1 || { err “压缩包损坏”; rm -rf “$TD”; return 1; }
+tar -xf “$TF” -C “$TD” 2>/dev/null || { err “解压失败”; rm -rf “$TD”; return 1; }
+NEW_BIN=$(find “$TD” -type f -name “sing-box” 2>/dev/null | head -n1)
+[ ! -f “$NEW_BIN” ] && { err “解压校验失败:未找到二进制文件”; rm -rf “$TD”; return 1; }
+chmod 755 “$NEW_BIN”; [ -f /usr/bin/sing-box ] && cp -f /usr/bin/sing-box /usr/bin/sing-box.bak 2>/dev/null
+cp -f “$NEW_BIN” /usr/bin/sing-box || { err “安装失败”; [ -f /usr/bin/sing-box.bak ] && mv -f /usr/bin/sing-box.bak /usr/bin/sing-box; rm -rf “$TD”; return 1; }
+pgrep -x sing-box >/dev/null && { info “正在热重启服务以完成更新…”; service_ctrl restart || { service_ctrl stop; sleep 1; service_ctrl start; }; }
+rm -rf “$TD” /usr/bin/sing-box.bak 2>/dev/null; VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk ‘{print $3}’) && succ “内核安装成功: v$VER”
 }
 
 # ==========================================
