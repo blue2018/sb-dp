@@ -48,6 +48,7 @@ detect_os() {
 install_dependencies() {
     info "正在检查系统类型..."
     local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd" OPT="ethtool kmod wireguard-tools"
+    local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd wireguard-tools" OPT="ethtool kmod"
     if command -v apk >/dev/null 2>&1; then PM="apk"; DEPS="$DEPS coreutils util-linux-misc"
     elif command -v apt-get >/dev/null 2>&1; then PM="apt"; DEPS="$DEPS util-linux"
     else PM="yum"; DEPS="${DEPS//netcat-openbsd/nc}"; DEPS="${DEPS//procps/procps-ng} util-linux"; fi
@@ -938,27 +939,30 @@ get_warp_conf() {
 
 warp_manager() {
     local conf="/etc/sing-box/config.json"
+    _warp_status() {
+        jq -e '(.outbounds // []) | any(.tag=="warp-out" and .type=="wireguard") and ((.route.rules // []) | any(.outbound=="warp-out"))' "$conf" >/dev/null 2>&1
+    }
     while true; do
-        local st="\033[1;31m已禁用\033[0m" && grep -q "warp-out" "$conf" && st="\033[1;32m已启用\033[0m"
+        local st="\033[1;31m已禁用\033[0m"; _warp_status && st="\033[1;32m已启用\033[0m"
         echo -e "\n--- WARP 全自动管理 (状态: $st) ---\n1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
             1)
-                if grep -q "warp-out" "$conf"; then
-                    info "正在禁用..." && jq 'del(.outbounds[]|select(.tag=="warp-out"))|.route.rules|=map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                if _warp_status; then
+                    info "正在禁用..." && jq '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | del(.outbounds[]|select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
                     info "执行全自动配置..." && rm -f "/etc/sing-box/warp.json"
                     local cred=$(get_warp_conf) || { sleep 2; continue; }
                     local pr=$(echo "$cred" | cut -d'|' -f1) v6=$(echo "$cred" | cut -d'|' -f2)
                     local out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
-                    local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","tiktok.com"],"outbound":"warp-out"}'
-                    jq --argjson out "$out" --argjson rule "$rule" '.outbounds+=[$out]|.route.rules=[$rule]+(.route.rules//[])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    local rule='{"domain_suffix":["google.com","netflix.com","chatgpt.com","openai.com","tiktok.com"],"outbound":"warp-out"}'
+                    jq --argjson out "$out" --argjson rule "$rule" '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | .outbounds |= map(select(.tag!="warp-out")) + [$out] | .route.rules |= [ $rule ] + map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 fi
-                service_ctrl restart && succ "操作完成" && sleep 1 ;;
+                service_ctrl restart && succ "操作完成" && info "提示：WARP 仅作用于经过 sing-box 的代理流量，服务器本机 curl 默认不走该出站" && sleep 1 ;;
             2)
-                grep -q "warp-out" "$conf" || { err "请先启用 WARP"; sleep 2; continue; }
+                _warp_status || { err "请先启用 WARP"; sleep 2; continue; }
                 read -r -p "域名: " dom
-                [ -n "$dom" ] && jq --arg dom "$dom" '(..|select(.outbound?=="warp-out").domain)+=[$dom]|(..|select(.outbound?=="warp-out").domain)|=unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入" && sleep 1 ;;
+                [ -n "$dom" ] && jq --arg dom "$dom" '(.route //= {}) | (.route.rules //= []) | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入" && sleep 1 ;;
             0) return 0 ;;
             *) err "无效选择" && sleep 2 ;;
         esac
