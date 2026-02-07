@@ -939,9 +939,11 @@ get_warp_conf() {
 
 warp_manager() {
     local conf="/etc/sing-box/config.json"
+
     _warp_status() {
-        jq -e '(.outbounds // []) | any(.tag=="warp-out" and .type=="wireguard") and ((.route.rules // []) | any(.outbound=="warp-out"))' "$conf" >/dev/null 2>&1
+        jq -e '((.outbounds // []) | any(.tag=="warp-out" and .type=="wireguard")) and ((.route.rules // []) | any(.outbound=="warp-out"))' "$conf" >/dev/null 2>&1
     }
+
     while true; do
         local st="\033[1;31m已禁用\033[0m"; _warp_status && st="\033[1;32m已启用\033[0m"
         echo -e "\n--- WARP 全自动管理 (状态: $st) ---\n1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
