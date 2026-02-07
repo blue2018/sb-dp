@@ -419,9 +419,19 @@ apply_firewall() {
 # "全功能调度器"
 service_ctrl() {
     local action="$1"
-    [[ "$action" == "restart" ]] && { echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."; optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall; return 0; }
-    if [ -x "/etc/init.d/sing-box" ]; then rc-service sing-box "$action"
-    else systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box; fi
+    # 逻辑 A：处理特殊的 restart
+    if [[ "$action" == "restart" ]]; then
+        echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."
+        optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall
+        return 0 # 仅退出当前函数，返回到调用处（如 display_links）
+    fi
+    
+    # 逻辑 B：处理 start/stop/status 等常规操作
+    if [ -x "/etc/init.d/sing-box" ]; then 
+        rc-service sing-box "$action"
+    else 
+        systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box
+    fi
 }
 
 # ==========================================
