@@ -4,23 +4,13 @@ set -euo pipefail
 # ==========================================
 # 基础变量声明与环境准备
 # ==========================================
-# === 系统与环境参数初始化 ===
-SBOX_ARCH="";            OS_DISPLAY="";            SBOX_CORE="/etc/sing-box/core_script.sh"
-SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";          SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测"
-SBOX_MEM_HIGH="42M";     CPU_CORE="1";             INITCWND_DONE="false";  VAR_DEF_MEM=""
-VAR_UDP_RMEM="";         VAR_UDP_WMEM="";          VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200"
-VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";      BUSY_POLL_VAL="0";      VAR_BACKLOG="5000"
-REAL_RTT_FACTORS="130";  LOSS_COMPENSATION="100";  USER_PORT="";           RAW_SALA="";        UDP_MEM_SCALE=""
+SBOX_ARCH="";            OS_DISPLAY="";          SBOX_CORE="/etc/sing-box/core_script.sh"
+SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测"
+SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM="";      USER_PORT=""
+VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_SALA=""
+VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
-# TLS 域名随机池 (针对中国大陆环境优化)
-TLS_DOMAIN_POOL=(
-  "www.bing.com"                # 推荐：全球 IP 分布，合法性高
-  "www.microsoft.com"           # 推荐：系统更新流量，极具迷惑性
-  "download.windowsupdate.com"  # 推荐：大流量 UDP 伪装的首选
-  "www.icloud.com"              # 推荐：苹果用户常态化出境流量
-  "gateway.icloud.com"          # 推荐：iCloud 同步流量
-  "cdn.staticfile.org"          # 推荐：国内知名的开源库加速，常去境外取回数据
-)
+TLS_DOMAIN_POOL=("www.bing.com" "www.microsoft.com" "itunes.apple.com" "www.icloud.com" "www.7-zip.org" "www.jsdelivr.com")
 pick_tls_domain() { echo "${TLS_DOMAIN_POOL[$RANDOM % ${#TLS_DOMAIN_POOL[@]}]}"; }
 TLS_DOMAIN="$(pick_tls_domain)"
 
@@ -42,7 +32,7 @@ copy_to_clipboard() {
     fi
 }
 
-#侦测系统类型
+# 侦测系统类型
 detect_os() {
     if [ -f /etc/os-release ]; then . /etc/os-release; OS_DISPLAY="${PRETTY_NAME:-$ID}"; ID="${ID:-}"; ID_LIKE="${ID_LIKE:-}"; else OS_DISPLAY="Unknown Linux"; ID="unknown"; ID_LIKE=""; fi
     # 增强判定逻辑
@@ -57,24 +47,36 @@ detect_os() {
 # 依赖安装 (容错增强版)
 install_dependencies() {
     info "正在检查系统类型..."
-    local PM="" DEPS="curl jq openssl ca-certificates iproute2 ethtool iptables bash tzdata tar kmod wireguard-tools"
-    command -v apk >/dev/null 2>&1 && PM="apk" || { command -v apt-get >/dev/null 2>&1 && PM="apt" || PM="yum"; }
-    [ "$PM" = "apk" ] && DEPS="$DEPS netcat-openbsd procps coreutils util-linux-misc" || DEPS="$DEPS netcat-openbsd procps util-linux"
-    [ "$PM" = "yum" ] && DEPS="${DEPS//netcat-openbsd/nc}" && DEPS="${DEPS//procps/procps-ng}"
-
+    local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd" OPT="ethtool kmod wireguard-tools"
+    local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd wireguard-tools" OPT="ethtool kmod"
+    if command -v apk >/dev/null 2>&1; then PM="apk"; DEPS="$DEPS coreutils util-linux-misc"
+    elif command -v apt-get >/dev/null 2>&1; then PM="apt"; DEPS="$DEPS util-linux"
+    else PM="yum"; DEPS="${DEPS//netcat-openbsd/nc}"; DEPS="${DEPS//procps/procps-ng} util-linux"; fi
     [ -w /proc/sys/vm/drop_caches ] && sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
     case "$PM" in
-        apk) info "检测到 Alpine 系统，执行分批安装依赖..."; apk update >/dev/null 2>&1; for pkg in $DEPS; do apk info -e "$pkg" >/dev/null || apk add --no-cache "$pkg" || warn "组件 $pkg 安装异常"; done; rm -rf /var/cache/apk/* ;;
-        apt) info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..."; export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1; apt-get install -y --no-install-recommends $DEPS || err "依赖安装失败"; apt-get clean ;;
-        yum) info "检测到 RHEL/CentOS 系统，正在同步仓库并安装依赖..."; $(command -v dnf || echo "yum") install -y $DEPS || err "依赖安装失败"; ;;
+        apk) info "检测到 Alpine 系统，执行分批安装依赖..."
+             apk update >/dev/null 2>&1
+             local missing=""; for pkg in $DEPS; do apk info -e "$pkg" >/dev/null || missing="$missing $pkg"; done
+             [ -n "$missing" ] && apk add --no-cache $missing || warn "部分组件安装异常"
+             missing=""; for pkg in $OPT; do apk info -e "$pkg" >/dev/null || missing="$missing $pkg"; done
+             [ -n "$missing" ] && apk add --no-cache $missing >/dev/null 2>&1 || true
+             rm -rf /var/cache/apk/* ;;
+        apt) info "检测到 Debian/Ubuntu 系统，正在更新源并安装依赖..."
+             export DEBIAN_FRONTEND=noninteractive
+             apt-get update -y >/dev/null 2>&1
+             apt-get install -y --no-install-recommends $DEPS || err "依赖安装失败"
+             apt-get install -y --no-install-recommends $OPT >/dev/null 2>&1 || true
+             apt-get clean; rm -rf /var/lib/apt/lists/* ;;
+        yum) info "检测到 RHEL/CentOS 系统，正在同步仓库并安装依赖..."
+             $(command -v dnf || echo "yum") install -y $DEPS || err "依赖安装失败"
+             $(command -v dnf || echo "yum") install -y $OPT >/dev/null 2>&1 || true ;;
     esac
-
     update-ca-certificates 2>/dev/null || true
     for cmd in jq curl tar bash pgrep taskset; do command -v "$cmd" >/dev/null 2>&1 || { [ "$PM" = "apk" ] && apk add --no-cache util-linux >/dev/null 2>&1 || { err "核心依赖 ${cmd} 安装失败，请检查网络或源"; exit 1; }; } done
     succ "所需依赖已就绪"
 }
 
-#检测CPU核心数
+# 检测CPU核心数
 get_cpu_core() {
     local n q p c; n=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo || echo 1)
     if [ -r /sys/fs/cgroup/cpu.max ]; then
@@ -117,7 +119,7 @@ prompt_for_port() {
     done
 }
 
-#生成 ECC P-256 高性能证书
+# 生成 ECC P-256 高性能证书
 generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"
     [ -f "$CERT_DIR/fullchain.pem" ] && return 0
@@ -142,7 +144,7 @@ generate_cert() {
     } || { err "证书生成失败"; exit 1; }
 }
 
-#获取公网IP
+# 获取公网IP
 get_network_info() {
     info "获取网络信息..."
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"
@@ -169,9 +171,9 @@ get_network_info() {
     [ "$IS_V6_OK" = "true" ] && succ "IPv6: $RAW_IP6 [✔]" || info "IPv6: 不可用 (单栈 IPv4 环境)"
 }
 
-# === 网络延迟探测模块 ===
+# 网络延迟探测模块
 probe_network_rtt() {
-    local RTT_VAL; local loss_val="5"; set +e
+    local rtt_val; local loss_val="5"; local real_rtt_factors="130"; local loss_compensation="100"; set +e
     echo -e "\033[1;34m[INFO]\033[0m 正在探测网络画像 (RTT/丢包)..." >&2
 	# 1. 扩充探测池：覆盖国内骨干、全球顶级 CDN 及 DNS 节点
     local targets=("223.5.5.5" "119.29.29.29" "114.114.114.114" "1.1.1.1" "8.8.8.8" "8.26.56.26" "208.67.222.222")
@@ -183,26 +185,25 @@ probe_network_rtt() {
     done
 	# 3. 提取平均 RTT 并解析丢包率 (兼容多系统格式)
     if [ -n "$ping_res" ]; then
-        RTT_VAL=$(echo "$ping_res" | awk -F'/' 'END{print int($5)}')
+        rtt_val=$(echo "$ping_res" | awk -F'/' 'END{print int($5)}')
         loss_val=$(echo "$ping_res" | grep -oE '[0-9]+% packet loss' | grep -oE '[0-9]+' || echo "5")
-        echo -e "\033[1;32m[OK]\033[0m 实测 RTT: ${RTT_VAL}ms | 丢包: ${loss_val}%" >&2
+        echo -e "\033[1;32m[OK]\033[0m 实测 RTT: ${rtt_val}ms | 丢包: ${loss_val}%" >&2
     else
-        RTT_VAL="150"; echo -e "\033[1;33m[WARN]\033[0m 探测受阻，应用全球预估值: 150ms" >&2
+        rtt_val="150"; echo -e "\033[1;33m[WARN]\033[0m 探测受阻，应用全球预估值: 150ms" >&2
     fi
     set -e
     # 画像联动赋值
-    REAL_RTT_FACTORS=$(( RTT_VAL + 100 ))   # 延迟补偿：实测值 + 100ms (平衡握手开销)
+    real_rtt_factors=$(( rtt_val + 100 ))   # 延迟补偿：实测值 + 100ms (平衡握手开销)
 	# 丢包补偿：每 1% 丢包增加 5% 缓冲区冗余，最高 200%
-    LOSS_COMPENSATION=$(( 100 + loss_val * 5 )); [ "$LOSS_COMPENSATION" -gt 200 ] && LOSS_COMPENSATION=200
+    loss_compensation=$(( 100 + loss_val * 5 )); [ "$loss_compensation" -gt 200 ] && loss_compensation=200
 	# 输出原始 RTT 供脚本其它函数引用
-    echo "$RTT_VAL"
+    echo "$rtt_val" "$real_rtt_factors" "$loss_compensation"
 }
 
 # 内存资源探测模块
 probe_memory_total() {
     local mem_total=64 mem_cgroup=0
     local mem_host_total=$(free -m | awk '/Mem:/ {print $2}' | tr -cd '0-9')
-
     # 1. 优先级探测: Cgroup v1 -> Cgroup v2 -> /proc/meminfo
     if [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
         local m_limit=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes | tr -cd '0-9')
@@ -213,11 +214,9 @@ probe_memory_total() {
     elif grep -q "MemTotal" /proc/meminfo; then
         mem_cgroup=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
     fi
-
     # 2. 内存边界判定与特殊虚拟化 (OpenVZ) 修正
     [ "$mem_cgroup" -gt 0 ] && [ "$mem_cgroup" -le "$mem_host_total" ] && mem_total=$mem_cgroup || mem_total=$mem_host_total
     [ -f /proc/user_beancounters ] && mem_total=$mem_host_total
-
     # 3. 最终异常值校验 (兜底 64MB)
     ([ -z "$mem_total" ] || [ "$mem_total" -le 0 ] || [ "$mem_total" -gt 64000 ]) && mem_total=64
     echo "$mem_total"
@@ -301,14 +300,14 @@ EOF
 
 # 动态 RTT 内存页钳位
 safe_rtt() {
-    local dyn_buf="$1" RTT_VAL="$2" max_udp_pages="$3" udp_min="$4" udp_pre="$5" udp_max="$6"
+    local dyn_buf="$1" rtt_val="$2" max_udp_pages="$3" udp_min="$4" udp_pre="$5" udp_max="$6" real_rtt_factors="$7" loss_compensation="$8"
     local dyn_pages=$(( dyn_buf / 4096 ))
     # 1. 计算探测 BDP：使用补偿后的画像值及丢包补偿系数
-    local probe_pages=$(( REAL_RTT_FACTORS * 1024 * LOSS_COMPENSATION / 100 ))
+    local probe_pages=$(( real_rtt_factors * 1024 * loss_compensation / 100 ))
     # 2. 仲裁逻辑：探测值与 dyn_buf 保底值取最大者
     rtt_scale_max=$(( probe_pages > dyn_pages ? probe_pages : dyn_pages ))
     # 3. 延迟梯度补偿：根据实测 RTT 自动切换模式
-    if [ "$RTT_VAL" -ge 150 ]; then
+    if [ "$rtt_val" -ge 150 ]; then
         rtt_scale_max=$(( rtt_scale_max * 15 / 10 )); SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (QUIC远航)"
     else
         SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (QUIC竞速)"
@@ -331,11 +330,11 @@ apply_userspace_adaptive_profile() {
     # === 1. P 处理器调度 (针对单核小鸡的特殊优化) ===
     # 如果是单核，强行给 2 个 P 能够让网络 IO 和内存回收并行，不至于卡死
     [ "$real_c" -eq 1 ] && export GOMAXPROCS=2 || export GOMAXPROCS="$g_procs"
-    # === 2. 内存回收策略分级 (75M+- 差异化处理) ===
-    [ "$mem_total" -lt 75 ] && \
-    { export GODEBUG="madvdontneed=1,scavenge_target=1"; info "Runtime → 激进回收模式 (75M-)"; } || \
-    { export GODEBUG="madvdontneed=1,asyncpreemptoff=1"; info "Runtime → 性能优先模式 (75M+)"; }
-    export GOGC="${SBOX_GOGC:-100}" GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}"
+    # === 2. 内存回收策略分级 (76M+- 差异化处理) ===
+    [ "$mem_total" -lt 76 ] && \
+    { export GODEBUG="madvdontneed=1,scavenge_target=1"; info "Runtime → 激进回收模式 (76m-)"; } || \
+    { export GODEBUG="madvdontneed=1,asyncpreemptoff=1"; info "Runtime → 性能优先模式 (76m+)"; }
+    export GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}" GOGC="${SBOX_GOGC:-100}"
     export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" VAR_HY2_BW="${VAR_HY2_BW:-200}"
     export SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"
     # 针对 100M- 小鸡执行最后一道严谨校准 (Sanity Check)
@@ -361,7 +360,7 @@ EOF
     chmod 644 /etc/sing-box/env
     # === 4. CPU 亲和力优化 (绑定当前脚本到所有可用核心) ===
     [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1 && taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1
-    info "Runtime → GOMAXPROCS: $GOMAXPROCS核 | 内存限额:$GOMEMLIMIT | GC权重:$GOGC | Buffer:$((buf/1024))KB"
+    info "Runtime → GOMAXPROCS: $GOMAXPROCS 核 | 内存限额: $GOMEMLIMIT | GOGC: $GOGC | Buffer: $((buf/1024)) KB"
 }
 
 # 网卡核心负载加速（RPS/XPS/批处理密度）
@@ -403,50 +402,70 @@ apply_nic_core_boost() {
             [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
         done
     fi
-	info "NIC 优化 → 网卡:$IFACE | QLen:$target_qlen | 中断延迟:${tuned_usc:-default}us"
+	info "NIC 优化 → 网卡: $IFACE | QLen: $target_qlen | 中断延迟: ${tuned_usc:-default} us"
+}
+
+#防火墙开放端口
+apply_firewall() {
+    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+    [ -z "$port" ] && return 0
+    {   if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
+        elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --list-ports | grep -q "$port/udp" || { firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --reload; } >/dev/null 2>&1
+        elif command -v iptables >/dev/null 2>&1; then
+            iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+            command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
+        fi    } || true
+}
+	
+# "全功能调度器"
+service_ctrl() {
+    local action="$1"
+    [[ "$action" == "restart" ]] && { echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."; optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall; return 0; }
+    if [ -x "/etc/init.d/sing-box" ]; then rc-service sing-box "$action"
+    else systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box; fi
 }
 
 # ==========================================
 # 系统内核优化 (核心逻辑：差异化 + 进程调度 + UDP极限)
 # ==========================================
 optimize_system() {
-    local RTT_AVG=$(probe_network_rtt) 
-    local mem_total=$(probe_memory_total)
+    local rtt_res=($(probe_network_rtt)); local mem_total=$(probe_memory_total)
+	local rtt_avg="${rtt_res[0]:-150}" real_rtt_factors="${rtt_res[1]:-130}" loss_compensation="${rtt_res[2]:-100}"
     local real_c="$CPU_CORE" ct_max=16384 ct_udp_to=30 ct_stream_to=30
     local dyn_buf g_procs g_wnd g_buf net_bgt net_usc tcp_rmem_max
     local max_udp_mb max_udp_pages udp_mem_global_min udp_mem_global_pressure udp_mem_global_max
     local swappiness_val="${SWAPPINESS_VAL:-10}" busy_poll_val="${BUSY_POLL_VAL:-0}"
     
     setup_zrm_swap "$mem_total"
-	info "系统画像: CPU核心=${real_c}核 | 系统内存=${mem_total}mb | 平均延迟=${RTT_AVG}ms | RTT补偿=${REAL_RTT_FACTORS}ms | 丢包补偿=${LOSS_COMPENSATION}%"
+	info "系统画像: CPU核心: ${real_c} 核 | 系统内存: ${mem_total} mb | 平均延迟: ${rtt_avg} ms | RTT补偿: ${real_rtt_factors} ms | 丢包补偿: ${loss_compensation}%"
 
     # 阶段一： 四档位差异化配置
     if [ "$mem_total" -ge 450 ]; then
-        VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 70 / 100))
-        SBOX_GOLIMIT="$((mem_total * 80 / 100))MiB"; SBOX_GOGC="200"
-        SBOX_MEM_HIGH="$((mem_total * 89 / 100))M"; SBOX_MEM_MAX="$((mem_total * 98 / 100))M"
+        VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 66 / 100))
+        SBOX_GOLIMIT="$((mem_total * 76 / 100))MiB"; SBOX_GOGC="200"
+        SBOX_MEM_HIGH="$((mem_total * 86 / 100))M"; SBOX_MEM_MAX="$((mem_total * 96 / 100))M"
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
         g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
-        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 67 / 100))
-        SBOX_GOLIMIT="$((mem_total * 77 / 100))MiB"; SBOX_GOGC="150"
-        SBOX_MEM_HIGH="$((mem_total * 87 / 100))M"; SBOX_MEM_MAX="$((mem_total * 97 / 100))M"
+        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 63 / 100))
+        SBOX_GOLIMIT="$((mem_total * 75 / 100))MiB"; SBOX_GOGC="150"
+        SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 95 / 100))M"
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
         g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
-        VAR_HY2_BW="220"; max_udp_mb=$((mem_total * 64 / 100))
-        SBOX_GOLIMIT="$((mem_total * 74 / 100))MiB"; SBOX_GOGC="120"
-        SBOX_MEM_HIGH="$((mem_total * 84 / 100))M"; SBOX_MEM_MAX="$((mem_total * 94 / 100))M"
+        VAR_HY2_BW="200"; max_udp_mb=$((mem_total * 60 / 100))
+        SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="130"
+        SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         swappiness_val=60; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
-        VAR_HY2_BW="180"; max_udp_mb=$((mem_total * 63 / 100))
-        SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="100"
-        SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
+        VAR_HY2_BW="130"; max_udp_mb=$((mem_total * 56 / 100))
+        SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="100"
+        SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=2097152
         g_procs=1; swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         SBOX_OPTIMIZE_LEVEL="64M 激进版"
@@ -470,7 +489,7 @@ optimize_system() {
     [ "$VAR_BACKLOG" -lt 8192 ] && VAR_BACKLOG=8192
 
     # 4. 联动导出：Sing-box 应用层参数
-    g_wnd=$(( VAR_HY2_BW * LOSS_COMPENSATION / 100 / 8 ))      # 激进窗口，应对 80ms+ 延迟（原为 /10）
+    g_wnd=$(( VAR_HY2_BW * loss_compensation / 100 / 8 ))      # 激进窗口，应对 80ms+ 延迟（原为 /10）
     [ "$g_wnd" -lt 15 ] && g_wnd=15  # 调高起步窗口（原为 12）
     g_buf=$(( dyn_buf / 6 ))         # 应用层 buffer 设为跳板的 1/6（原为 /8）
 
@@ -493,13 +512,13 @@ optimize_system() {
     if [ "$mem_total" -gt 100 ]; then [ "$min_free_val" -gt 65536 ] && min_free_val=65536; fi
 	
 	# 9. 路况仲裁
-    safe_rtt "$dyn_buf" "$RTT_AVG" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max"
+    safe_rtt "$dyn_buf" "$rtt_avg" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max" "$real_rtt_factors" "$loss_compensation"
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
 	apply_initcwnd_optimization "false"
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf" "$real_c" "$mem_total"
     apply_nic_core_boost "$real_c" "$net_bgt" "$net_usc"
-    info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW}Mbps"
-    info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 ))MB"
+    info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW} Mbps"
+    info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
 	
     # 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
     local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
@@ -560,7 +579,7 @@ net.ipv4.tcp_notsent_lowat = 16384         # 限制发送队列 (防延迟抖动
 net.ipv4.tcp_mtu_probing = 1               # MTU自动探测 (防UDP黑洞)
 net.ipv4.ip_no_pmtu_disc = 0               # 启用路径MTU探测 (寻找最优包大小)
 net.ipv4.tcp_frto = 2                      # 丢包环境重传判断优化
-net.ipv4.tcp_slow_start_after_idle = $([ "$RTT_AVG" -ge 150 ] && echo "1" || echo "0") # 闲置后慢启动开关
+net.ipv4.tcp_slow_start_after_idle = $([ "$rtt_avg" -ge 150 ] && echo "1" || echo "0") # 闲置后慢启动开关
 net.ipv4.tcp_limit_output_bytes = $([ "$mem_total" -ge 200 ] && echo "262144" || echo "131072") # 限制TCP连接占用发送队列
 net.ipv4.udp_gro_enabled = 1               # UDP 分段聚合 (降CPU负载)
 net.ipv4.udp_early_demux = 1               # UDP 早期路由优化
@@ -599,16 +618,15 @@ SYSCTL
 # 安装/更新 Sing-box 内核
 # ==========================================
 install_singbox() {
-    local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub"
+    # 1. 初始化所有变量：将路径从内存 /tmp 移至磁盘 /var/tmp (内存避震)
+    local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub" FILE="" URL="" TD="/var/tmp/sb_build" TF="" dl_ok=false RJ="" best_link="" LINK="" NEW_BIN="" VER="" SBOX_ARCH="${SBOX_ARCH:-amd64}"
     [ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
     
-    # 1. 获取版本号
     info "获取 Sing-Box 最新版本信息..."
-    local RJ=$(curl -sL --connect-timeout 10 --max-time 15 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null)
+    RJ=$(curl -sL --connect-timeout 10 --max-time 15 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null)
     [ -n "$RJ" ] && LATEST_TAG=$(echo "$RJ" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9.]+"' | head -n1 | cut -d'"' -f4)
-    [ -z "$LATEST_TAG" ] && DOWNLOAD_SOURCE="官方镜像" && LATEST_TAG=$(curl -sL --connect-timeout 10 "https://sing-box.org/" 2>/dev/null | grep -oE 'v1\.[0-9]+\.[0-9]+' | head -n1)
-    [ -z "$LATEST_TAG" ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "远程获取失败，保持本地版本 v$LOCAL_VER"; return 0; } || { err "获取版本失败，请检查网络"; exit 1; }; }
-
+    [ -z "$LATEST_TAG" ] && { DOWNLOAD_SOURCE="官方镜像"; LATEST_TAG=$(curl -sL --connect-timeout 10 "https://sing-box.org/" 2>/dev/null | grep -oE 'v1\.[0-9]+\.[0-9]+' | head -n1); }
+    [ -z "$LATEST_TAG" ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "远程获取失败，保持 v$LOCAL_VER"; return 0; } || { err "获取版本失败，请检查网络"; exit 1; }; }
     local REMOTE_VER="${LATEST_TAG#v}"
     if [[ "$MODE" == "update" ]]; then
         echo -e "---------------------------------"
@@ -618,45 +636,29 @@ install_singbox() {
         [[ "$LOCAL_VER" == "$REMOTE_VER" ]] && { succ "内核已是最新版本"; return 1; }
         info "发现新版本，开始下载更新..."
     fi
-
-    # 3. 核心优化：多源并行探测与稳健下载
-    local FILE="sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"
-    local URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}"
-    local TD=$(mktemp -d); local TF="$TD/sb.tar.gz"; local dl_ok=false
-    # 精选 2026 年依然高度可用的镜像站
-    local LINKS=("$URL" "https://ghproxy.net/$URL" "https://kkgh.tk/$URL" "https://gh.ddlc.top/$URL" "https://gh-proxy.com/$URL")
-
-    info "正在筛选最优下载节点..."
-    local best_link=""
-    # 并发探测：对每个源发起 HEAD 请求，第一个成功的被记录
+    # 2. 后台并行探测模式
+    FILE="sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"; URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}"
+    rm -rf "$TD" && mkdir -p "$TD" && TF="$TD/sb.tar.gz"; local LINKS=("$URL" "https://ghproxy.net/$URL" "https://kkgh.tk/$URL" "https://gh.ddlc.top/$URL" "https://gh-proxy.com/$URL")
+    info "正在筛选最优下载节点 (并行模式)..."
     for LINK in "${LINKS[@]}"; do (curl -Is --connect-timeout 4 --max-time 6 "$LINK" | grep -q "200 OK" && echo "$LINK" > "$TD/best_node") & done
-    wait # 等待所有探测结束（约 4-6 秒）
-
-    [ -f "$TD/best_node" ] && best_link=$(cat "$TD/best_node" | head -n1)  
-    [ -z "$best_link" ] && best_link="${LINKS[0]}" # 兜底使用原链
-    info "选定节点: $(echo $best_link | cut -d'/' -f3)，启动下载..."
+    wait # 等待所有后台进程
+    best_link=$( [ -f "$TD/best_node" ] && head -n1 "$TD/best_node" || echo "${LINKS[0]}" )
     
-    # 使用断点续传 (-C -) 和自动重试 (--retry)，增加校验（Sing-box 二进制压缩包通常在 10MB 以上）
-    if curl -fkL -C - --connect-timeout 15 --retry 3 --retry-delay 2 "$best_link" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 8000000 ]; then
-        dl_ok=true
-    else
+    # 3. 稳健下载逻辑
+    info "选定节点: $(echo "$best_link" | cut -d'/' -f3)，启动下载..."
+    { curl -fkL -C - --connect-timeout 15 --retry 3 --retry-delay 2 "$best_link" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 8000000 ]; } && dl_ok=true || {
         warn "首选源体积异常或下载失败，尝试遍历备用源..."
-        for LINK in "${LINKS[@]}"; do
-            info "尝试源: $(echo "$LINK" | cut -d'/' -f3)..."
-            curl -fkL --connect-timeout 10 --max-time 60 "$LINK" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 8000000 ] && { dl_ok=true; break; }
-        done
-    fi
+        for LINK in "${LINKS[@]}"; do info "尝试源: $(echo "$LINK" | cut -d'/' -f3)..."; curl -fkL --connect-timeout 10 --max-time 60 "$LINK" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 8000000 ] && { dl_ok=true; break; }; done
+    }
+    [ "$dl_ok" = false ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "所有源失效，保留旧版"; rm -rf "$TD"; return 0; } || { err "下载失败"; exit 1; }; }
 
-    [ "$dl_ok" = false ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "所有下载源均失效，保留旧版"; rm -rf "$TD"; return 0; } || { err "下载失败，安装中断"; exit 1; }; }
-
-    # 4. 解压安装
-    tar -xf "$TF" -C "$TD" --strip-components=1
-    pgrep sing-box >/dev/null && { info "停止旧版进程..."; systemctl stop sing-box 2>/dev/null; }
-    
-    [ -f "$TD/sing-box" ] && { 
-        install -m 755 "$TD/sing-box" /usr/bin/sing-box && rm -rf "$TD"
-        succ "内核安装成功: v$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')"
-    } || { rm -rf "$TD"; err "文件解压校验失败"; return 1; }
+    # 4. 优化解压与安装：拒绝自杀式中断 (防 SSH 断开)
+    info "正在解压并准备安装内核..."; tar -xf "$TF" -C "$TD" >/dev/null 2>&1 && NEW_BIN=$(find "$TD" -type f -name "sing-box" | head -n1)
+    if [ -f "$NEW_BIN" ]; then
+        chmod 755 "$NEW_BIN" && cp -f "$NEW_BIN" /usr/bin/sing-box
+        pgrep -x sing-box >/dev/null && { info "正在热重启服务以完成更新..."; service_ctrl restart || { service_ctrl stop; sleep 1; service_ctrl start; }; }
+        rm -rf "$TD" && VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}') && succ "内核安装成功: v$VER"
+    else rm -rf "$TD" && err "解压校验失败：未找到二进制文件" && return 1; fi
 }
 
 # ==========================================
@@ -689,7 +691,7 @@ create_config() {
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "info", "timestamp": true },
+  "log": { "level": "fatal", "timestamp": true },
   "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
@@ -730,7 +732,7 @@ setup_service() {
         warn "当前环境禁止高优先级调度，已自动回退至默认权重 (Nice 0)"
         final_nice=0
     fi
-    info "正在写入服务配置并启动，请稍后..."
+    info "正在写入配置并启动服务..."
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
         cat > /etc/init.d/sing-box <<EOF
@@ -743,7 +745,6 @@ respawn_max=5
 respawn_period=60
 [ -f /etc/sing-box/env ] && . /etc/sing-box/env
 export GOTRACEBACK=none
-export ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 command="/usr/bin/sing-box"
 command_args="run -c /etc/sing-box/config.json"
 command_background="yes"
@@ -753,16 +754,12 @@ rc_ulimit="-n 1000000"
 rc_nice="${final_nice}"
 rc_oom_score_adj="-500"
 depend() { need net; after firewall; }
-start_pre() { 
-    ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_err.log 2>&1 || { 
-        echo "Config check failed:" && cat /tmp/sb_err.log && return 1 
-    } 
-}
+start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_err.log 2>&1 || { echo "Config check failed:" && cat /tmp/sb_err.log && return 1; }; }
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true
         sync   # 确保环境文件与服务脚本落盘，防止启动瞬时读取失败
-        rc-service sing-box restart >/dev/null 2>&1 &
+		(rc-service sing-box restart >/dev/null 2>&1 || true) &
     else
         local mem_config=""; local cpu_quota=$((real_c * 100))
         local io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
@@ -784,7 +781,6 @@ Type=simple
 User=root
 EnvironmentFile=-/etc/sing-box/env
 Environment=GOTRACEBACK=none
-Environment=ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 ExecStartPre=/usr/bin/sing-box check -c /etc/sing-box/config.json
 ExecStart=${taskset_bin} -c ${core_range} /usr/bin/sing-box run -c /etc/sing-box/config.json
 ${systemd_nice_line}
@@ -804,7 +800,7 @@ EOF
         systemctl daemon-reload >/dev/null 2>&1
         systemctl enable sing-box >/dev/null 2>&1 || true
         sync   # 确保环境文件与服务配置落盘
-        systemctl restart sing-box >/dev/null 2>&1 &
+		(systemctl restart sing-box >/dev/null 2>&1 || true) &
     fi
     set +e     # 关闭 set -e，这是防止脚本在 pidof 失败时直接退出的关键核心
     for i in {1..40}; do
@@ -823,7 +819,7 @@ EOF
         [ "$OS" = "alpine" ] && { [ -f /var/log/messages ] && tail -n 10 /var/log/messages || logread | tail -n 10; } || journalctl -u sing-box -n 10 --no-pager 2>/dev/null
         set -e; exit 1
     fi
-    set -e
+	set -e
 }
 
 # ==========================================
@@ -833,7 +829,7 @@ get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-    read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data"
+	read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
@@ -847,8 +843,8 @@ display_links() {
 	
     _do_probe() {
         [ -z "$1" ] && return
-        nc -z -u -w 1 "$1" "$RAW_PORT" >/dev/null 2>&1 && \
-        echo -e "\033[1;32m(已连通)\033[0m" || echo -e "\033[1;33m(本地受阻)\033[0m"
+		(nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
+        echo -e "\033[1;32m (已连通)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
     }
     if command -v nc >/dev/null 2>&1; then
         _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
@@ -877,7 +873,7 @@ display_system_status() {
     local CWND_VAL=$(echo "$ROUTE_DEF" | awk -F'initcwnd ' '{if($2){split($2,a," ");print a[1]}else{print "10"}}')
     local CWND_LBL=$(echo "$ROUTE_DEF" | grep -q "initcwnd" && echo "(已优化)" || echo "(默认)")
     local SBOX_PID=$(pgrep sing-box | head -n1)
-    local NI_VAL="离线"; local NI_LBL=""
+    local NI_VAL="(未探测)"; local NI_LBL=""
     if [ -n "$SBOX_PID" ] && [ -f "/proc/$SBOX_PID/stat" ]; then
         NI_VAL=$(cat "/proc/$SBOX_PID/stat" | awk '{print $19}')
         [ "$NI_VAL" -lt 0 ] && NI_LBL="(进程优先)" || { [ "$NI_VAL" -gt 0 ] && NI_LBL="(低优先级)" || NI_LBL="(默认)"; }
@@ -890,7 +886,7 @@ display_system_status() {
     echo -e "进程权重: \033[1;33mNice $NI_VAL $NI_LBL\033[0m"
     echo -e "Initcwnd: \033[1;33m$CWND_VAL $CWND_LBL\033[0m"
     echo -e "拥塞控制: \033[1;33m$bbr_display\033[0m"
-    echo -e "优化级别: \033[1;32m${SBOX_OPTIMIZE_LEVEL:-未检测}\033[0m"
+    echo -e "优化级别: \033[1;32m${SBOX_OPTIMIZE_LEVEL:-未检测}\033[0m"  
     echo -e "伪装SNI:  \033[1;33m${RAW_SNI:-未检测}\033[0m"
     echo -e "IPv4地址: \033[1;33m${RAW_IP4:-无}\033[0m"
     echo -e "IPv6地址: \033[1;33m${RAW_IP6:-无}\033[0m"
@@ -899,17 +895,40 @@ display_system_status() {
 get_warp_conf() {
     local cache="/etc/sing-box/warp.json" log="/tmp/warp_debug.log"
     echo "--- 自动注册 $(date) ---" > "$log"
-    command -v wg >/dev/null || apk add wireguard-tools >>"$log" 2>&1
-    # 修复点：先声明再使用，防止变量在单行中“失踪”
+    command -v wg >/dev/null || {
+        if command -v apk >/dev/null 2>&1; then
+            apk add --no-cache wireguard-tools >>"$log" 2>&1
+        elif command -v apt-get >/dev/null 2>&1; then
+            apt-get update -y >>"$log" 2>&1 && apt-get install -y --no-install-recommends wireguard-tools >>"$log" 2>&1
+        else
+            $(command -v dnf || echo "yum") install -y wireguard-tools >>"$log" 2>&1
+        fi
+    }
+
+    # 已有可用缓存则直接复用，避免重复注册导致不稳定
+    if [ -s "$cache" ]; then
+        local c_pr c_v6
+        c_pr=$(jq -r '.priv // empty' "$cache" 2>/dev/null || echo "")
+        c_v6=$(jq -r '.v6 // empty' "$cache" 2>/dev/null || echo "")
+        if [ -n "$c_pr" ] && [ -n "$c_v6" ]; then
+            [[ "$c_v6" != */* ]] && c_v6="${c_v6}/128"
+            echo "${c_pr}|${c_v6}"
+            return 0
+        fi
+    fi
+
     local pr pu res id v6
     pr=$(wg genkey) && pu=$(echo "$pr" | wg pubkey)
-    res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" -d "{\"key\":\"$pu\",\"type\":\"Linux\",\"tos\":\"2024-09-01T00:00:00.000Z\"}")
+    local payload
+    payload=$(jq -nc --arg key "$pu" '{"key":$key,"type":"Linux","tos":"2024-09-01T00:00:00.000Z"}')
+    res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" -d "$payload")
     id=$(echo "$res" | jq -r '.id // .result.id // empty')
     if [ -n "$id" ] && [ "$id" != "null" ]; then
         v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
         [[ "$v6" != */* ]] && v6="${v6}/128"
         ([ -z "$v6" ] || [ "$v6" == "/128" ]) && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
-        echo "{\"priv\":\"$pr\",\"v6\":\"$v6\"}" > "$cache" && echo "${pr}|${v6}"
+        jq -nc --arg priv "$pr" --arg v6 "$v6" '{"priv":$priv,"v6":$v6}' > "$cache"
+        echo "${pr}|${v6}"
     else
         echo "API失败: $res" >> "$log" && cat "$log" >&2 && return 1
     fi
@@ -917,27 +936,63 @@ get_warp_conf() {
 
 warp_manager() {
     local conf="/etc/sing-box/config.json"
+    local cache="/etc/sing-box/warp.json"
+
+    _warp_status() {
+        # 仅把“已启用”定义为：存在可用凭据（不修改转发路径，适配虚拟化小鸡）
+        local c_pr c_v6
+        c_pr=$(jq -r '.priv // empty' "$cache" 2>/dev/null || echo "")
+        c_v6=$(jq -r '.v6 // empty' "$cache" 2>/dev/null || echo "")
+        [ -n "$c_pr" ] && [ -n "$c_v6" ]
+    }
+
     while true; do
-        local st="\033[1;31m已禁用\033[0m" && grep -q "warp-out" "$conf" && st="\033[1;32m已启用\033[0m"
+        local st="[1;31m已禁用[0m"; _warp_status && st="[1;32m已启用[0m"
         echo -e "\n--- WARP 全自动管理 (状态: $st) ---\n1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
             1)
-                if grep -q "warp-out" "$conf"; then
-                    info "正在禁用..." && jq 'del(.outbounds[]|select(.tag=="warp-out"))|.route.rules|=map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                if _warp_status; then
+                    info "正在禁用..."
+                    rm -f "$cache"
+                    jq '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | del(.outbounds[]|select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
-                    info "执行全自动配置..." && rm -f "/etc/sing-box/warp.json"
-                    local cred=$(get_warp_conf) || { sleep 2; continue; }
-                    local pr=$(echo "$cred" | cut -d'|' -f1) v6=$(echo "$cred" | cut -d'|' -f2)
-                    local out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
-                    local rule='{"domain":["google.com","netflix.com","chatgpt.com","openai.com","tiktok.com"],"outbound":"warp-out"}'
-                    jq --argjson out "$out" --argjson rule "$rule" '.outbounds+=[$out]|.route.rules=[$rule]+(.route.rules//[])' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    info "执行全自动配置..."
+                    get_warp_conf >/dev/null || { sleep 2; continue; }
                 fi
-                service_ctrl restart && succ "操作完成" && sleep 1 ;;
+                service_ctrl restart && succ "操作完成" && info "默认不改流量路径；仅在添加分流域名后，相关域名才会走 WARP" && sleep 1 ;;
             2)
-                grep -q "warp-out" "$conf" || { err "请先启用 WARP"; sleep 2; continue; }
+                _warp_status || { err "请先启用 WARP"; sleep 2; continue; }
                 read -r -p "域名: " dom
-                [ -n "$dom" ] && jq --arg dom "$dom" '(..|select(.outbound?=="warp-out").domain)+=[$dom]|(..|select(.outbound?=="warp-out").domain)|=unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入" && sleep 1 ;;
+                [ -z "$dom" ] && { err "域名不能为空"; sleep 1; continue; }
+
+                local cred pr v6 out
+                cred=$(get_warp_conf) || { sleep 2; continue; }
+                pr=$(echo "$cred" | cut -d'|' -f1)
+                v6=$(echo "$cred" | cut -d'|' -f2)
+                out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
+
+                jq --argjson out "$out" --arg dom "$dom" '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | .outbounds |= map(select(.tag!="warp-out")) + [$out] | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":[$dom],"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" || { err "配置生成失败"; sleep 2; continue; }
+
+                if command -v sing-box >/dev/null 2>&1 && ! ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true sing-box check -c "$conf.tmp" >/tmp/sb_warp_check.log 2>&1; then
+                    err "WARP 配置校验失败，已取消应用"
+                    cat /tmp/sb_warp_check.log >&2
+                    rm -f "$conf.tmp"
+                    sleep 2
+                    continue
+                fi
+
+                cp -f "$conf" "$conf.bak" 2>/dev/null || true
+                mv "$conf.tmp" "$conf"
+                if service_ctrl restart; then
+                    succ "已加入"
+                    sleep 1
+                else
+                    err "重启失败，正在回滚到上一个配置"
+                    [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"
+                    service_ctrl restart >/dev/null 2>&1 || true
+                    sleep 2
+                fi ;;
             0) return 0 ;;
             *) err "无效选择" && sleep 2 ;;
         esac
@@ -975,16 +1030,14 @@ RAW_SALA='$FINAL_SALA'
 RAW_IP4='${RAW_IP4:-}'
 RAW_IP6='${RAW_IP6:-}'
 IS_V6_OK='${IS_V6_OK:-false}'
-REAL_RTT_FACTORS='$REAL_RTT_FACTORS'
-LOSS_COMPENSATION='$LOSS_COMPENSATION'
 EOF
 
     # 导出函数
-    local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port \
-get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard \
-create_config setup_service install_singbox info err warn succ optimize_system \
-apply_userspace_adaptive_profile apply_nic_core_boost get_warp_conf warp_manager \
-setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp backup_config restore_config load_env_vars)
+    local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port
+        get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard
+        optimize_system install_singbox create_config setup_service apply_firewall service_ctrl info err warn succ
+        apply_userspace_adaptive_profile apply_nic_core_boost
+        get_warp_conf warp_manager setup_zrm_swap safe_rtt generate_cert)
 
     for f in "${funcs[@]}"; do
         if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
@@ -992,42 +1045,22 @@ setup_zrm_swap safe_rtt check_tls_domain generate_cert verify_cert cleanup_temp 
 
     cat >> "$CORE_TMP" <<'EOF'
 detect_os; set +e
-
-# 自动从配置提取端口并放行
-apply_firewall() {
-    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    [ -z "$port" ] && return
-    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
-    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
-    elif command -v iptables >/dev/null 2>&1; then
-        iptables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true
-        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
-        command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT 2>/dev/null || true; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
-    fi
-}
-
+apply_firewall
 if [[ "${1:-}" == "--detect-only" ]]; then :
 elif [[ "${1:-}" == "--show-only" ]]; then
     get_env_data; echo -e "\n\033[1;34m==========================================\033[0m"
     display_system_status; display_links
 elif [[ "${1:-}" == "--reset-port" ]]; then
-    optimize_system; create_config "$2"; apply_firewall; setup_service
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
-    get_env_data; display_links
+    create_config "$2"; service_ctrl restart; get_env_data; display_links
 elif [[ "${1:-}" == "--update-kernel" ]]; then
     if install_singbox "update"; then
-        optimize_system; setup_service; apply_firewall
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl restart sing-box >/dev/null 2>&1 || rc-service sing-box restart >/dev/null 2>&1 || true
-        succ "内核已更新并应用防火墙规则"
+        service_ctrl restart; succ "内核已更新并应用防火墙规则"
     fi
 elif [[ "${1:-}" == "--apply-cwnd" ]]; then
     apply_userspace_adaptive_profile >/dev/null 2>&1 || true
     apply_initcwnd_optimization "true" || true; apply_firewall
 fi
 EOF
-
     mv "$CORE_TMP" "$SBOX_CORE"
     chmod 700 "$SBOX_CORE"
 
@@ -1040,11 +1073,6 @@ SBOX_CORE="/etc/sing-box/core_script.sh"
 if [ ! -f "$SBOX_CORE" ]; then echo "核心文件丢失"; exit 1; fi
 [[ $# -gt 0 ]] && { /bin/bash "$SBOX_CORE" "$@"; exit 0; }
 source "$SBOX_CORE" --detect-only
-
-service_ctrl() {
-    [ -x "/etc/init.d/sing-box" ] && rc-service sing-box "$1" && return
-    systemctl daemon-reload >/dev/null 2>&1 || true; systemctl "$1" sing-box
-}
 
 while true; do
     echo "========================" 
