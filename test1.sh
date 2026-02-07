@@ -155,7 +155,6 @@ get_network_info() {
         curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api.ipify.org" || \
         curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://ifconfig.me" || echo ""
     }
-    # 并发执行
     _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
     # 数据清洗
     [ -s "$t4" ] && RAW_IP4=$(tr -d '[:space:]' < "$t4" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || echo "")
@@ -165,7 +164,7 @@ get_network_info() {
     [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true" || IS_V6_OK="false"
     # 错误退出判断
     [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "错误: 未能探测到任何有效的公网 IP，安装中断"; exit 1; }
-    # 原有输出信息保持不变
+    # 输出信息
     [ -n "$RAW_IP4" ] && succ "IPv4: $RAW_IP4 [✔]" || info "IPv4: 不可用 (单栈 IPv6 环境)"
     [ "$IS_V6_OK" = "true" ] && succ "IPv6: $RAW_IP6 [✔]" || info "IPv6: 不可用 (单栈 IPv4 环境)"
 }
