@@ -10,14 +10,7 @@ SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF
 VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_SALA=""
 VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
-TLS_DOMAIN_POOL=(
-  "www.bing.com"                # 推荐：全球 IP 分布，合法性高
-  "www.microsoft.com"           # 推荐：系统更新流量，极具迷惑性
-  "download.windowsupdate.com"  # 推荐：大流量 UDP 伪装的首选
-  "www.icloud.com"              # 推荐：苹果用户常态化出境流量
-  "gateway.icloud.com"          # 推荐：iCloud 同步流量
-  "cdn.staticfile.org"          # 推荐：国内知名的开源库加速，常去境外取回数据
-)
+TLS_DOMAIN_POOL=("www.bing.com" "www.microsoft.com" "itunes.apple.com" "www.icloud.com" "www.7-zip.org" "www.jsdelivr.com")
 pick_tls_domain() { echo "${TLS_DOMAIN_POOL[$RANDOM % ${#TLS_DOMAIN_POOL[@]}]}"; }
 TLS_DOMAIN="$(pick_tls_domain)"
 
