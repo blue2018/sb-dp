@@ -62,7 +62,6 @@ install_dependencies() {
     elif command -v apt-get >/dev/null 2>&1; then PM="apt"; DEPS="$DEPS util-linux"
     else PM="yum"; DEPS="${DEPS//netcat-openbsd/nc}"; DEPS="${DEPS//procps/procps-ng} util-linux"; fi
     [ -w /proc/sys/vm/drop_caches ] && sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-    
     case "$PM" in
         apk) info "检测到 Alpine 系统，执行分批安装依赖..."
              apk update >/dev/null 2>&1
@@ -81,7 +80,6 @@ install_dependencies() {
              $(command -v dnf || echo "yum") install -y $DEPS || err "依赖安装失败"
              $(command -v dnf || echo "yum") install -y $OPT >/dev/null 2>&1 || true ;;
     esac
-    
     update-ca-certificates 2>/dev/null || true
     for cmd in jq curl tar bash pgrep taskset; do command -v "$cmd" >/dev/null 2>&1 || { [ "$PM" = "apk" ] && apk add --no-cache util-linux >/dev/null 2>&1 || { err "核心依赖 ${cmd} 安装失败，请检查网络或源"; exit 1; }; } done
     succ "所需依赖已就绪"
