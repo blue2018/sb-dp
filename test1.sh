@@ -618,8 +618,9 @@ SYSCTL
 # 安装/更新 Sing-box 内核
 # ==========================================
 install_singbox() {
-    local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub"
+    local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub" FILE="" URL="" TD="/var/tmp/sb_build" TF="" dl_ok=false
     [ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
+    
     info "获取 Sing-Box 最新版本信息..."
     local RJ=$(curl -sL --connect-timeout 10 --max-time 15 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null)
     [ -n "$RJ" ] && LATEST_TAG=$(echo "$RJ" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9.]+"' | head -n1 | cut -d'"' -f4)
@@ -636,23 +637,22 @@ install_singbox() {
         info "发现新版本，开始下载更新..."
     fi
 
-    # 紧凑化处理：路径准备与节点探测
-    local FILE="sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz" URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}"
-    local TD="/var/tmp/sb_build"; rm -rf "$TD"; mkdir -p "$TD"; local TF="$TD/sb.tar.gz"; local dl_ok=false; local best_link=""
+    # 修复点：提前初始化变量，确保严格模式不报错
+    FILE="sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"; URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}"
+    rm -rf "$TD"; mkdir -p "$TD"; TF="$TD/sb.tar.gz"; local best_link=""
     local LINKS=("$URL" "https://ghproxy.net/$URL" "https://kkgh.tk/$URL" "https://gh-proxy.com/$URL")
-	
-    info "正在探测最优节点 (低功耗模式)..."
+
+    info "探测最优节点 (低功耗)..."
     for LINK in "${LINKS[@]}"; do curl -Is --connect-timeout 3 "$LINK" | grep -q "200 OK" && { best_link="$LINK"; break; }; done
     [ -z "$best_link" ] && best_link="${LINKS[0]}"
+    
     info "选定节点: $(echo $best_link | cut -d'/' -f3)，启动下载..."
-    # 紧凑化处理：下载与校验
     { curl -fkL -C - --connect-timeout 15 --retry 3 "$best_link" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 8000000 ]; } && dl_ok=true || {
         warn "首选源失败，遍历备用源..."
         for LINK in "${LINKS[@]}"; do info "尝试: $(echo "$LINK" | cut -d'/' -f3)..."; curl -fkL --connect-timeout 10 "$LINK" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 8000000 ] && { dl_ok=true; break; }; done
     }
     [ "$dl_ok" = false ] && { err "下载失败"; rm -rf "$TD"; return 1; }
 
-    # 紧凑化处理：解压与安装
     info "解压并安装内核..."; sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
     tar -xf "$TF" -C "$TD" && local NEW_BIN=$(find "$TD" -type f -name "sing-box" | head -n1)
     if [ -f "$NEW_BIN" ]; then
