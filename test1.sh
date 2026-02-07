@@ -617,11 +617,12 @@ SYSCTL
 # 安装/更新 Sing-box 内核
 # ==========================================
 install_singbox() {
-    local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub" TD="/var/tmp/sb_build" TF="$TD/sb.tar.gz" dl_ok=false best_link="" SBOX_ARCH="${SBOX_ARCH:-amd64}"
+    # 1. 初始化：TD 去掉 local 确保全局可见，防止 set -u 报错；其余变量保持局部化
+    TD="/var/tmp/sb_build"; local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub" TF="$TD/sb.tar.gz" dl_ok=false best_link="" SBOX_ARCH="${SBOX_ARCH:-amd64}"
     [ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
     
     info "获取 Sing-Box 最新版本信息..."
-    # 采用逻辑聚合防止 API 请求失败触发 set -e
+    # 增加 || echo "" 防止 grep 失败触发 set -e
     RJ=$(curl -sL --connect-timeout 10 --max-time 15 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null || echo "")
     LATEST_TAG=$(echo "$RJ" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9.]+"' | head -n1 | cut -d'"' -f4 || echo "")
     [ -z "$LATEST_TAG" ] && { DOWNLOAD_SOURCE="官方镜像"; LATEST_TAG=$(curl -sL --connect-timeout 10 "https://sing-box.org/" 2>/dev/null | grep -oE 'v1\.[0-9]+\.[0-9]+' | head -n1 || echo ""); }
@@ -634,7 +635,7 @@ install_singbox() {
         info "发现新版本，开始下载更新..."
     fi
 
-    # 1. 强化并行探测逻辑：增加写入保护和节点优先级
+    # 2. 强化并行探测逻辑
     local FILE="sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"
     local URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}"
     rm -rf "$TD" && mkdir -p "$TD" && local LINKS=("$URL" "https://ghproxy.net/$URL" "https://kkgh.tk/$URL" "https://gh.ddlc.top/$URL" "https://gh-proxy.com/$URL")
@@ -643,7 +644,7 @@ install_singbox() {
     wait
     best_link=$( [ -s "$TD/nodes" ] && head -n1 "$TD/nodes" || echo "${LINKS[0]}" )
     
-    # 2. 稳健下载：主源失败立即切换备用
+    # 3. 稳健下载逻辑
     info "选定节点: $(echo "$best_link" | cut -d'/' -f3)，启动下载..."
     { curl -fkL --connect-timeout 15 --retry 2 "$best_link" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 5000000 ]; } && dl_ok=true || {
         warn "首选源失效，遍历备用源..."; for LINK in "${LINKS[@]}"; do
@@ -653,7 +654,7 @@ install_singbox() {
     }
     [ "$dl_ok" = false ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "所有源失效，保留旧版"; rm -rf "$TD"; return 0; } || { err "下载失败"; exit 1; }; }
 
-    # 3. 覆盖安装：先删后移防 Text file busy，逻辑块加保护
+    # 4. 覆盖安装：先删后移防二进制忙
     info "正在解压并准备安装内核..."
     { tar -xf "$TF" -C "$TD" >/dev/null 2>&1 && NEW_BIN=$(find "$TD" -type f -name "sing-box" | head -n1); } || { rm -rf "$TD"; err "解压失败"; return 1; }
     
@@ -664,6 +665,7 @@ install_singbox() {
         rm -rf "$TD" && succ "内核安装成功: v$VER"
     else rm -rf "$TD" && err "校验失败：二进制文件缺失" && return 1; fi
 }
+
 
 # ==========================================
 # 配置文件生成
