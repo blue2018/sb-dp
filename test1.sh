@@ -947,7 +947,7 @@ warp_manager() {
     }
 
     while true; do
-        local st="[1;31m已禁用[0m"; _warp_status && st="[1;32m已启用[0m"
+        local st="\033[1;31m已禁用\033[0m"; _warp_status && st="\033[1;32m已启用\033[0m"
         echo -e "\n--- WARP 全自动管理 (状态: $st) ---\n1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
@@ -955,7 +955,7 @@ warp_manager() {
                 if _warp_status; then
                     info "正在禁用..."
                     rm -f "$cache"
-                    jq '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | del(.outbounds[]|select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    jq '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | del(.outbounds[]|select(.tag=="warp-out" or .tag=="warp-auto")) | .route.rules |= map(select(.outbound!="warp-out" and .outbound!="warp-auto"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
                     info "执行全自动配置..."
                     get_warp_conf >/dev/null || { sleep 2; continue; }
@@ -966,18 +966,20 @@ warp_manager() {
                 read -r -p "域名: " dom
                 [ -z "$dom" ] && { err "域名不能为空"; sleep 1; continue; }
 
-                local cred pr v6 out
+                local cred pr v6 out auto
                 cred=$(get_warp_conf) || { sleep 2; continue; }
                 pr=$(echo "$cred" | cut -d'|' -f1)
                 v6=$(echo "$cred" | cut -d'|' -f2)
-                out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
+                out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","detour":"direct-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
 
-                jq --argjson out "$out" --arg dom "$dom" '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | .outbounds |= map(select(.tag!="warp-out")) + [$out] | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":[$dom],"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入" && sleep 1 ;;
+                auto=$(jq -n '{"type":"urltest","tag":"warp-auto","outbounds":["warp-out","direct-out"],"url":"https://cp.cloudflare.com/generate_204","interval":"10m","tolerance":50}')
+                jq --argjson out "$out" --argjson auto "$auto" --arg dom "$dom" '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | .outbounds |= map(select(.tag!="warp-out" and .tag!="warp-auto")) + [$out,$auto] | if ((.route.rules | map(select(.outbound=="warp-auto" or .outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":[$dom],"outbound":"warp-auto"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-auto" or .outbound=="warp-out") | .outbound) = "warp-auto" | (.route.rules[] | select(.outbound=="warp-auto") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-auto") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入(自动回退直连)" && sleep 1 ;;
             0) return 0 ;;
             *) err "无效选择" && sleep 2 ;;
         esac
     done
 }
+
 
 # ==========================================
 # 管理脚本生成
