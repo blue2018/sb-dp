@@ -922,7 +922,7 @@ warp_manager() {
     local conf="/etc/sing-box/config.json"
 
     _warp_status() {
-        jq -e '((.outbounds // []) | any(.tag=="warp-out" and .type=="wireguard")) and ((.route.rules // []) | any(.outbound=="warp-out"))' "$conf" >/dev/null 2>&1
+        jq -e '(.outbounds // []) | any(.tag=="warp-out" and .type=="wireguard")' "$conf" >/dev/null 2>&1
     }
 
     while true; do
@@ -938,14 +938,13 @@ warp_manager() {
                     local cred=$(get_warp_conf) || { sleep 2; continue; }
                     local pr=$(echo "$cred" | cut -d'|' -f1) v6=$(echo "$cred" | cut -d'|' -f2)
                     local out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
-                    local rule='{"domain_suffix":["__warp_default__.invalid"],"outbound":"warp-out"}'
-                    jq --argjson out "$out" --argjson rule "$rule" '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | .outbounds |= map(select(.tag!="warp-out")) + [$out] | .route.rules |= [ $rule ] + map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    jq --argjson out "$out" '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | .outbounds |= map(select(.tag!="warp-out")) + [$out]' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 fi
-                service_ctrl restart && succ "操作完成" && info "默认未添加真实分流域名，不会影响现有节点连通性；请用“添加分流域名”按需开启 WARP 分流" && sleep 1 ;;
+                service_ctrl restart && succ "操作完成" && info "仅启用了 WARP 出站，默认不分流任何流量；请用“添加分流域名”按需开启分流" && sleep 1 ;;
             2)
                 _warp_status || { err "请先启用 WARP"; sleep 2; continue; }
                 read -r -p "域名: " dom
-                [ -n "$dom" ] && jq --arg dom "$dom" '(.route //= {}) | (.route.rules //= []) | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入" && sleep 1 ;;
+                [ -n "$dom" ] && jq --arg dom "$dom" '(.route //= {}) | (.route.rules //= []) | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":[$dom],"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入" && sleep 1 ;;
             0) return 0 ;;
             *) err "无效选择" && sleep 2 ;;
         esac
