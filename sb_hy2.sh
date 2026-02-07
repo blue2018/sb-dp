@@ -407,36 +407,23 @@ apply_nic_core_boost() {
 #防火墙开放端口
 apply_firewall() {
     local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    [ -z "$port" ] && return
-    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
-    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --list-ports | grep -q "$port/udp" || { firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --reload; } >/dev/null 2>&1
+    [ -z "$port" ] && return 0
+    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1 || true
+    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --list-ports | grep -q "$port/udp" || { firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --reload; } >/dev/null 2>&1 || true
     elif command -v iptables >/dev/null 2>&1; then
-        iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
-        command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
+        iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
+        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
+        command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true; }
     fi
+    true
 }
 	
 # "全功能调度器"
 service_ctrl() {
     local action="$1"
-    # 逻辑 A：处理特殊的 restart
-    if [[ "$action" == "restart" ]]; then
-        echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."
-        optimize_system >/dev/null 2>&1 || true; setup_service; 
-		echo "test1"
-		apply_firewall
-		echo "test2"
-        return 0 # 仅退出当前函数，返回到调用处（如 display_links）
-		echo "test3"
-    fi
-    
-    # 逻辑 B：处理 start/stop/status 等常规操作
-    if [ -x "/etc/init.d/sing-box" ]; then 
-        rc-service sing-box "$action"
-    else 
-        systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box
-    fi
-	echo "test4"
+    [[ "$action" == "restart" ]] && { echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."; optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall; return 0; }
+    if [ -x "/etc/init.d/sing-box" ]; then rc-service sing-box "$action"
+    else systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box; fi
 }
 
 # ==========================================
@@ -847,12 +834,12 @@ EOF
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
-		true; set -e; return 0
     else
         err "服务拉起超时，请检查日志："
         [ "$OS" = "alpine" ] && { [ -f /var/log/messages ] && tail -n 10 /var/log/messages || logread | tail -n 10; } || journalctl -u sing-box -n 10 --no-pager 2>/dev/null
         set -e; exit 1
     fi
+	set -e
 }
 
 # ==========================================
