@@ -66,10 +66,8 @@ install_dependencies() {
     case "$PM" in
         apk) info "检测到 Alpine 系统，执行分批安装依赖..."
              apk update >/dev/null 2>&1
-             # 批量去重安装（关键优化点）
              local missing=""; for pkg in $DEPS; do apk info -e "$pkg" >/dev/null || missing="$missing $pkg"; done
              [ -n "$missing" ] && apk add --no-cache $missing || warn "部分组件安装异常"
-             # 可选组件静默安装
              missing=""; for pkg in $OPT; do apk info -e "$pkg" >/dev/null || missing="$missing $pkg"; done
              [ -n "$missing" ] && apk add --no-cache $missing >/dev/null 2>&1 || true
              rm -rf /var/cache/apk/* ;;
