@@ -408,14 +408,13 @@ apply_nic_core_boost() {
 apply_firewall() {
     local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
     [ -z "$port" ] && return 0
-    if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1 || true
-    elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --list-ports | grep -q "$port/udp" || { firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --reload; } >/dev/null 2>&1 || true
-    elif command -v iptables >/dev/null 2>&1; then
-        iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
-        iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
-        command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true; }
-    fi
-    true
+    {   if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
+        elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --list-ports | grep -q "$port/udp" || { firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --reload; } >/dev/null 2>&1
+        elif command -v iptables >/dev/null 2>&1; then
+            iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+            iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+            command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
+        fi   } || true # <--- 只需要在整个逻辑块外面套一个保险，代码更整洁
 }
 	
 # "全功能调度器"
