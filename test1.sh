@@ -886,7 +886,7 @@ display_system_status() {
     echo -e "进程权重: \033[1;33mNice $NI_VAL $NI_LBL\033[0m"
     echo -e "Initcwnd: \033[1;33m$CWND_VAL $CWND_LBL\033[0m"
     echo -e "拥塞控制: \033[1;33m$bbr_display\033[0m"
-    echo -e "优化级别: \033[1;32m${SBOX_OPTIMIZE_LEVEL:-未检测}\033[0m"
+    echo -e "优化级别: \033[1;32m${SBOX_OPTIMIZE_LEVEL:-未检测}\033[0m"  
     echo -e "伪装SNI:  \033[1;33m${RAW_SNI:-未检测}\033[0m"
     echo -e "IPv4地址: \033[1;33m${RAW_IP4:-无}\033[0m"
     echo -e "IPv6地址: \033[1;33m${RAW_IP6:-无}\033[0m"
@@ -947,7 +947,7 @@ warp_manager() {
     }
 
     while true; do
-        local st="\033[1;31m已禁用\033[0m"; _warp_status && st="\033[1;32m已启用\033[0m"
+        local st="[1;31m已禁用[0m"; _warp_status && st="[1;32m已启用[0m"
         echo -e "\n--- WARP 全自动管理 (状态: $st) ---\n1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
@@ -955,7 +955,7 @@ warp_manager() {
                 if _warp_status; then
                     info "正在禁用..."
                     rm -f "$cache"
-                    jq '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | del(.outbounds[]|select(.tag=="warp-out" or .tag=="warp-auto")) | .route.rules |= map(select(.outbound!="warp-out" and .outbound!="warp-auto"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    jq '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | del(.outbounds[]|select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
                     info "执行全自动配置..."
                     get_warp_conf >/dev/null || { sleep 2; continue; }
@@ -966,20 +966,38 @@ warp_manager() {
                 read -r -p "域名: " dom
                 [ -z "$dom" ] && { err "域名不能为空"; sleep 1; continue; }
 
-                local cred pr v6 out auto
+                local cred pr v6 out
                 cred=$(get_warp_conf) || { sleep 2; continue; }
                 pr=$(echo "$cred" | cut -d'|' -f1)
                 v6=$(echo "$cred" | cut -d'|' -f2)
-                out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","detour":"direct-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
+                out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
 
-                auto=$(jq -n '{"type":"urltest","tag":"warp-auto","outbounds":["warp-out","direct-out"],"url":"https://cp.cloudflare.com/generate_204","interval":"10m","tolerance":50}')
-                jq --argjson out "$out" --argjson auto "$auto" --arg dom "$dom" '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | .outbounds |= map(select(.tag!="warp-out" and .tag!="warp-auto")) + [$out,$auto] | if ((.route.rules | map(select(.outbound=="warp-auto" or .outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":[$dom],"outbound":"warp-auto"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-auto" or .outbound=="warp-out") | .outbound) = "warp-auto" | (.route.rules[] | select(.outbound=="warp-auto") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-auto") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf" && service_ctrl restart && succ "已加入(自动回退直连)" && sleep 1 ;;
+                jq --argjson out "$out" --arg dom "$dom" '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | .outbounds |= map(select(.tag!="warp-out")) + [$out] | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":[$dom],"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" || { err "配置生成失败"; sleep 2; continue; }
+
+                if command -v sing-box >/dev/null 2>&1 && ! sing-box check -c "$conf.tmp" >/tmp/sb_warp_check.log 2>&1; then
+                    err "WARP 配置校验失败，已取消应用"
+                    cat /tmp/sb_warp_check.log >&2
+                    rm -f "$conf.tmp"
+                    sleep 2
+                    continue
+                fi
+
+                cp -f "$conf" "$conf.bak" 2>/dev/null || true
+                mv "$conf.tmp" "$conf"
+                if service_ctrl restart; then
+                    succ "已加入"
+                    sleep 1
+                else
+                    err "重启失败，正在回滚到上一个配置"
+                    [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"
+                    service_ctrl restart >/dev/null 2>&1 || true
+                    sleep 2
+                fi ;;
             0) return 0 ;;
             *) err "无效选择" && sleep 2 ;;
         esac
     done
 }
-
 
 # ==========================================
 # 管理脚本生成
