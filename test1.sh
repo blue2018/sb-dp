@@ -47,7 +47,7 @@ detect_os() {
 # 依赖安装 (容错增强版)
 install_dependencies() {
     info "正在检查系统类型..."
-    local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd" OPT="ethtool kmod wireguard-tools"
+    local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd wireguard-tools" OPT="ethtool kmod"
     if command -v apk >/dev/null 2>&1; then PM="apk"; DEPS="$DEPS coreutils util-linux-misc"
     elif command -v apt-get >/dev/null 2>&1; then PM="apt"; DEPS="$DEPS util-linux"
     else PM="yum"; DEPS="${DEPS//netcat-openbsd/nc}"; DEPS="${DEPS//procps/procps-ng} util-linux"; fi
@@ -355,6 +355,7 @@ SINGBOX_QUIC_MAX_CONN_WINDOW=$SINGBOX_QUIC_MAX_CONN_WINDOW
 SINGBOX_UDP_RECVBUF=$buf
 SINGBOX_UDP_SENDBUF=$buf
 VAR_HY2_BW=$VAR_HY2_BW
+ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 EOF
     chmod 644 /etc/sing-box/env
     # === 4. CPU 亲和力优化 (绑定当前脚本到所有可用核心) ===
@@ -910,6 +911,144 @@ display_system_status() {
     echo -e "IPv6地址: \033[1;33m${RAW_IP6:-无}\033[0m"
 }
 
+get_warp_conf() {
+    local cache="/etc/sing-box/warp.json" log="/tmp/warp_debug.log"
+    echo "--- 自动注册 $(date) ---" > "$log"
+    command -v wg >/dev/null || {
+        if command -v apk >/dev/null 2>&1; then
+            apk add --no-cache wireguard-tools >>"$log" 2>&1
+        elif command -v apt-get >/dev/null 2>&1; then
+            apt-get update -y >>"$log" 2>&1 && apt-get install -y --no-install-recommends wireguard-tools >>"$log" 2>&1
+        else
+            $(command -v dnf || echo "yum") install -y wireguard-tools >>"$log" 2>&1
+        fi
+    }
+
+    # 已有可用缓存则直接复用，避免重复注册导致不稳定
+    if [ -s "$cache" ]; then
+        local c_pr c_v6
+        c_pr=$(jq -r '.priv // empty' "$cache" 2>/dev/null || echo "")
+        c_v6=$(jq -r '.v6 // empty' "$cache" 2>/dev/null || echo "")
+        if [ -n "$c_pr" ] && [ -n "$c_v6" ]; then
+            [[ "$c_v6" != */* ]] && c_v6="${c_v6}/128"
+            echo "${c_pr}|${c_v6}"
+            return 0
+        fi
+    fi
+
+    local pr pu res id v6
+    pr=$(wg genkey) && pu=$(echo "$pr" | wg pubkey)
+    local payload
+    payload=$(jq -nc --arg key "$pu" '{"key":$key,"type":"Linux","tos":"2024-09-01T00:00:00.000Z"}')
+    res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" -d "$payload")
+    id=$(echo "$res" | jq -r '.id // .result.id // empty')
+    if [ -n "$id" ] && [ "$id" != "null" ]; then
+        v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
+        [[ "$v6" != */* ]] && v6="${v6}/128"
+        ([ -z "$v6" ] || [ "$v6" == "/128" ]) && v6="2606:4700:110:8283:1102:f37b:af8b:a65d/128"
+        jq -nc --arg priv "$pr" --arg v6 "$v6" '{"priv":$priv,"v6":$v6}' > "$cache"
+        echo "${pr}|${v6}"
+    else
+        echo "API失败: $res" >> "$log" && cat "$log" >&2 && return 1
+    fi
+}
+
+warp_manager() {
+    local conf="/etc/sing-box/config.json"
+    local cache="/etc/sing-box/warp.json"
+
+    _warp_status() {
+        local c_pr c_v6
+        c_pr=$(jq -r '.priv // empty' "$cache" 2>/dev/null || echo "")
+        c_v6=$(jq -r '.v6 // empty' "$cache" 2>/dev/null || echo "")
+        [ -n "$c_pr" ] && [ -n "$c_v6" ]
+    }
+
+    _ensure_warp_outbound() {
+        local cred pr v6 out
+        cred=$(get_warp_conf) || return 1
+        pr=$(echo "$cred" | cut -d'|' -f1)
+        v6=$(echo "$cred" | cut -d'|' -f2)
+        out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
+        jq --argjson out "$out" '(.outbounds //= []) | .outbounds |= map(select(.tag!="warp-out")) + [$out]' "$conf" > "$conf.tmp" || return 1
+        mv "$conf.tmp" "$conf"
+    }
+
+    _list_warp_domains() {
+        jq -r '[.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix[]?] | unique[]' "$conf" 2>/dev/null || true
+    }
+
+    _validate_and_apply() {
+        if command -v sing-box >/dev/null 2>&1 && ! ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true sing-box check -c "$conf" >/tmp/sb_warp_check.log 2>&1; then
+            err "WARP 配置校验失败，正在回滚"
+            cat /tmp/sb_warp_check.log >&2
+            [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"
+            return 1
+        fi
+        if ! service_ctrl restart; then
+            err "重启失败，正在回滚到上一个配置"
+            [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"
+            service_ctrl restart >/dev/null 2>&1 || true
+            return 1
+        fi
+        return 0
+    }
+
+    while true; do
+        local st="[1;31m已禁用[0m"; _warp_status && st="[1;32m已启用[0m"
+        echo -e "
+--- WARP 全自动管理 (状态: $st) ---
+1. 启用/禁用 WARP
+2. 分流域名管理
+0. 返回主菜单"
+        read -r -p "请选择 [0-2]: " wc
+        case "$wc" in
+            1)
+                cp -f "$conf" "$conf.bak" 2>/dev/null || true
+                if _warp_status; then
+                    info "正在禁用..."
+                    rm -f "$cache"
+                    jq '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | del(.outbounds[]|select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                else
+                    info "执行全自动配置..."
+                    get_warp_conf >/dev/null || { sleep 2; continue; }
+                fi
+                _validate_and_apply && succ "操作完成" && info "默认不改流量路径；仅在分流域名管理中配置后，指定域名才会走 WARP"
+                sleep 1 ;;
+            2)
+                _warp_status || { err "请先启用 WARP"; sleep 2; continue; }
+                while true; do
+                    echo -e "
+当前分流域名列表:"
+                    local domains
+                    domains=$(_list_warp_domains)
+                    if [ -z "$domains" ]; then
+                        echo "(空)"
+                    else
+                        echo "$domains" | nl -w2 -s'. '
+                    fi
+                    read -r -p "输入域名(存在=删除，不存在=添加；回车返回): " dom
+                    [ -z "$dom" ] && break
+
+                    cp -f "$conf" "$conf.bak" 2>/dev/null || true
+                    _ensure_warp_outbound || { err "WARP 出站构建失败"; [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"; sleep 2; continue; }
+
+                    if jq -e --arg dom "$dom" '[.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix[]?] | index($dom) != null' "$conf" >/dev/null 2>&1; then
+                        jq --arg dom "$dom" '(.route //= {}) | (.route.rules //= []) | (.route.rules |= map(if .outbound=="warp-out" then (.domain_suffix = ((.domain_suffix // []) - [$dom])) else . end)) | (.route.rules |= map(select(.outbound!="warp-out" or ((.domain_suffix // []) | length > 0))))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                        _validate_and_apply && succ "已删除: $dom"
+                    else
+                        jq --arg dom "$dom" '(.route //= {}) | (.route.rules //= []) | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":[$dom],"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                        _validate_and_apply && succ "已添加: $dom"
+                    fi
+                    sleep 1
+                done ;;
+            0) return 0 ;;
+            *) err "无效选择" && sleep 2 ;;
+        esac
+    done
+}
+
+
 # ==========================================
 # 管理脚本生成 (最终固化放行版)
 # ==========================================
@@ -948,7 +1087,7 @@ EOF
         get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard
         optimize_system install_singbox create_config setup_service apply_firewall service_ctrl info err warn succ
         apply_userspace_adaptive_profile apply_nic_core_boost
-        setup_zrm_swap safe_rtt generate_cert)
+        get_warp_conf warp_manager setup_zrm_swap safe_rtt generate_cert)
 
     for f in "${funcs[@]}"; do
         if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
@@ -992,12 +1131,13 @@ while true; do
     echo " Level: ${SBOX_OPTIMIZE_LEVEL:-未知} | Plan: $([[ "$INITCWND_DONE" == "true" ]] && echo "Initcwnd 15" || echo "应用层补偿")"
     echo "-------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
-    echo "4. 更新内核    5. 重启服务    6. 卸载脚本"
+    echo "4. 更新内核    5. 重启服务    6. warp管理"
+    echo "7. 卸载脚本"
     echo "0. 退出"
     echo ""  
-    read -r -p "请选择 [0-6]: " opt
+    read -r -p "请选择 [0-7]: " opt
     opt=$(echo "$opt" | xargs echo -n 2>/dev/null || echo "$opt")
-    if [[ -z "$opt" ]] || [[ ! "$opt" =~ ^[0-6]$ ]]; then
+    if [[ -z "$opt" ]] || [[ ! "$opt" =~ ^[0-7]$ ]]; then
         echo -e "\033[1;31m输入有误 [$opt]，请重新输入\033[0m"; sleep 1; continue
     fi
     case "$opt" in
@@ -1010,7 +1150,8 @@ while true; do
         3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+        6) warp_manager ;;
+        7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
            if [ "${cf:-n}" = "y" ] || [ "${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
                systemctl stop sing-box zram-swap 2>/dev/null; rc-service sing-box stop 2>/dev/null
