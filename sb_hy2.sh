@@ -162,9 +162,8 @@ get_network_info() {
     rm -f "$t4" "$t6"
     # 状态判定：只有 RAW_IP6 真的包含冒号才判定 IPv6 可用
     [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true" || IS_V6_OK="false"
-    # 错误退出判断
     [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "错误: 未能探测到任何有效的公网 IP，安装中断"; exit 1; }
-    # 原有输出信息保持不变
+    # 输出信息
     [ -n "$RAW_IP4" ] && succ "IPv4: $RAW_IP4 [✔]" || info "IPv4: 不可用 (单栈 IPv6 环境)"
     [ "$IS_V6_OK" = "true" ] && succ "IPv6: $RAW_IP6 [✔]" || info "IPv6: 不可用 (单栈 IPv4 环境)"
 }
