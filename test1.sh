@@ -1009,7 +1009,7 @@ warp_manager() {
                     else
                         echo "$domains" | nl -w2 -s'. '
                     fi
-                    read -r -p "输入域名(存在=删除，不存在=添加；回车返回): " dom
+                    read -r -p "输入域名(存在则删除，不存在则添加)，或回车返回: " dom
                     [ -z "$dom" ] && break
 
                     cp -f "$conf" "$conf.bak" 2>/dev/null || true
