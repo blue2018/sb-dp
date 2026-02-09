@@ -961,6 +961,19 @@ warp_manager() {
         jq -r '[.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix[]?] | unique[]' "$conf" 2>/dev/null || true
     }
 
+    _ensure_warp_env() {
+        mkdir -p /etc/sing-box
+        [ -f /etc/sing-box/env ] || touch /etc/sing-box/env
+        grep -q '^ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true$' /etc/sing-box/env 2>/dev/null || echo 'ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true' >> /etc/sing-box/env
+    }
+
+    _seed_default_domains() {
+        local defaults_json
+        defaults_json=$(printf '%s
+' "${default_domains[@]}" | jq -R . | jq -s .)
+        jq --argjson defs "$defaults_json" '(.route //= {}) | (.route.rules //= []) | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":$defs,"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += $defs | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+    }
+
     _validate_and_apply() {
         if command -v sing-box >/dev/null 2>&1 && ! ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true sing-box check -c "$conf" >/tmp/sb_warp_check.log 2>&1; then
             err "WARP 配置校验失败，正在回滚"
@@ -995,12 +1008,12 @@ warp_manager() {
                     _validate_and_apply && succ "操作完成"
                 else
                     info "执行全自动配置..."
-                    get_warp_conf >/dev/null || { sleep 2; continue; }
-                    # 启用时主动清理残留的 warp 路由，确保不影响现有节点
-                    jq '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | del(.outbounds[]|select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                    _ensure_warp_env
+                    _ensure_warp_outbound || { err "WARP 出站构建失败"; [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"; sleep 2; continue; }
+                    _seed_default_domains || { err "默认分流域名注入失败"; [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"; sleep 2; continue; }
                     _validate_and_apply && succ "操作完成"
                 fi
-                info "默认不改流量路径；仅在分流域名管理中配置后，指定域名才会走 WARP"
+                info "WARP 已启用时默认包含常见分流域名，可在分流域名管理中按需增删"
                 sleep 1 ;;
             2)
                 _warp_status || { err "请先启用 WARP"; sleep 2; continue; }
@@ -1018,16 +1031,14 @@ warp_manager() {
                     [ -z "$dom" ] && break
 
                     cp -f "$conf" "$conf.bak" 2>/dev/null || true
+                    _ensure_warp_env
                     _ensure_warp_outbound || { err "WARP 出站构建失败"; [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"; sleep 2; continue; }
 
                     if jq -e --arg dom "$dom" '[.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix[]?] | index($dom) != null' "$conf" >/dev/null 2>&1; then
                         jq --arg dom "$dom" '(.route //= {}) | (.route.rules //= []) | (.route.rules |= map(if .outbound=="warp-out" then (.domain_suffix = ((.domain_suffix // []) - [$dom])) else . end)) | (.route.rules |= map(select(.outbound!="warp-out" or ((.domain_suffix // []) | length > 0))))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                         _validate_and_apply && succ "已删除: $dom"
                     else
-                        local defaults_json
-                        defaults_json=$(printf '%s
-' "${default_domains[@]}" | jq -R . | jq -s .)
-                        jq --arg dom "$dom" --argjson defs "$defaults_json" '(.route //= {}) | (.route.rules //= []) | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":($defs + [$dom] | unique),"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
+                        jq --arg dom "$dom" '(.route //= {}) | (.route.rules //= []) | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":[$dom],"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                         _validate_and_apply && succ "已添加: $dom"
                     fi
                     sleep 1
