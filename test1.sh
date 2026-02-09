@@ -47,6 +47,7 @@ detect_os() {
 # 依赖安装 (容错增强版)
 install_dependencies() {
     info "正在检查系统类型..."
+    local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd" OPT="ethtool kmod wireguard-tools"
     local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd wireguard-tools" OPT="ethtool kmod"
     if command -v apk >/dev/null 2>&1; then PM="apk"; DEPS="$DEPS coreutils util-linux-misc"
     elif command -v apt-get >/dev/null 2>&1; then PM="apt"; DEPS="$DEPS util-linux"
@@ -155,6 +156,7 @@ get_network_info() {
         curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api.ipify.org" || \
         curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://ifconfig.me" || echo ""
     }
+    # 并发执行
     _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
     # 数据清洗
     [ -s "$t4" ] && RAW_IP4=$(tr -d '[:space:]' < "$t4" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || echo "")
@@ -164,7 +166,7 @@ get_network_info() {
     [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true" || IS_V6_OK="false"
     # 错误退出判断
     [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "错误: 未能探测到任何有效的公网 IP，安装中断"; exit 1; }
-    # 输出信息
+    # 原有输出信息保持不变
     [ -n "$RAW_IP4" ] && succ "IPv4: $RAW_IP4 [✔]" || info "IPv4: 不可用 (单栈 IPv6 环境)"
     [ "$IS_V6_OK" = "true" ] && succ "IPv6: $RAW_IP6 [✔]" || info "IPv6: 不可用 (单栈 IPv4 环境)"
 }
@@ -354,7 +356,6 @@ SINGBOX_QUIC_MAX_CONN_WINDOW=$SINGBOX_QUIC_MAX_CONN_WINDOW
 SINGBOX_UDP_RECVBUF=$buf
 SINGBOX_UDP_SENDBUF=$buf
 VAR_HY2_BW=$VAR_HY2_BW
-ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true
 EOF
     chmod 644 /etc/sing-box/env
     # === 4. CPU 亲和力优化 (绑定当前脚本到所有可用核心) ===
@@ -617,49 +618,47 @@ SYSCTL
 # 安装/更新 Sing-box 内核
 # ==========================================
 install_singbox() {
-    # 1. 初始化：TD 去掉 local 确保全局可见，防止 set -u 报错；其余变量保持局部化
-    TD="/var/tmp/sb_build"; local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub" TF="$TD/sb.tar.gz" dl_ok=false best_link="" SBOX_ARCH="${SBOX_ARCH:-amd64}"
+    # 1. 初始化所有变量：将路径从内存 /tmp 移至磁盘 /var/tmp (内存避震)
+    local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub" FILE="" URL="" TD="/var/tmp/sb_build" TF="" dl_ok=false RJ="" best_link="" LINK="" NEW_BIN="" VER="" SBOX_ARCH="${SBOX_ARCH:-amd64}"
     [ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
+    
     info "获取 Sing-Box 最新版本信息..."
-    RJ=$(curl -sL --connect-timeout 10 --max-time 15 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null || echo "")
-    LATEST_TAG=$(echo "$RJ" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9.]+"' | head -n1 | cut -d'"' -f4 || echo "")
-    [ -z "$LATEST_TAG" ] && { DOWNLOAD_SOURCE="官方镜像"; LATEST_TAG=$(curl -sL --connect-timeout 10 "https://sing-box.org/" 2>/dev/null | grep -oE 'v1\.[0-9]+\.[0-9]+' | head -n1 || echo ""); }
-    [ -z "$LATEST_TAG" ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "远程获取失败，保持 v$LOCAL_VER"; return 0; } || { err "获取版本失败"; exit 1; }; }
+    RJ=$(curl -sL --connect-timeout 10 --max-time 15 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null)
+    [ -n "$RJ" ] && LATEST_TAG=$(echo "$RJ" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9.]+"' | head -n1 | cut -d'"' -f4)
+    [ -z "$LATEST_TAG" ] && { DOWNLOAD_SOURCE="官方镜像"; LATEST_TAG=$(curl -sL --connect-timeout 10 "https://sing-box.org/" 2>/dev/null | grep -oE 'v1\.[0-9]+\.[0-9]+' | head -n1); }
+    [ -z "$LATEST_TAG" ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "远程获取失败，保持 v$LOCAL_VER"; return 0; } || { err "获取版本失败，请检查网络"; exit 1; }; }
     local REMOTE_VER="${LATEST_TAG#v}"
     if [[ "$MODE" == "update" ]]; then
-        echo -e "---------------------------------\n当前已装版本: \033[1;33m${LOCAL_VER}\033[0m\n官方最新版本: \033[1;32m${REMOTE_VER}\033[0m (源: $DOWNLOAD_SOURCE)\n---------------------------------"
+        echo -e "---------------------------------"
+        echo -e "当前已装版本: \033[1;33m${LOCAL_VER}\033[0m"
+        echo -e "官方最新版本: \033[1;32m${REMOTE_VER}\033[0m (源: $DOWNLOAD_SOURCE)"
+        echo -e "---------------------------------"
         [[ "$LOCAL_VER" == "$REMOTE_VER" ]] && { succ "内核已是最新版本"; return 1; }
         info "发现新版本，开始下载更新..."
     fi
-
-    # 2. 强化并行探测逻辑
-    local FILE="sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"
-    local URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}"
-    rm -rf "$TD" && mkdir -p "$TD" && local LINKS=("$URL" "https://ghproxy.net/$URL" "https://kkgh.tk/$URL" "https://gh.ddlc.top/$URL" "https://gh-proxy.com/$URL")
+    # 2. 后台并行探测模式
+    FILE="sing-box-${REMOTE_VER}-linux-${SBOX_ARCH}.tar.gz"; URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_TAG}/${FILE}"
+    rm -rf "$TD" && mkdir -p "$TD" && TF="$TD/sb.tar.gz"; local LINKS=("$URL" "https://ghproxy.net/$URL" "https://kkgh.tk/$URL" "https://gh.ddlc.top/$URL" "https://gh-proxy.com/$URL")
     info "正在筛选最优下载节点 (并行模式)..."
-    for LINK in "${LINKS[@]}"; do (curl -Is --connect-timeout 4 --max-time 6 "$LINK" 2>/dev/null | grep -q "200 OK" && echo "$LINK" >> "$TD/nodes") & done
-    wait
-    best_link=$( [ -s "$TD/nodes" ] && head -n1 "$TD/nodes" || echo "${LINKS[0]}" )
+    for LINK in "${LINKS[@]}"; do (curl -Is --connect-timeout 4 --max-time 6 "$LINK" | grep -q "200 OK" && echo "$LINK" > "$TD/best_node") & done
+    wait # 等待所有后台进程
+    best_link=$( [ -f "$TD/best_node" ] && head -n1 "$TD/best_node" || echo "${LINKS[0]}" )
     
     # 3. 稳健下载逻辑
     info "选定节点: $(echo "$best_link" | cut -d'/' -f3)，启动下载..."
-    { curl -fkL --connect-timeout 15 --retry 2 "$best_link" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 5000000 ]; } && dl_ok=true || {
-        warn "首选源失效，遍历备用源..."; for LINK in "${LINKS[@]}"; do
-            info "尝试源: $(echo "$LINK" | cut -d'/' -f3)..."
-            curl -fkL --connect-timeout 10 --max-time 60 "$LINK" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 5000000 ] && { dl_ok=true; break; }
-        done
+    { curl -fkL -C - --connect-timeout 15 --retry 3 --retry-delay 2 "$best_link" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 8000000 ]; } && dl_ok=true || {
+        warn "首选源体积异常或下载失败，尝试遍历备用源..."
+        for LINK in "${LINKS[@]}"; do info "尝试源: $(echo "$LINK" | cut -d'/' -f3)..."; curl -fkL --connect-timeout 10 --max-time 60 "$LINK" -o "$TF" && [ "$(stat -c%s "$TF" 2>/dev/null || echo 0)" -gt 8000000 ] && { dl_ok=true; break; }; done
     }
     [ "$dl_ok" = false ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "所有源失效，保留旧版"; rm -rf "$TD"; return 0; } || { err "下载失败"; exit 1; }; }
 
-    # 4. 覆盖安装：先删后移防二进制忙
-    info "正在解压并准备安装内核..."
-    { tar -xf "$TF" -C "$TD" >/dev/null 2>&1 && NEW_BIN=$(find "$TD" -type f -name "sing-box" | head -n1); } || { rm -rf "$TD"; err "解压失败"; return 1; }
+    # 4. 优化解压与安装：拒绝自杀式中断 (防 SSH 断开)
+    info "正在解压并准备安装内核..."; tar -xf "$TF" -C "$TD" >/dev/null 2>&1 && NEW_BIN=$(find "$TD" -type f -name "sing-box" | head -n1)
     if [ -f "$NEW_BIN" ]; then
-        chmod 755 "$NEW_BIN" && rm -f /usr/bin/sing-box && mv -f "$NEW_BIN" /usr/bin/sing-box
-        pgrep -x sing-box >/dev/null && { info "热重启服务中..."; service_ctrl restart >/dev/null 2>&1 || { service_ctrl stop; sleep 1; service_ctrl start; }; }
-        local VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
-        rm -rf "$TD" && succ "内核安装成功: v$VER"
-    else rm -rf "$TD" && err "校验失败：二进制文件缺失" && return 1; fi
+        chmod 755 "$NEW_BIN" && cp -f "$NEW_BIN" /usr/bin/sing-box
+        pgrep -x sing-box >/dev/null && { info "正在热重启服务以完成更新..."; service_ctrl restart || { service_ctrl stop; sleep 1; service_ctrl start; }; }
+        rm -rf "$TD" && VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}') && succ "内核安装成功: v$VER"
+    else rm -rf "$TD" && err "解压校验失败：未找到二进制文件" && return 1; fi
 }
 
 # ==========================================
@@ -887,7 +886,7 @@ display_system_status() {
     echo -e "进程权重: \033[1;33mNice $NI_VAL $NI_LBL\033[0m"
     echo -e "Initcwnd: \033[1;33m$CWND_VAL $CWND_LBL\033[0m"
     echo -e "拥塞控制: \033[1;33m$bbr_display\033[0m"
-    echo -e "优化级别: \033[1;32m${SBOX_OPTIMIZE_LEVEL:-未检测}\033[0m"
+    echo -e "优化级别: \033[1;32m${SBOX_OPTIMIZE_LEVEL:-未检测}\033[0m"  
     echo -e "伪装SNI:  \033[1;33m${RAW_SNI:-未检测}\033[0m"
     echo -e "IPv4地址: \033[1;33m${RAW_IP4:-无}\033[0m"
     echo -e "IPv6地址: \033[1;33m${RAW_IP6:-无}\033[0m"
@@ -938,85 +937,62 @@ get_warp_conf() {
 warp_manager() {
     local conf="/etc/sing-box/config.json"
     local cache="/etc/sing-box/warp.json"
-    local domain_store="/etc/sing-box/warp_domains.list"
-    local default_domains=("google.com" "youtube.com" "openai.com" "chatgpt.com" "netflix.com" "cloudflare.com")
 
-    _warp_ready() {
+    _warp_status() {
+        # 仅把“已启用”定义为：存在可用凭据（不修改转发路径，适配虚拟化小鸡）
         local c_pr c_v6
         c_pr=$(jq -r '.priv // empty' "$cache" 2>/dev/null || echo "")
         c_v6=$(jq -r '.v6 // empty' "$cache" 2>/dev/null || echo "")
         [ -n "$c_pr" ] && [ -n "$c_v6" ]
     }
 
-    _warp_active() {
-        jq -e '((.outbounds // []) | any(.tag=="warp-out" and .type=="wireguard")) and ((.route.rules // []) | any(.outbound=="warp-out"))' "$conf" >/dev/null 2>&1
-    }
-
-    _list_warp_domains() {
-        if [ -s "$domain_store" ]; then
-            sort -u "$domain_store"
-        else
-            printf '%s
-' "${default_domains[@]}" | sort -u
-        fi
-    }
-
-    _seed_default_domains() {
-        mkdir -p /etc/sing-box
-        if [ ! -s "$domain_store" ]; then
-            printf '%s
-' "${default_domains[@]}" | sort -u > "$domain_store"
-        fi
-    }
-
     while true; do
-        local st="[1;31m已禁用[0m"; _warp_active && st="[1;32m已启用(已接管分流)[0m" || { _warp_ready && st="[1;33m已准备(未接管流量)[0m"; }
-        echo -e "
---- WARP 全自动管理 (状态: $st) ---
-1. 启用/禁用 WARP
-2. 分流域名管理
-0. 返回主菜单"
+        local st="[1;31m已禁用[0m"; _warp_status && st="[1;32m已启用[0m"
+        echo -e "\n--- WARP 全自动管理 (状态: $st) ---\n1. 启用/禁用 WARP\n2. 添加分流域名\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
             1)
-                if _warp_ready; then
+                if _warp_status; then
                     info "正在禁用..."
-                    rm -f "$cache" "$domain_store"
-                    succ "WARP 已禁用 (用户态安全模式：未改动当前转发)"
+                    rm -f "$cache"
+                    jq '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | del(.outbounds[]|select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
                 else
                     info "执行全自动配置..."
                     get_warp_conf >/dev/null || { sleep 2; continue; }
-                    _seed_default_domains
-                    succ "WARP 已准备 (用户态安全模式)"
-                    info "默认分流域名已就绪；当前为用户态准备状态，不代表 Cloudflare 显示 warp=on"
                 fi
-                sleep 1 ;;
+                service_ctrl restart && succ "操作完成" && info "默认不改流量路径；仅在添加分流域名后，相关域名才会走 WARP" && sleep 1 ;;
             2)
-                _warp_ready || { err "请先启用 WARP"; sleep 2; continue; }
-                _seed_default_domains
-                while true; do
-                    echo -e "
-当前分流域名列表:"
-                    local domains
-                    domains=$(_list_warp_domains)
-                    if [ -z "$domains" ]; then
-                        echo "(空)"
-                    else
-                        echo "$domains" | nl -w2 -s'. '
-                    fi
-                    read -r -p "输入域名(存在=删除，不存在=添加；回车返回): " dom
-                    [ -z "$dom" ] && break
+                _warp_status || { err "请先启用 WARP"; sleep 2; continue; }
+                read -r -p "域名: " dom
+                [ -z "$dom" ] && { err "域名不能为空"; sleep 1; continue; }
 
-                    if grep -Fxq "$dom" "$domain_store" 2>/dev/null; then
-                        grep -Fxv "$dom" "$domain_store" > "$domain_store.tmp" && mv "$domain_store.tmp" "$domain_store"
-                        succ "已删除: $dom"
-                    else
-                        echo "$dom" >> "$domain_store"
-                        sort -u "$domain_store" -o "$domain_store"
-                        succ "已添加: $dom"
-                    fi
+                local cred pr v6 out
+                cred=$(get_warp_conf) || { sleep 2; continue; }
+                pr=$(echo "$cred" | cut -d'|' -f1)
+                v6=$(echo "$cred" | cut -d'|' -f2)
+                out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
+
+                jq --argjson out "$out" --arg dom "$dom" '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | .outbounds |= map(select(.tag!="warp-out")) + [$out] | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":[$dom],"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" || { err "配置生成失败"; sleep 2; continue; }
+
+                if command -v sing-box >/dev/null 2>&1 && ! ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true sing-box check -c "$conf.tmp" >/tmp/sb_warp_check.log 2>&1; then
+                    err "WARP 配置校验失败，已取消应用"
+                    cat /tmp/sb_warp_check.log >&2
+                    rm -f "$conf.tmp"
+                    sleep 2
+                    continue
+                fi
+
+                cp -f "$conf" "$conf.bak" 2>/dev/null || true
+                mv "$conf.tmp" "$conf"
+                if service_ctrl restart; then
+                    succ "已加入"
                     sleep 1
-                done ;;
+                else
+                    err "重启失败，正在回滚到上一个配置"
+                    [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"
+                    service_ctrl restart >/dev/null 2>&1 || true
+                    sleep 2
+                fi ;;
             0) return 0 ;;
             *) err "无效选择" && sleep 2 ;;
         esac
@@ -1123,7 +1099,7 @@ while true; do
         3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-        6) warp_manager ;;
+		6) warp_manager ;;
         7) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
            if [ "${cf:-n}" = "y" ] || [ "${cf:-n}" = "Y" ]; then
                info "正在执行深度卸载..."
