@@ -941,11 +941,15 @@ warp_manager() {
     local domain_store="/etc/sing-box/warp_domains.list"
     local default_domains=("google.com" "youtube.com" "openai.com" "chatgpt.com" "netflix.com" "cloudflare.com")
 
-    _warp_status() {
+    _warp_ready() {
         local c_pr c_v6
         c_pr=$(jq -r '.priv // empty' "$cache" 2>/dev/null || echo "")
         c_v6=$(jq -r '.v6 // empty' "$cache" 2>/dev/null || echo "")
         [ -n "$c_pr" ] && [ -n "$c_v6" ]
+    }
+
+    _warp_active() {
+        jq -e '((.outbounds // []) | any(.tag=="warp-out" and .type=="wireguard")) and ((.route.rules // []) | any(.outbound=="warp-out"))' "$conf" >/dev/null 2>&1
     }
 
     _list_warp_domains() {
@@ -966,7 +970,7 @@ warp_manager() {
     }
 
     while true; do
-        local st="[1;31m已禁用[0m"; _warp_status && st="[1;32m已启用[0m"
+        local st="[1;31m已禁用[0m"; _warp_active && st="[1;32m已启用(已接管分流)[0m" || { _warp_ready && st="[1;33m已准备(未接管流量)[0m"; }
         echo -e "
 --- WARP 全自动管理 (状态: $st) ---
 1. 启用/禁用 WARP
@@ -975,7 +979,7 @@ warp_manager() {
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
             1)
-                if _warp_status; then
+                if _warp_ready; then
                     info "正在禁用..."
                     rm -f "$cache" "$domain_store"
                     succ "WARP 已禁用 (用户态安全模式：未改动当前转发)"
@@ -983,12 +987,12 @@ warp_manager() {
                     info "执行全自动配置..."
                     get_warp_conf >/dev/null || { sleep 2; continue; }
                     _seed_default_domains
-                    succ "WARP 已启用 (用户态安全模式)"
-                    info "默认分流域名已就绪；当前不自动接管转发，避免虚拟化小鸡断流"
+                    succ "WARP 已准备 (用户态安全模式)"
+                    info "默认分流域名已就绪；当前为用户态准备状态，不代表 Cloudflare 显示 warp=on"
                 fi
                 sleep 1 ;;
             2)
-                _warp_status || { err "请先启用 WARP"; sleep 2; continue; }
+                _warp_ready || { err "请先启用 WARP"; sleep 2; continue; }
                 _seed_default_domains
                 while true; do
                     echo -e "
@@ -1000,7 +1004,7 @@ warp_manager() {
                     else
                         echo "$domains" | nl -w2 -s'. '
                     fi
-                    read -r -p "输入域名(不存在则添加，已存在则删除)，回车返回: " dom
+                    read -r -p "输入域名(存在=删除，不存在=添加；回车返回): " dom
                     [ -z "$dom" ] && break
 
                     if grep -Fxq "$dom" "$domain_store" 2>/dev/null; then
