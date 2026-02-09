@@ -938,6 +938,7 @@ get_warp_conf() {
 warp_manager() {
     local conf="/etc/sing-box/config.json"
     local cache="/etc/sing-box/warp.json"
+    local domain_store="/etc/sing-box/warp_domains.list"
     local default_domains=("google.com" "youtube.com" "openai.com" "chatgpt.com" "netflix.com" "cloudflare.com")
 
     _warp_status() {
@@ -947,47 +948,21 @@ warp_manager() {
         [ -n "$c_pr" ] && [ -n "$c_v6" ]
     }
 
-    _ensure_warp_outbound() {
-        local cred pr v6 out
-        cred=$(get_warp_conf) || return 1
-        pr=$(echo "$cred" | cut -d'|' -f1)
-        v6=$(echo "$cred" | cut -d'|' -f2)
-        out=$(jq -n --arg pr "$pr" --arg v6 "$v6" '{"type":"wireguard","tag":"warp-out","server":"162.159.192.1","server_port":2408,"local_address":["172.16.0.2/32",$v6],"private_key":$pr,"peer_public_key":"bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=","mtu":1120}')
-        jq --argjson out "$out" '(.outbounds //= []) | .outbounds |= map(select(.tag!="warp-out")) + [$out]' "$conf" > "$conf.tmp" || return 1
-        mv "$conf.tmp" "$conf"
-    }
-
     _list_warp_domains() {
-        jq -r '[.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix[]?] | unique[]' "$conf" 2>/dev/null || true
-    }
-
-    _ensure_warp_env() {
-        mkdir -p /etc/sing-box
-        [ -f /etc/sing-box/env ] || touch /etc/sing-box/env
-        grep -q '^ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true$' /etc/sing-box/env 2>/dev/null || echo 'ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true' >> /etc/sing-box/env
+        if [ -s "$domain_store" ]; then
+            sort -u "$domain_store"
+        else
+            printf '%s
+' "${default_domains[@]}" | sort -u
+        fi
     }
 
     _seed_default_domains() {
-        local defaults_json
-        defaults_json=$(printf '%s
-' "${default_domains[@]}" | jq -R . | jq -s .)
-        jq --argjson defs "$defaults_json" '(.route //= {}) | (.route.rules //= []) | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":$defs,"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += $defs | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
-    }
-
-    _validate_and_apply() {
-        if command -v sing-box >/dev/null 2>&1 && ! ENABLE_DEPRECATED_WIREGUARD_OUTBOUND=true sing-box check -c "$conf" >/tmp/sb_warp_check.log 2>&1; then
-            err "WARP 配置校验失败，正在回滚"
-            cat /tmp/sb_warp_check.log >&2
-            [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"
-            return 1
+        mkdir -p /etc/sing-box
+        if [ ! -s "$domain_store" ]; then
+            printf '%s
+' "${default_domains[@]}" | sort -u > "$domain_store"
         fi
-        if ! service_ctrl restart; then
-            err "重启失败，正在回滚到上一个配置"
-            [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"
-            service_ctrl restart >/dev/null 2>&1 || true
-            return 1
-        fi
-        return 0
     }
 
     while true; do
@@ -1000,23 +975,21 @@ warp_manager() {
         read -r -p "请选择 [0-2]: " wc
         case "$wc" in
             1)
-                cp -f "$conf" "$conf.bak" 2>/dev/null || true
                 if _warp_status; then
                     info "正在禁用..."
-                    rm -f "$cache"
-                    jq '(.outbounds //= []) | (.route //= {}) | (.route.rules //= []) | del(.outbounds[]|select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
-                    _validate_and_apply && succ "操作完成"
+                    rm -f "$cache" "$domain_store"
+                    succ "WARP 已禁用 (用户态安全模式：未改动当前转发)"
                 else
                     info "执行全自动配置..."
-                    _ensure_warp_env
-                    _ensure_warp_outbound || { err "WARP 出站构建失败"; [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"; sleep 2; continue; }
-                    _seed_default_domains || { err "默认分流域名注入失败"; [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"; sleep 2; continue; }
-                    _validate_and_apply && succ "操作完成"
+                    get_warp_conf >/dev/null || { sleep 2; continue; }
+                    _seed_default_domains
+                    succ "WARP 已启用 (用户态安全模式)"
+                    info "默认分流域名已就绪；当前不自动接管转发，避免虚拟化小鸡断流"
                 fi
-                info "WARP 已启用时默认包含常见分流域名，可在分流域名管理中按需增删"
                 sleep 1 ;;
             2)
                 _warp_status || { err "请先启用 WARP"; sleep 2; continue; }
+                _seed_default_domains
                 while true; do
                     echo -e "
 当前分流域名列表:"
@@ -1027,19 +1000,16 @@ warp_manager() {
                     else
                         echo "$domains" | nl -w2 -s'. '
                     fi
-                    read -r -p "输入域名(存在=删除，不存在=添加；回车返回): " dom
+                    read -r -p "输入域名(不存在则添加，已存在则删除)，回车返回: " dom
                     [ -z "$dom" ] && break
 
-                    cp -f "$conf" "$conf.bak" 2>/dev/null || true
-                    _ensure_warp_env
-                    _ensure_warp_outbound || { err "WARP 出站构建失败"; [ -f "$conf.bak" ] && cp -f "$conf.bak" "$conf"; sleep 2; continue; }
-
-                    if jq -e --arg dom "$dom" '[.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix[]?] | index($dom) != null' "$conf" >/dev/null 2>&1; then
-                        jq --arg dom "$dom" '(.route //= {}) | (.route.rules //= []) | (.route.rules |= map(if .outbound=="warp-out" then (.domain_suffix = ((.domain_suffix // []) - [$dom])) else . end)) | (.route.rules |= map(select(.outbound!="warp-out" or ((.domain_suffix // []) | length > 0))))' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
-                        _validate_and_apply && succ "已删除: $dom"
+                    if grep -Fxq "$dom" "$domain_store" 2>/dev/null; then
+                        grep -Fxv "$dom" "$domain_store" > "$domain_store.tmp" && mv "$domain_store.tmp" "$domain_store"
+                        succ "已删除: $dom"
                     else
-                        jq --arg dom "$dom" '(.route //= {}) | (.route.rules //= []) | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0) then .route.rules = [{"domain_suffix":[$dom],"outbound":"warp-out"}] + .route.rules else (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique end' "$conf" > "$conf.tmp" && mv "$conf.tmp" "$conf"
-                        _validate_and_apply && succ "已添加: $dom"
+                        echo "$dom" >> "$domain_store"
+                        sort -u "$domain_store" -o "$domain_store"
+                        succ "已添加: $dom"
                     fi
                     sleep 1
                 done ;;
