@@ -1121,8 +1121,7 @@ while true; do
     echo "-------------------------------------------------"
     echo "1. 查看信息    2. 修改配置    3. 重置端口"
     echo "4. 更新内核    5. 重启服务    6. warp管理"
-    echo "7. 卸载脚本"
-    echo "0. 退出"
+    echo "7. 卸载脚本    0. 退出"
     echo ""  
     read -r -p "请选择 [0-7]: " opt
     opt=$(echo "$opt" | xargs echo -n 2>/dev/null || echo "$opt")
