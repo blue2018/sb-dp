@@ -428,18 +428,22 @@ apply_firewall() {
     local hy2_port=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
     local vless_port=$(jq -r '.inbounds[] | select(.type=="vless") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
     _do_rule() {
-        local p="$1"
-        local proto="$2"
-        [ -z "$p" ] && return 0
-        if command -v ufw >/dev/null 2>&1; then ufw allow "$p"/"$proto" >/dev/null 2>&1
-        elif command -v firewall-cmd >/dev/null 2>&1; then 
-            firewall-cmd --list-ports | grep -q "$p/$proto" || { firewall-cmd --add-port="$p"/"$proto" --permanent; firewall-cmd --reload; } >/dev/null 2>&1
-        elif command -v iptables >/dev/null 2>&1; then
-            iptables -D INPUT -p "$proto" --dport "$p" -j ACCEPT >/dev/null 2>&1
-            iptables -I INPUT -p "$proto" --dport "$p" -j ACCEPT >/dev/null 2>&1
-            command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p "$proto" --dport "$p" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p "$proto" --dport "$p" -j ACCEPT >/dev/null 2>&1; }
-        fi
-    }
+	    local p="$1" proto="$2"
+	    [ -z "$p" ] && { warn "端口为空，跳过防火墙规则"; return 1; }
+	    
+	    if command -v ufw >/dev/null 2>&1; then
+	        ufw allow "$p"/"$proto" comment "sing-box" >/dev/null 2>&1
+	    elif command -v firewall-cmd >/dev/null 2>&1; then 
+	        firewall-cmd --permanent --add-port="$p"/"$proto" >/dev/null 2>&1
+	        firewall-cmd --reload >/dev/null 2>&1
+	    elif command -v iptables >/dev/null 2>&1; then
+	        # 先清理旧规则
+	        iptables -D INPUT -p "$proto" --dport "$p" -j ACCEPT 2>/dev/null
+	        iptables -I INPUT 1 -p "$proto" --dport "$p" -j ACCEPT
+	        [ "$proto" = "udp" ] && ip6tables -I INPUT 1 -p "$proto" --dport "$p" -j ACCEPT 2>/dev/null
+	    fi
+	    succ "防火墙已放行 $proto/$p"
+	}
     _do_rule "$hy2_port" "udp" || true
     _do_rule "$vless_port" "tcp" || true
 }
@@ -741,6 +745,7 @@ create_config() {
     local ech_priv=$(echo "$ech_output" | grep "Private key" | awk '{print $3}')
     local ech_pub=$(echo "$ech_output" | grep "Public key" | awk '{print $3}')
     local ech_cfg=$(echo "$ech_output" | grep "ECHConfig" | awk '{print $2}')
+	local WS_PATH="/$(openssl rand -hex 6)"
 
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
@@ -792,7 +797,7 @@ create_config() {
       },
       "transport": {
         "type": "ws",
-        "path": "/vless-ws"
+        "path": "$WS_PATH"
       }
     }
   ],
