@@ -896,8 +896,7 @@ display_system_status() {
 get_warp_credentials() {
     local cache="/etc/sing-box/warp_accounts.json"
     [ -s "$cache" ] && jq -r '.priv' "$cache" >/dev/null 2>&1 && { cat "$cache"; return 0; }
-    local pr pu res id v6
-    pr=$(wg genkey) && pu=$(echo "$pr" | wg pubkey)
+    local pr pu res id v6; pr=$(wg genkey) && pu=$(echo "$pr" | wg pubkey)
     local payload=$(jq -nc --arg key "$pu" '{"key":$key,"type":"Linux","tos":"2024-09-01T00:00:00.000Z"}')
     res=$(curl -s -4 -X POST "https://api.cloudflareclient.com/v0a1922/reg" -H "User-Agent: okhttp/3.12.1" -H "Content-Type: application/json" -d "$payload")
     id=$(echo "$res" | jq -r '.id // .result.id // empty')
