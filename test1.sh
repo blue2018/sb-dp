@@ -703,7 +703,7 @@ install_singbox() {
 # ==========================================
 # 配置文件生成
 # ==========================================
-create_config() {
+create_config() {  
     : "${PORT_VLESS:=443}"
     : "${RAW_ECH_CONFIG:=""}"
     : "${RAW_VLESS_UUID:=""}"
@@ -735,13 +735,13 @@ create_config() {
     [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # [ADD] 4. VLESS & ECH 凭据生成逻辑
+    # 4. VLESS & ECH 凭据生成逻辑
     local vless_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/\(........\)\(....\)\(....\)\(....\)\(............\)/\1-\2-\3-\4-\5/')
     local ech_key=$(/usr/bin/sing-box generate ech-keypair 2>/dev/null || echo "")
     local ech_priv=$(echo "$ech_key" | grep "Private key" | awk '{print $3}')
     local ech_cfg=$(echo "$ech_key" | grep "ECHConfig" | awk '{print $2}')
 
-    # 5. 写入 Sing-box 配置文件
+    # 5. 写入 Sing-box 配置文件 (移除 key_id)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -774,7 +774,7 @@ create_config() {
         "alpn": ["http/1.1"],
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem",
-        "ech": { "enabled": true, "key": ["$ech_priv"], "key_id": [1] }
+        "ech": { "enabled": true, "key": ["$ech_priv"] }
       },
       "transport": { "type": "ws", "path": "/vless-ws" }
     }
@@ -782,6 +782,7 @@ create_config() {
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
 EOF
+    # 6. 保存状态文件
     [ -n "$ech_cfg" ] && echo "$ech_cfg" > /etc/sing-box/ech_config.txt
     echo "$vless_uuid" > /etc/sing-box/vless_uuid.txt
     chmod 600 "/etc/sing-box/config.json"
