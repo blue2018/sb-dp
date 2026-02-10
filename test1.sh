@@ -704,6 +704,9 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
+    : "${PORT_VLESS:=443}"
+    : "${RAW_ECH_CONFIG:=""}"
+    : "${RAW_VLESS_UUID:=""}"
     local PORT_HY2="${1:-}"
     local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
