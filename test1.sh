@@ -928,12 +928,13 @@ warp_manager() {
         if [ "$1" = "start" ]; then
             killall wireproxy >/dev/null 2>&1; sleep 1
             nohup $wp_bin -c $wp_conf > /var/log/wireproxy.log 2>&1 & 
-            info "正在启动 WARP 并尝试握手 (15秒)..."
-            # 增加检查循环，而不仅是 sleep
+            info "正在建立 WARP 连接并尝试握手..."
+            # 动态探测：最多等待 15 秒，成功立刻跳出
             for i in {1..15}; do
                 if _is_wp_running && curl -s4 --socks5-hostname 127.0.0.1:$wp_port https://www.google.com -m 2 >/dev/null; then
                     return 0
                 fi
+                [ $((i % 3)) -eq 0 ] && echo -n "."
                 sleep 1
             done
         else
@@ -959,12 +960,11 @@ warp_manager() {
         case "$opt" in
             1) if _is_wp_running; then
                    _wp_ctrl stop; jq 'del(.outbounds[]? | select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
-                   service_ctrl restart && succ "已关闭 WARP"
+                   service_ctrl restart && succ "已成功关闭 WARP"
                else
                    _wp_install; local creds=$(get_warp_credentials) || { err "WARP 注册失败"; continue; }
                    
-                   # 【核心改进】强制使用 IP 形式的 Endpoint，并优先选择 IPv4 地址
-                   # 常用 Cloudflare Endpoint IP: 162.159.192.1, 162.159.193.1, 162.159.195.1
+                   # 使用固定 IP Endpoint 绕过解析问题 (162.159.193.1 为常用优选)
                    local endpoint="162.159.193.1:2408"
                    
                    cat > "$wp_conf" <<EOF
@@ -983,23 +983,32 @@ KeepAlive = 25
 BindAddress = 127.0.0.1:$wp_port
 EOF
                    _wp_ctrl start
-                   if _is_wp_running && curl -s --socks5-hostname 127.0.0.1:$wp_port https://api.ip.sb/ip -m 5 >/dev/null; then
+                   if curl -s4 --socks5-hostname 127.0.0.1:$wp_port https://api.ip.sb/ip -m 5 >/dev/null; then
                        local out='{"type":"socks","tag":"warp-out","server":"127.0.0.1","server_port":'$wp_port'}'
                        jq --argjson out "$out" --argjson doms "$DEFAULT_DOMAINS" '(.outbounds //= []) | if (map(select(.tag?=="warp-out")) | length == 0) then .outbounds += [$out] else . end | (.route.rules //= []) | if (map(select(.outbound?=="warp-out")) | length == 0) then .route.rules = [{"domain_suffix":$doms,"outbound":"warp-out"}] + .route.rules else . end' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
                        service_ctrl restart && succ "WARP 连接成功并已关联分流"
                    else
-                       err "WARP 握手失败。可能原因：1. UDP 2408 端口被封锁 2. 需更换 Endpoint IP"
-                       _wp_ctrl stop
+                       warn "默认端口 2408 握手失败，尝试更换端口 500..."
+                       sed -i 's/:2408/:500/' "$wp_conf"
+                       _wp_ctrl start
+                       if curl -s4 --socks5-hostname 127.0.0.1:$wp_port https://api.ip.sb/ip -m 5 >/dev/null; then
+                           local out='{"type":"socks","tag":"warp-out","server":"127.0.0.1","server_port":'$wp_port'}'
+                           jq --argjson out "$out" --argjson doms "$DEFAULT_DOMAINS" '(.outbounds //= []) | if (map(select(.tag?=="warp-out")) | length == 0) then .outbounds += [$out] else . end | (.route.rules //= []) | if (map(select(.outbound?=="warp-out")) | length == 0) then .route.rules = [{"domain_suffix":$doms,"outbound":"warp-out"}] + .route.rules else . end' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
+                           service_ctrl restart && succ "通过 500 端口连接成功"
+                       else
+                           err "WARP 所有常用端口均握手失败，请检查机房防火墙是否完全拦截了 UDP 流量"
+                           _wp_ctrl stop
+                       fi
                    fi
                fi ;;
-            2) # ... (保持原有分流逻辑不变)
+            2) # 分流域名管理保持原逻辑
                _is_wp_running || { err "未启用"; continue; }
                local dom_list=$(jq -r '.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix[]?' "$sb_conf" 2>/dev/null)
                echo -e "\n当前分流域名:\n${dom_list:- (无)}"; read -r -p "输入域名(存在删/不存在加/回车取消): " dom
                [ -z "$dom" ] && continue
                if echo "$dom_list" | grep -qx "$dom"; then jq --arg dom "$dom" '(.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) -= [$dom]' "$sb_conf" > "${sb_conf}.tmp"
                else jq --arg dom "$dom" '(.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) |= unique' "$sb_conf" > "${sb_conf}.tmp"; fi
-               mv "${sb_conf}.tmp" "$sb_conf" && service_ctrl restart && succ "分流列表已同步" ;;
+               mv "${sb_conf}.tmp" "$sb_conf" && service_ctrl restart && succ "分流配置已同步" ;;
             0) return 0 ;;
         esac
     done
