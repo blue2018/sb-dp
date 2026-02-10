@@ -926,19 +926,23 @@ warp_manager() {
 
     _wp_ctrl() {
         if [ "$1" = "start" ]; then
-            killall wireproxy >/dev/null 2>&1; nohup $wp_bin -c $wp_conf > /var/log/wireproxy.log 2>&1 & sleep 5
+            killall wireproxy >/dev/null 2>&1; sleep 1
+            # 使用 nohup 启动，并断开标准输入输出，防止 SSH 断开影响进程
+            nohup $wp_bin -c $wp_conf > /var/log/wireproxy.log 2>&1 & 
+            info "正在等待 WARP 握手 (约10秒)..."
+            sleep 10
         else
             killall wireproxy >/dev/null 2>&1; rm -f /var/log/wireproxy.log
         fi
     }
 
     _display_ip_status() {
-        local v4=$(curl -s4m 3 https://api.ip.sb/ip || echo "无") v6=$(curl -s6m 3 https://api.ip.sb/ip || echo "无")
+        local v4=$(curl -s4m 5 https://api.ip.sb/ip || echo "无") v6=$(curl -s6m 5 https://api.ip.sb/ip || echo "无")
         echo -e "原生出口: \033[1;33mIPV4: $v4 | IPV6: $v6\033[0m"
         if _is_wp_running; then
-            # 增加 -L (跟随) 和 --retry 2 (重试)，解决握手慢导致的显示失败
-            local wv4=$(curl -s4L --retry 2 --retry-delay 2 -m 10 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo "失败")
-            local wv6=$(curl -s6L --retry 2 --retry-delay 2 -m 10 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo "失败")
+            # 增加探测深度，如果第一次失败重试一次
+            local wv4=$(curl -s4L --socks5-hostname 127.0.0.1:$wp_port -m 10 https://api.ip.sb/ip || echo "握手失败")
+            local wv6=$(curl -s6L --socks5-hostname 127.0.0.1:$wp_port -m 10 https://api.ip.sb/ip || echo "握手失败")
             echo -e "WARP 出口: \033[1;32mIPV4: $wv4 | IPV6: $wv6\033[0m"
         else
             echo -e "WARP 出口: \033[1;31m未运行\033[0m"
@@ -946,24 +950,31 @@ warp_manager() {
     }
 
     while true; do
-        echo -e "\n--- WARP 全自动管理 ---"; _display_ip_status
+        echo -e "\n--- WARP 全自动管理 (增强版) ---"; _display_ip_status
         echo -e "------------------------\n1. 启用/禁用 WARP\n2. 分流域名管理\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " opt
         case "$opt" in
             1) if _is_wp_running; then
                    _wp_ctrl stop; jq 'del(.outbounds[]? | select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
-                   service_ctrl restart && succ "已关闭"
+                   service_ctrl restart && succ "已关闭 WARP"
                else
-                   _wp_install; local creds=$(get_warp_credentials) || { err "注册失败"; continue; }
+                   _wp_install; local creds=$(get_warp_credentials) || { err "WARP 注册失败"; continue; }
+                   # 优选 Endpoint：如果域名不通，脚本会尝试使用固定 IP
+                   local endpoint="engage.cloudflareclient.com:2408"
+                   # 如果是纯 IPv6 环境，强制改用 IPv6 Endpoint
+                   [ "$IS_V6_OK" = "true" ] && [ -z "$RAW_IP4" ] && endpoint="[2606:4700:d0::a29f:c001]:2408"
+
                    cat > "$wp_conf" <<EOF
 [Interface]
 PrivateKey = $(echo "$creds" | jq -r .priv)
 Address = $(echo "$creds" | jq -r .v6)
 DNS = 1.1.1.1
+MTU = 1280
 
 [Peer]
 PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=
-Endpoint = engage.cloudflareclient.com:2408
+Endpoint = $endpoint
+KeepAlive = 25
 
 [Socks5]
 BindAddress = 127.0.0.1:$wp_port
@@ -972,9 +983,10 @@ EOF
                    if _is_wp_running; then
                        local out='{"type":"socks","tag":"warp-out","server":"127.0.0.1","server_port":'$wp_port'}'
                        jq --argjson out "$out" --argjson doms "$DEFAULT_DOMAINS" '(.outbounds //= []) | if (map(select(.tag?=="warp-out")) | length == 0) then .outbounds += [$out] else . end | (.route.rules //= []) | if (map(select(.outbound?=="warp-out")) | length == 0) then .route.rules = [{"domain_suffix":$doms,"outbound":"warp-out"}] + .route.rules else . end' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
-                       service_ctrl restart && succ "已开启"
+                       service_ctrl restart && succ "WARP 已成功开启并关联分流"
                    else
-                       err "启动失败！日志回显:"; tail -n 3 /var/log/wireproxy.log; _wp_ctrl stop
+                       err "WARP 进程启动成功但握手失败，请尝试检查防火墙是否放行 UDP 2408 端口"
+                       _wp_ctrl stop
                    fi
                fi ;;
             2) _is_wp_running || { err "未启用"; continue; }
@@ -983,7 +995,7 @@ EOF
                [ -z "$dom" ] && continue
                if echo "$dom_list" | grep -qx "$dom"; then jq --arg dom "$dom" '(.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) -= [$dom]' "$sb_conf" > "${sb_conf}.tmp"
                else jq --arg dom "$dom" '(.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) |= unique' "$sb_conf" > "${sb_conf}.tmp"; fi
-               mv "${sb_conf}.tmp" "$sb_conf" && service_ctrl restart && succ "已同步" ;;
+               mv "${sb_conf}.tmp" "$sb_conf" && service_ctrl restart && succ "分流列表已同步" ;;
             0) return 0 ;;
         esac
     done
