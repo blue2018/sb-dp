@@ -44,11 +44,10 @@ detect_os() {
     case "$(uname -m)" in x86_64) SBOX_ARCH="amd64" ;; aarch64) SBOX_ARCH="arm64" ;; armv7l) SBOX_ARCH="armv7" ;; i386|i686) SBOX_ARCH="386" ;; *) err "不支持的架构: $(uname -m)"; exit 1 ;; esac
 }
 
-# 依赖安装 (容错增强版)
+# 依赖安装
 install_dependencies() {
-    info "正在检查系统类型..."
-    local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd" OPT="ethtool kmod wireguard-tools"
-    local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd wireguard-tools" OPT="ethtool kmod"
+    info "正在检查系统类型并补充核心依赖..."
+    local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd wireguard-tools libc6-compat" OPT="ethtool kmod"
     if command -v apk >/dev/null 2>&1; then PM="apk"; DEPS="$DEPS coreutils util-linux-misc"
     elif command -v apt-get >/dev/null 2>&1; then PM="apt"; DEPS="$DEPS util-linux"
     else PM="yum"; DEPS="${DEPS//netcat-openbsd/nc}"; DEPS="${DEPS//procps/procps-ng} util-linux"; fi
@@ -57,7 +56,7 @@ install_dependencies() {
         apk) info "检测到 Alpine 系统，执行分批安装依赖..."
              apk update >/dev/null 2>&1
              local missing=""; for pkg in $DEPS; do apk info -e "$pkg" >/dev/null || missing="$missing $pkg"; done
-             [ -n "$missing" ] && apk add --no-cache $missing || warn "部分组件安装异常"
+             [ -n "$missing" ] && apk add --no-cache $missing || true
              missing=""; for pkg in $OPT; do apk info -e "$pkg" >/dev/null || missing="$missing $pkg"; done
              [ -n "$missing" ] && apk add --no-cache $missing >/dev/null 2>&1 || true
              rm -rf /var/cache/apk/* ;;
@@ -68,11 +67,12 @@ install_dependencies() {
              apt-get install -y --no-install-recommends $OPT >/dev/null 2>&1 || true
              apt-get clean; rm -rf /var/lib/apt/lists/* ;;
         yum) info "检测到 RHEL/CentOS 系统，正在同步仓库并安装依赖..."
-             $(command -v dnf || echo "yum") install -y $DEPS || err "依赖安装失败"
-             $(command -v dnf || echo "yum") install -y $OPT >/dev/null 2>&1 || true ;;
+             local manager=$(command -v dnf || echo "yum")
+             $manager install -y $DEPS || err "依赖安装失败"
+             $manager install -y $OPT >/dev/null 2>&1 || true ;;
     esac
     update-ca-certificates 2>/dev/null || true
-    for cmd in jq curl tar bash pgrep taskset; do command -v "$cmd" >/dev/null 2>&1 || { [ "$PM" = "apk" ] && apk add --no-cache util-linux >/dev/null 2>&1 || { err "核心依赖 ${cmd} 安装失败，请检查网络或源"; exit 1; }; } done
+    for cmd in jq curl tar bash pgrep; do command -v "$cmd" >/dev/null 2>&1 || { [ "$PM" = "apk" ] && apk add --no-cache util-linux procps >/dev/null 2>&1 || { err "核心依赖 ${cmd} 安装失败"; exit 1; }; } done
     succ "所需依赖已就绪"
 }
 
