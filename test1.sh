@@ -920,22 +920,24 @@ warp_manager() {
     
     local DEFAULT_DOMAINS='["google.com","netflix.com","netflix.net","nflximg.net","nflxvideo.net","nflxso.net","nflxext.com","openai.com","chatgpt.com","oaistatic.com","oaiusercontent.com","youtube.com","googlevideo.com"]'
 
-    # 内部状态检查函数：彻底移除 systemctl 依赖
+    # 增强版状态检查：不再单纯依赖 rc-service，而是直接查进程名 + 查端口监听
     _is_wp_running() {
-        if [ "$OS" = "alpine" ] || [ -f /etc/alpine-release ]; then
-            rc-service wireproxy status >/dev/null 2>&1
-        else
-            systemctl is-active --quiet wireproxy >/dev/null 2>&1
+        if pgrep -x "wireproxy" >/dev/null 2>&1; then
+            # 进程存在，进一步检查端口是否在监听（确保没死锁）
+            if netstat -lnt | grep -q ":$wp_port "; then
+                return 0
+            fi
         fi
+        return 1
     }
 
     _wp_install() {
         if [ ! -x "$wp_bin" ]; then
             info "下载 Wireproxy..."
             local arch=$SBOX_ARCH
-            # 自动映射架构名
-            [ "$arch" = "x86_64" ] && arch="amd64"
-            [ "$arch" = "aarch64" ] && arch="arm64"
+            # 适配 Alpine/Standard 不同的架构命名习惯
+            [ "$arch" = "x86_64" ] || [ "$arch" = "amd64" ] && arch="amd64"
+            [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ] && arch="arm64"
             local url="https://github.com/octeep/wireproxy/releases/latest/download/wireproxy_linux_${arch}.tar.gz"
             curl -L "$url" | tar -xz -C /usr/local/bin/ wireproxy && chmod +x "$wp_bin"
         fi
@@ -945,23 +947,33 @@ warp_manager() {
         local action=$1
         if [ "$OS" = "alpine" ] || [ -f /etc/alpine-release ]; then
             if [ "$action" = "start" ]; then
+                # 重新编写更标准、带 PID 管理的 OpenRC 脚本
                 cat > /etc/init.d/wireproxy <<EOF
 #!/sbin/openrc-run
 name="wireproxy"
+description="Wireproxy for WARP"
 command="$wp_bin"
 command_args="-c $wp_conf"
 command_background="yes"
-pidfile="/run/\${RC_SVCNAME}.pid"
-depend() { need net; }
+pidfile="/run/wireproxy.pid"
+start_stop_daemon_args="--stdout /var/log/wireproxy.log --stderr /var/log/wireproxy.log"
+
+depend() {
+    need net
+}
 EOF
                 chmod +x /etc/init.d/wireproxy
                 rc-update add wireproxy default >/dev/null 2>&1
                 rc-service wireproxy restart
+                sleep 2 # 给进程启动留点时间
             else
                 rc-service wireproxy stop >/dev/null 2>&1
+                killall wireproxy >/dev/null 2>&1 # 强制清理
                 rc-update del wireproxy default >/dev/null 2>&1
+                rm -f /run/wireproxy.pid
             fi
         else
+            # Systemd 逻辑保持不变...
             if [ "$action" = "start" ]; then
                 cat > /etc/systemd/system/wireproxy.service <<EOF
 [Unit]
@@ -974,26 +986,29 @@ Restart=always
 WantedBy=multi-user.target
 EOF
                 systemctl daemon-reload && systemctl enable wireproxy --now
+                sleep 2
             else
                 systemctl stop wireproxy && systemctl disable wireproxy
             fi
         fi
     }
 
-    # 修复 IP 显示：增加 IPv6 探测
     _display_ip_status() {
         local v4=$(curl -s4m 3 https://api.ip.sb/ip || echo "无")
         local v6=$(curl -s6m 3 https://api.ip.sb/ip || echo "无")
         echo -e "原生出口: \033[1;33mIPV4: $v4 | IPV6: $v6\033[0m"
         
         if _is_wp_running; then
-            # 探测 WARP 出口（Wireproxy 默认通过 WG 隧道同时处理 v4/v6）
+            # 通过 Wireproxy 探测 WARP 后的 IP
             local wv4=$(curl -s4m 5 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo "失败")
             local wv6=$(curl -s6m 5 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo "失败")
             echo -e "WARP 出口: \033[1;32mIPV4: $wv4 | IPV6: $wv6\033[0m"
+        else
+            echo -e "WARP 出口: \033[1;31m服务未运行\033[0m"
         fi
     }
 
+    # 下面的 while 菜单逻辑保持不变...
     while true; do
         local st="[1;31m已禁用[0m"
         _is_wp_running && st="[1;32m已启用 (127.0.0.1:$wp_port)[0m"
@@ -1012,7 +1027,6 @@ EOF
                 if _is_wp_running; then
                     info "正在禁用 WARP..."
                     _wp_ctrl stop
-                    # 修复 JQ 逻辑：精准删除 tag 为 warp-out 的对象
                     jq 'del(.outbounds[]? | select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
                     service_ctrl restart && succ "已关闭 WARP"
                 else
@@ -1030,19 +1044,24 @@ Endpoint = 162.159.192.1:2408
 BindAddress = 127.0.0.1:$wp_port
 EOF
                     _wp_ctrl start
-                    # 健壮的 JQ 写入逻辑：处理 outbounds 数组不存在或为空的情况
-                    local out='{"type":"socks","tag":"warp-out","server":"127.0.0.1","server_port":'$wp_port'}'
-                    jq --argjson out "$out" --argjson doms "$DEFAULT_DOMAINS" '
-                        (.outbounds //= []) | 
-                        if (map(select(.tag?=="warp-out")) | length == 0) then .outbounds += [$out] else . end |
-                        (.route.rules //= []) | 
-                        if (map(select(.outbound?=="warp-out")) | length == 0) 
-                        then .route.rules = [{"domain_suffix":$doms,"outbound":"warp-out"}] + .route.rules 
-                        else . end' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
-                    service_ctrl restart && succ "WARP 已启用"
+                    # 再次确认是否启动成功
+                    if _is_wp_running; then
+                        local out='{"type":"socks","tag":"warp-out","server":"127.0.0.1","server_port":'$wp_port'}'
+                        jq --argjson out "$out" --argjson doms "$DEFAULT_DOMAINS" '
+                            (.outbounds //= []) | 
+                            if (map(select(.tag?=="warp-out")) | length == 0) then .outbounds += [$out] else . end |
+                            (.route.rules //= []) | 
+                            if (map(select(.outbound?=="warp-out")) | length == 0) 
+                            then .route.rules = [{"domain_suffix":$doms,"outbound":"warp-out"}] + .route.rules 
+                            else . end' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
+                        service_ctrl restart && succ "WARP 已启用"
+                    else
+                        err "Wireproxy 启动失败，请检查 2408 端口是否被墙或日志 /var/log/wireproxy.log"
+                    fi
                 fi
                 ;;
             2)
+                # 选项 2 逻辑保持不变...
                 _is_wp_running || { err "请先启用 WARP"; sleep 1; continue; }
                 local dom_list=$(jq -r '.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix[]?' "$sb_conf" 2>/dev/null)
                 echo -e "\n--- 当前分流域名列表 ---"
