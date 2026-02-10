@@ -425,20 +425,38 @@ apply_nic_core_boost() {
 
 #防火墙开放端口
 apply_firewall() {
-    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    [ -z "$port" ] && return 0
-    {   if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
-        elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --list-ports | grep -q "$port/udp" || { firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --reload; } >/dev/null 2>&1
+    local hy2_port=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+    local vless_port=$(jq -r '.inbounds[] | select(.type=="vless") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+    _do_rule() {
+        local p="$1"
+        local proto="$2"
+        [ -z "$p" ] && return 0
+        if command -v ufw >/dev/null 2>&1; then ufw allow "$p"/"$proto" >/dev/null 2>&1
+        elif command -v firewall-cmd >/dev/null 2>&1; then 
+            firewall-cmd --list-ports | grep -q "$p/$proto" || { firewall-cmd --add-port="$p"/"$proto" --permanent; firewall-cmd --reload; } >/dev/null 2>&1
         elif command -v iptables >/dev/null 2>&1; then
-            iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
-            command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
-        fi    } || true
+            iptables -D INPUT -p "$proto" --dport "$p" -j ACCEPT >/dev/null 2>&1
+            iptables -I INPUT -p "$proto" --dport "$p" -j ACCEPT >/dev/null 2>&1
+            command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p "$proto" --dport "$p" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p "$proto" --dport "$p" -j ACCEPT >/dev/null 2>&1; }
+        fi
+    }
+    _do_rule "$hy2_port" "udp" || true
+    _do_rule "$vless_port" "tcp" || true
 }
 	
 # "全功能调度器"
 service_ctrl() {
     local action="$1"
-    [[ "$action" == "restart" ]] && { echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."; optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall; return 0; }
+    [[ "$action" == "restart" ]] && { 
+        echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."
+        [ -d "/etc/sing-box/certs" ] && chmod 755 /etc/sing-box/certs && chmod 644 /etc/sing-box/certs/* >/dev/null 2>&1 || true
+        optimize_system >/dev/null 2>&1 || true
+        setup_service
+        apply_firewall
+        if [ -x "/etc/init.d/sing-box" ]; then rc-service sing-box restart
+        else systemctl daemon-reload >/dev/null 2>&1; systemctl restart sing-box; fi
+        return 0
+    }
     if [ -x "/etc/init.d/sing-box" ]; then rc-service sing-box "$action"
     else systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box; fi
 }
