@@ -913,168 +913,77 @@ get_warp_credentials() {
 
 # WARP (Wireproxy) 管理主函数
 warp_manager() {
-    local wp_bin="/usr/local/bin/wireproxy"
-    local wp_conf="/etc/sing-box/wireproxy.conf"
-    local sb_conf="/etc/sing-box/config.json"
-    local wp_port=1080
-    
+    local wp_bin="/usr/local/bin/wireproxy" wp_conf="/etc/sing-box/wireproxy.conf" sb_conf="/etc/sing-box/config.json" wp_port=1080
     local DEFAULT_DOMAINS='["google.com","netflix.com","netflix.net","nflximg.net","nflxvideo.net","nflxso.net","nflxext.com","openai.com","chatgpt.com","oaistatic.com","oaiusercontent.com","youtube.com","googlevideo.com"]'
 
-    # 最强进程检查：同时检查进程名和本地端口监听
-    _is_wp_running() {
-        if pgrep -x "wireproxy" >/dev/null 2>&1; then
-            if netstat -lnt | grep -q ":$wp_port "; then
-                return 0
-            fi
-        fi
-        return 1
-    }
+    _is_wp_running() { pgrep -x "wireproxy" >/dev/null 2>&1 && netstat -lnt | grep -q ":$wp_port " && return 0 || return 1; }
 
     _wp_install() {
         if [ ! -x "$wp_bin" ]; then
             info "下载 Wireproxy..."
-            local arch=$SBOX_ARCH
-            [ "$arch" = "x86_64" ] || [ "$arch" = "amd64" ] && arch="amd64"
+            local arch=$SBOX_ARCH; [ "$arch" = "x86_64" ] || [ "$arch" = "amd64" ] && arch="amd64"
             [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ] && arch="arm64"
-            local url="https://github.com/octeep/wireproxy/releases/latest/download/wireproxy_linux_${arch}.tar.gz"
-            curl -L "$url" | tar -xz -C /usr/local/bin/ wireproxy && chmod +x "$wp_bin"
+            curl -L "https://github.com/octeep/wireproxy/releases/latest/download/wireproxy_linux_${arch}.tar.gz" | tar -xz -C /usr/local/bin/ wireproxy && chmod +x "$wp_bin"
         fi
     }
 
     _wp_ctrl() {
-        local action=$1
-        if [ "$OS" = "alpine" ] || [ -f /etc/alpine-release ]; then
-            if [ "$action" = "start" ]; then
-                # 极简版 OpenRC 脚本，减少对 PID 文件的依赖
-                cat > /etc/init.d/wireproxy <<EOF
-#!/sbin/openrc-run
-name="wireproxy"
-command="$wp_bin"
-command_args="-c $wp_conf"
-command_background="yes"
-pidfile="/run/wireproxy.pid"
-start_stop_daemon_args="--make-pidfile"
-
-depend() {
-    need net
-}
-EOF
-                chmod +x /etc/init.d/wireproxy
-                rc-update add wireproxy default >/dev/null 2>&1
-                rc-service wireproxy restart >/dev/null 2>&1
-                sleep 3 # 关键：等待 WireGuard 握手和 Socks 端口启动
-            else
-                rc-service wireproxy stop >/dev/null 2>&1
-                killall wireproxy >/dev/null 2>&1
-                rc-update del wireproxy default >/dev/null 2>&1
-                rm -f /run/wireproxy.pid
-            fi
+        if [ "$1" = "start" ]; then
+            killall wireproxy >/dev/null 2>&1; nohup $wp_bin -c $wp_conf > /var/log/wireproxy.log 2>&1 & sleep 3
         else
-            if [ "$action" = "start" ]; then
-                cat > /etc/systemd/system/wireproxy.service <<EOF
-[Unit]
-Description=Wireproxy WARP
-After=network.target
-[Service]
-ExecStart=$wp_bin -c $wp_conf
-Restart=always
-[Install]
-WantedBy=multi-user.target
-EOF
-                systemctl daemon-reload && systemctl enable wireproxy --now
-                sleep 3
-            else
-                systemctl stop wireproxy && systemctl disable wireproxy
-            fi
+            killall wireproxy >/dev/null 2>&1; rm -f /var/log/wireproxy.log
         fi
     }
 
     _display_ip_status() {
-        local v4=$(curl -s4m 3 https://api.ip.sb/ip || echo "无")
-        local v6=$(curl -s6m 3 https://api.ip.sb/ip || echo "无")
+        local v4=$(curl -s4m 3 https://api.ip.sb/ip || echo "无") v6=$(curl -s6m 3 https://api.ip.sb/ip || echo "无")
         echo -e "原生出口: \033[1;33mIPV4: $v4 | IPV6: $v6\033[0m"
-        
         if _is_wp_running; then
-            # 探测 WARP 出口
             local wv4=$(curl -s4m 6 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo "失败")
             local wv6=$(curl -s6m 6 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo "失败")
             echo -e "WARP 出口: \033[1;32mIPV4: $wv4 | IPV6: $wv6\033[0m"
         else
-            echo -e "WARP 出口: \033[1;31m服务未运行或握手失败\033[0m"
+            echo -e "WARP 出口: \033[1;31m未运行\033[0m"
         fi
     }
 
     while true; do
-        local st="[1;31m已禁用[0m"
-        _is_wp_running && st="[1;32m已启用 (127.0.0.1:$wp_port)[0m"
-        
-        echo -e "\n--- WARP 全自动管理 (Alpine 适配版) ---"
-        echo -e "当前状态: $st"
-        _display_ip_status
-        echo -e "------------------------"
-        echo -e "1. 启用/禁用 WARP"
-        echo -e "2. 分流域名管理"
-        echo -e "0. 返回主菜单"
+        local st="[1;31m已禁用[0m"; _is_wp_running && st="[1;32m已启用 (127.0.0.1:$wp_port)[0m"
+        echo -e "\n--- WARP 全自动管理 ---\n当前状态: $st"; _display_ip_status
+        echo -e "------------------------\n1. 启用/禁用 WARP\n2. 分流域名管理\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " opt
-        
         case "$opt" in
-            1)
-                if _is_wp_running; then
-                    info "正在禁用 WARP..."
-                    _wp_ctrl stop
-                    jq 'del(.outbounds[]? | select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
-                    service_ctrl restart && succ "已关闭 WARP"
-                else
-                    info "正在启动 WARP..."
-                    _wp_install
-                    local creds=$(get_warp_credentials) || { err "凭据获取失败"; continue; }
-                    cat > "$wp_conf" <<EOF
+            1) if _is_wp_running; then
+                   _wp_ctrl stop; jq 'del(.outbounds[]? | select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
+                   service_ctrl restart && succ "已关闭"
+               else
+                   _wp_install; local creds=$(get_warp_credentials) || { err "注册失败"; continue; }
+                   cat > "$wp_conf" <<EOF
 [WG]
 PrivateKey = $(echo "$creds" | jq -r .priv)
 IPv6 = $(echo "$creds" | jq -r .v6)
 DNS = 1.1.1.1
 PeerPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=
-Endpoint = 162.159.192.1:2408
+Endpoint = engage.cloudflareclient.com:2408
 [Socks5]
 BindAddress = 127.0.0.1:$wp_port
 EOF
-                    _wp_ctrl start
-                    
-                    if _is_wp_running; then
-                        local out='{"type":"socks","tag":"warp-out","server":"127.0.0.1","server_port":'$wp_port'}'
-                        jq --argjson out "$out" --argjson doms "$DEFAULT_DOMAINS" '
-                            (.outbounds //= []) | 
-                            if (map(select(.tag?=="warp-out")) | length == 0) then .outbounds += [$out] else . end |
-                            (.route.rules //= []) | 
-                            if (map(select(.outbound?=="warp-out")) | length == 0) 
-                            then .route.rules = [{"domain_suffix":$doms,"outbound":"warp-out"}] + .route.rules 
-                            else . end' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
-                        service_ctrl restart && succ "WARP 已启用并加载默认分流"
-                    else
-                        err "启动失败！可能是 UDP 2408 端口被阻断。"
-                        _wp_ctrl stop
-                    fi
-                fi
-                ;;
-            2)
-                _is_wp_running || { err "请先启用 WARP"; sleep 1; continue; }
-                local dom_list=$(jq -r '.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix[]?' "$sb_conf" 2>/dev/null)
-                echo -e "\n--- 当前分流域名列表 ---"
-                [ -z "$dom_list" ] && echo " (列表为空)" || echo "$dom_list" | sed 's/^/ - /'
-                echo -e "------------------------"
-                read -r -p "输入域名(存在则删/不存在则加/回车取消): " input_dom
-                [ -z "$input_dom" ] && continue
-                
-                if echo "$dom_list" | grep -qx "$input_dom"; then
-                    info "正在删除: $input_dom"
-                    jq --arg dom "$input_dom" '(.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) -= [$dom]' "$sb_conf" > "${sb_conf}.tmp"
-                else
-                    info "正在添加: $input_dom"
-                    jq --arg dom "$input_dom" '(.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) |= unique' "$sb_conf" > "${sb_conf}.tmp"
-                fi
-                mv "${sb_conf}.tmp" "$sb_conf"
-                service_ctrl restart && succ "配置已同步"
-                ;;
+                   _wp_ctrl start
+                   if _is_wp_running; then
+                       local out='{"type":"socks","tag":"warp-out","server":"127.0.0.1","server_port":'$wp_port'}'
+                       jq --argjson out "$out" --argjson doms "$DEFAULT_DOMAINS" '(.outbounds //= []) | if (map(select(.tag?=="warp-out")) | length == 0) then .outbounds += [$out] else . end | (.route.rules //= []) | if (map(select(.outbound?=="warp-out")) | length == 0) then .route.rules = [{"domain_suffix":$doms,"outbound":"warp-out"}] + .route.rules else . end' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
+                       service_ctrl restart && succ "已开启"
+                   else
+                       err "启动失败！日志回显:"; tail -n 3 /var/log/wireproxy.log; _wp_ctrl stop
+                   fi
+               fi ;;
+            2) _is_wp_running || { err "未启用"; continue; }
+               local dom_list=$(jq -r '.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix[]?' "$sb_conf" 2>/dev/null)
+               echo -e "\n当前分流域名:\n${dom_list:- (无)}"; read -r -p "输入域名(存在删/不存在加/回车取消): " dom
+               [ -z "$dom" ] && continue
+               if echo "$dom_list" | grep -qx "$dom"; then jq --arg dom "$dom" '(.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) -= [$dom]' "$sb_conf" > "${sb_conf}.tmp"
+               else jq --arg dom "$dom" '(.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) |= unique' "$sb_conf" > "${sb_conf}.tmp"; fi
+               mv "${sb_conf}.tmp" "$sb_conf" && service_ctrl restart && succ "已同步" ;;
             0) return 0 ;;
         esac
     done
