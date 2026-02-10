@@ -705,12 +705,12 @@ install_singbox() {
 # ==========================================
 create_config() {  
     : "${PORT_VLESS:=443}"
-    : "${RAW_ECH_CONFIG:=""}"
-    : "${RAW_VLESS_UUID:=""}"
     local PORT_HY2="${1:-}"
     local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
-    local ds="ipv4_only"; local PSK=""; local SALA_PASS=""
+    
+    # 基础环境与 DNS 策略
+    local ds="ipv4_only"
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
@@ -719,33 +719,40 @@ create_config() {
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then 
             PORT_HY2=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' /etc/sing-box/config.json)
-            PORT_VLESS=$(jq -r '.inbounds[] | select(.type=="vless") | .listen_port // empty' /etc/sing-box/config.json)
+            PORT_VLESS=$(jq -r '.inbounds[] | select(.type=="vless") | .listen_port // 443' /etc/sing-box/config.json)
         else 
             PORT_HY2=$(printf "\n" | prompt_for_port)
         fi
     fi
     [ -z "$PORT_VLESS" ] && PORT_VLESS=443
     
-    # 2. PSK (密码) 确定逻辑
-    [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
-    [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
+    # 2. 凭据生成 (Hy2 PSK & VLESS UUID)
+    local PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
+    
+    local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 12)
 
-    # 3. Salamander 混淆密码确定逻辑
-    [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
+    local v_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
 
-    # 4. VLESS & ECH 凭据生成逻辑
-    local vless_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/\(........\)\(....\)\(....\)\(....\)\(............\)/\1-\2-\3-\4-\5/')
-    local ech_key=$(/usr/bin/sing-box generate ech-keypair 2>/dev/null || echo "")
-    local ech_priv=$(echo "$ech_key" | grep "Private key" | awk '{print $3}')
-    local ech_cfg=$(echo "$ech_key" | grep "ECHConfig" | awk '{print $2}')
+    # 3. [关键] ECH 密钥对生成与导出
+    # 必须导出 RAW 变量供后续生成 v2rayN 链接使用
+    local ech_output=$(/usr/bin/sing-box generate ech-keypair 2>/dev/null)
+    local ech_priv=$(echo "$ech_output" | grep "Private key" | awk '{print $3}')
+    local ech_pub=$(echo "$ech_output" | grep "Public key" | awk '{print $3}')
+    local ech_cfg=$(echo "$ech_output" | grep "ECHConfig" | awk '{print $2}')
 
-    # 5. 写入 Sing-box 配置文件 (移除 key_id)
+    # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
+  "dns": {
+    "servers": [
+      {"address": "8.8.4.4", "detour": "direct-out"},
+      {"address": "1.1.1.1", "detour": "direct-out"}
+    ],
+    "strategy": "$ds"
+  },
   "inbounds": [
     {
       "type": "hysteria2",
@@ -753,38 +760,57 @@ create_config() {
       "listen": "::",
       "listen_port": $PORT_HY2,
       "users": [ { "password": "$PSK" } ],
-      "ignore_client_bandwidth": false,
       "up_mbps": $cur_bw,
       "down_mbps": $cur_bw,
       "udp_timeout": "$timeout",
       "udp_fragment": true,
-      "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
-      "obfs": {"type": "salamander", "password": "$SALA_PASS"},
-      "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+      "tls": {
+        "enabled": true,
+        "alpn": ["h3"],
+        "min_version": "1.3",
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+        "key_path": "/etc/sing-box/certs/privkey.pem"
+      },
+      "obfs": {"type": "salamander", "password": "$SALA_PASS"}
     },
     {
       "type": "vless",
       "tag": "vless-in",
       "listen": "::",
       "listen_port": $PORT_VLESS,
-      "users": [ { "uuid": "$vless_uuid" } ],
+      "users": [ { "uuid": "$v_uuid" } ],
       "tls": {
         "enabled": true,
         "server_name": "${TLS_DOMAIN:-www.microsoft.com}",
         "alpn": ["http/1.1"],
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem",
-        "ech": { "enabled": true, "key": ["$ech_priv"] }
+        "ech": {
+          "enabled": true,
+          "key": ["$ech_priv"]
+        }
       },
-      "transport": { "type": "ws", "path": "/vless-ws" }
+      "transport": {
+        "type": "ws",
+        "path": "/vless-ws"
+      }
     }
   ],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
+  "outbounds": [
+    { "type": "direct", "tag": "direct-out" }
+  ]
 }
 EOF
-    # 6. 保存状态文件
-    [ -n "$ech_cfg" ] && echo "$ech_cfg" > /etc/sing-box/ech_config.txt
-    echo "$vless_uuid" > /etc/sing-box/vless_uuid.txt
+
+    # 5. [新增] 专门存储链接生成所需的关键数据
+    echo "$ech_cfg" > /etc/sing-box/ech_config.txt
+    echo "$ech_pub" > /etc/sing-box/ech_pub.txt
+    echo "$v_uuid" > /etc/sing-box/vless_uuid.txt
+    
+    # 导出给当前 shell 进程，防止 show_link 函数读取不到
+    export RAW_VLESS_UUID="$v_uuid"
+    export RAW_ECH_CONFIG="$ech_cfg"
+
     chmod 600 "/etc/sing-box/config.json"
 }
 
@@ -945,10 +971,12 @@ display_links() {
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
     }
 
+    # --- VLESS 节点部分修正 ---
     echo -e "\033[1;32m[VLESS 节点]\033[0m (端口: $RAW_VLESS_PORT)"
-    local V_PARAM="encryption=none&security=tls&sni=$RAW_SNI&type=ws&host=$RAW_SNI&path=%2Fvless-ws"
+    
+    # 修正 V_PARAM：移除 pbk (Reality专用)，确保 ech 和 ws 路径正确
+    local V_PARAM="encryption=none&security=tls&sni=$RAW_SNI&fp=chrome&type=ws&host=$RAW_SNI&path=%2Fvless-ws"
     [ -n "$RAW_ECH_CONFIG" ] && V_PARAM="${V_PARAM}&ech=${RAW_ECH_CONFIG}"
-    [ -n "${RAW_FP:-}" ] && V_PARAM="${V_PARAM}&fp=chrome&pbk=${RAW_FP}" # 额外增加指纹伪装
     
     [ -n "${RAW_IP4:-}" ] && {
         local LINK_VLESS="vless://$RAW_VLESS_UUID@$RAW_IP4:$RAW_VLESS_PORT?${V_PARAM}#$(hostname)_vless_ech"
@@ -958,13 +986,14 @@ display_links() {
 
     echo -e "\033[1;34m==========================================\033[0m"
     if [ -n "$RAW_ECH_CONFIG" ]; then
-        echo -e "\033[1;36m[v2rayN 使用提示]\033[0m"
-        echo -e "1. 粘贴链接后，若节点不可用，请右键节点 -> 编辑服务。"
-        echo -e "2. 确认 \033[1;33m流控(flow)\033[0m 为空，\033[1;33m传输层(transport)\033[0m 为 ws。"
-        echo -e "3. 检查 TLS 选项中的 \033[1;32mECHConfig\033[0m 是否已自动填入以下内容："
-        echo -e "\033[1;32m$RAW_ECH_CONFIG\033[0m\n"
+        echo -e "\033[1;36m[v2rayN 配置指南]\033[0m"
+        echo -e "1. 导入后，双击节点 -> \033[1;33m传输设置\033[0m -> 确认 \033[1;32mWebSocket\033[0m 已选定。"
+        echo -e "2. \033[1;33m伪装路径\033[0m 应为: \033[1;32m/vless-ws\033[0m"
+        echo -e "3. \033[1;33mTLS设置\033[0m: \033[1;32mserverName\033[0m 填写 \033[1;32m$RAW_SNI\033[0m"
+        echo -e "4. \033[1;33mECH配置\033[0m: 若未自动生效，请将下方字符串手动填入 \033[1;35mECHConfig\033[0m 栏："
+        echo -e "\033[0;32m$RAW_ECH_CONFIG\033[0m\n"
     fi
-    [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m 已开启 TLS 指纹伪装与 ECH SNI 加密"
+    echo -e "\033[1;32m[安全提示]\033[0m 协议组：Hysteria2 (UDP) + VLESS-WS (TCP) + ECH"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
