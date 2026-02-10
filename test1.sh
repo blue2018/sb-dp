@@ -918,13 +918,24 @@ warp_manager() {
     local sb_conf="/etc/sing-box/config.json"
     local wp_port=1080
     
-    # 预设的默认分流名单
     local DEFAULT_DOMAINS='["google.com","netflix.com","netflix.net","nflximg.net","nflxvideo.net","nflxso.net","nflxext.com","openai.com","chatgpt.com","oaistatic.com","oaiusercontent.com","youtube.com","googlevideo.com"]'
+
+    # 内部状态检查函数：彻底移除 systemctl 依赖
+    _is_wp_running() {
+        if [ "$OS" = "alpine" ] || [ -f /etc/alpine-release ]; then
+            rc-service wireproxy status >/dev/null 2>&1
+        else
+            systemctl is-active --quiet wireproxy >/dev/null 2>&1
+        fi
+    }
 
     _wp_install() {
         if [ ! -x "$wp_bin" ]; then
             info "下载 Wireproxy..."
             local arch=$SBOX_ARCH
+            # 自动映射架构名
+            [ "$arch" = "x86_64" ] && arch="amd64"
+            [ "$arch" = "aarch64" ] && arch="arm64"
             local url="https://github.com/octeep/wireproxy/releases/latest/download/wireproxy_linux_${arch}.tar.gz"
             curl -L "$url" | tar -xz -C /usr/local/bin/ wireproxy && chmod +x "$wp_bin"
         fi
@@ -932,7 +943,7 @@ warp_manager() {
 
     _wp_ctrl() {
         local action=$1
-        if [ "$OS" = "alpine" ]; then
+        if [ "$OS" = "alpine" ] || [ -f /etc/alpine-release ]; then
             if [ "$action" = "start" ]; then
                 cat > /etc/init.d/wireproxy <<EOF
 #!/sbin/openrc-run
@@ -947,13 +958,14 @@ EOF
                 rc-update add wireproxy default >/dev/null 2>&1
                 rc-service wireproxy restart
             else
-                rc-service wireproxy stop && rc-update del wireproxy default >/dev/null 2>&1
+                rc-service wireproxy stop >/dev/null 2>&1
+                rc-update del wireproxy default >/dev/null 2>&1
             fi
         else
             if [ "$action" = "start" ]; then
                 cat > /etc/systemd/system/wireproxy.service <<EOF
 [Unit]
-Description=Wireproxy WARP Service
+Description=Wireproxy WARP
 After=network.target
 [Service]
 ExecStart=$wp_bin -c $wp_conf
@@ -968,25 +980,25 @@ EOF
         fi
     }
 
-    _is_wp_running() {
-        [ "$OS" = "alpine" ] && rc-service wireproxy status >/dev/null 2>&1 || systemctl is-active --quiet wireproxy
-    }
-
-    # 获取 IP 信息（原生 vs WARP）
+    # 修复 IP 显示：增加 IPv6 探测
     _display_ip_status() {
-        local native_ip=$(curl -s4m 5 https://api.ip.sb/ip || echo "获取失败")
-        echo -e "原生出口 IP: \033[1;33m$native_ip\033[0m"
+        local v4=$(curl -s4m 3 https://api.ip.sb/ip || echo "无")
+        local v6=$(curl -s6m 3 https://api.ip.sb/ip || echo "无")
+        echo -e "原生出口: \033[1;33mIPV4: $v4 | IPV6: $v6\033[0m"
         
         if _is_wp_running; then
-            # 通过 Wireproxy 的 Socks5 端口探测 IP
-            local warp_ip=$(curl -s4m 8 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo -e "\033[1;31m连接失败\033[0m")
-            echo -e "WARP 出口 IP: \033[1;32m$warp_ip\033[0m"
+            # 探测 WARP 出口（Wireproxy 默认通过 WG 隧道同时处理 v4/v6）
+            local wv4=$(curl -s4m 5 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo "失败")
+            local wv6=$(curl -s6m 5 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo "失败")
+            echo -e "WARP 出口: \033[1;32mIPV4: $wv4 | IPV6: $wv6\033[0m"
         fi
     }
 
     while true; do
-        local st="[1;31m已禁用[0m"; _is_wp_running && st="[1;32m已启用 (127.0.0.1:$wp_port)[0m"
-        echo -e "\n--- WARP 全自动管理 ---"
+        local st="[1;31m已禁用[0m"
+        _is_wp_running && st="[1;32m已启用 (127.0.0.1:$wp_port)[0m"
+        
+        echo -e "\n--- WARP 全自动管理 (Alpine 适配版) ---"
         echo -e "当前状态: $st"
         _display_ip_status
         echo -e "------------------------"
@@ -1000,7 +1012,8 @@ EOF
                 if _is_wp_running; then
                     info "正在禁用 WARP..."
                     _wp_ctrl stop
-                    jq 'del(.outbounds[] | select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
+                    # 修复 JQ 逻辑：精准删除 tag 为 warp-out 的对象
+                    jq 'del(.outbounds[]? | select(.tag=="warp-out")) | .route.rules |= map(select(.outbound!="warp-out"))' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
                     service_ctrl restart && succ "已关闭 WARP"
                 else
                     info "正在启动 WARP..."
@@ -1017,37 +1030,38 @@ Endpoint = 162.159.192.1:2408
 BindAddress = 127.0.0.1:$wp_port
 EOF
                     _wp_ctrl start
-                    # 写入默认分流配置
+                    # 健壮的 JQ 写入逻辑：处理 outbounds 数组不存在或为空的情况
                     local out='{"type":"socks","tag":"warp-out","server":"127.0.0.1","server_port":'$wp_port'}'
                     jq --argjson out "$out" --argjson doms "$DEFAULT_DOMAINS" '
-                        (.outbounds //= []) | if (map(select(.tag=="warp-out")) | length == 0) then .outbounds += [$out] else . end |
-                        (.route.rules //= []) | if ((.route.rules | map(select(.outbound=="warp-out")) | length) == 0)
-                        then .route.rules = [{"domain_suffix":$doms,"outbound":"warp-out"}] + .route.rules
+                        (.outbounds //= []) | 
+                        if (map(select(.tag?=="warp-out")) | length == 0) then .outbounds += [$out] else . end |
+                        (.route.rules //= []) | 
+                        if (map(select(.outbound?=="warp-out")) | length == 0) 
+                        then .route.rules = [{"domain_suffix":$doms,"outbound":"warp-out"}] + .route.rules 
                         else . end' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
-                    service_ctrl restart && succ "WARP 已启用并加载默认分流"
+                    service_ctrl restart && succ "WARP 已启用"
                 fi
                 ;;
             2)
                 _is_wp_running || { err "请先启用 WARP"; sleep 1; continue; }
-                local dom_list=$(jq -r '.route.rules[] | select(.outbound=="warp-out") | .domain_suffix[]' "$sb_conf" 2>/dev/null)
+                local dom_list=$(jq -r '.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix[]?' "$sb_conf" 2>/dev/null)
                 echo -e "\n--- 当前分流域名列表 ---"
-                if [ -z "$dom_list" ]; then echo " (列表为空)"; else echo "$dom_list" | sed 's/^/ - /'; fi
+                [ -z "$dom_list" ] && echo " (列表为空)" || echo "$dom_list" | sed 's/^/ - /'
                 echo -e "------------------------"
                 read -r -p "输入域名(存在则删/不存在则加/回车取消): " input_dom
                 [ -z "$input_dom" ] && continue
                 
                 if echo "$dom_list" | grep -qx "$input_dom"; then
-                    info "检测到已存在，正在删除: $input_dom"
-                    jq --arg dom "$input_dom" '(.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) -= [$dom]' "$sb_conf" > "${sb_conf}.tmp"
+                    info "正在删除: $input_dom"
+                    jq --arg dom "$input_dom" '(.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) -= [$dom]' "$sb_conf" > "${sb_conf}.tmp"
                 else
-                    info "检测到新域名，正在添加: $input_dom"
-                    jq --arg dom "$input_dom" '(.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[] | select(.outbound=="warp-out") | .domain_suffix) |= unique' "$sb_conf" > "${sb_conf}.tmp"
+                    info "正在添加: $input_dom"
+                    jq --arg dom "$input_dom" '(.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) |= unique' "$sb_conf" > "${sb_conf}.tmp"
                 fi
                 mv "${sb_conf}.tmp" "$sb_conf"
                 service_ctrl restart && succ "配置已同步"
                 ;;
             0) return 0 ;;
-            *) err "无效选择"; sleep 1 ;;
         esac
     done
 }
