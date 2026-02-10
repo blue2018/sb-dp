@@ -93,22 +93,6 @@ get_cpu_core() {
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
     local p rand
-    local cf_ports=(443 8443 2053 2083 2087 2096)
-    PORT_VLESS=""
-    for port in "${cf_ports[@]}"; do
-        local check_v=""
-        if command -v ss >/dev/null 2>&1; then check_v=$(ss -tunlp | grep -w ":$port")
-        elif command -v netstat >/dev/null 2>&1; then check_v=$(netstat -tunlp | grep -w ":$port")
-        elif command -v lsof >/dev/null 2>&1; then check_v=$(lsof -i :"$port")
-        fi
-        if [ -z "$check_v" ]; then
-            PORT_VLESS=$port
-            break
-        fi
-    done
-    [ -z "$PORT_VLESS" ] && PORT_VLESS=$((2000 + RANDOM % 1000))
-    export PORT_VLESS
-
     while :; do
         read -r -p "请输入端口 [1025-65535] (回车随机生成): " p
         if [ -z "$p" ]; then
@@ -117,11 +101,6 @@ prompt_for_port() {
             else p=$((1025 + RANDOM % 64511)); fi
         fi
         if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
-            if [ "$p" -eq "${PORT_VLESS:-0}" ]; then
-                echo -e "\033[1;33m[WARN]\033[0m 端口 $p 已被 VLESS 预占用，请更换端口或直接回车重新生成" >&2
-                p=""; continue
-            fi
-
             local occupied=""
             if command -v ss >/dev/null 2>&1; then occupied=$(ss -tunlp | grep -w ":$p")
             elif command -v netstat >/dev/null 2>&1; then occupied=$(netstat -tunlp | grep -w ":$p")
@@ -425,42 +404,20 @@ apply_nic_core_boost() {
 
 #防火墙开放端口
 apply_firewall() {
-    local hy2_port=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    local vless_port=$(jq -r '.inbounds[] | select(.type=="vless") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    _do_rule() {
-	    local p="$1" proto="$2"
-	    [ -z "$p" ] && { warn "端口为空，跳过防火墙规则"; return 1; }
-	    
-	    if command -v ufw >/dev/null 2>&1; then
-	        ufw allow "$p"/"$proto" comment "sing-box" >/dev/null 2>&1
-	    elif command -v firewall-cmd >/dev/null 2>&1; then 
-	        firewall-cmd --permanent --add-port="$p"/"$proto" >/dev/null 2>&1
-	        firewall-cmd --reload >/dev/null 2>&1
-	    elif command -v iptables >/dev/null 2>&1; then
-	        # 先清理旧规则
-	        iptables -D INPUT -p "$proto" --dport "$p" -j ACCEPT 2>/dev/null
-	        iptables -I INPUT 1 -p "$proto" --dport "$p" -j ACCEPT
-	        [ "$proto" = "udp" ] && ip6tables -I INPUT 1 -p "$proto" --dport "$p" -j ACCEPT 2>/dev/null
-	    fi
-	    succ "防火墙已放行 $proto/$p"
-	}
-    _do_rule "$hy2_port" "udp" || true
-    _do_rule "$vless_port" "tcp" || true
+    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+    [ -z "$port" ] && return 0
+    {   if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
+        elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --list-ports | grep -q "$port/udp" || { firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --reload; } >/dev/null 2>&1
+        elif command -v iptables >/dev/null 2>&1; then
+            iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+            command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
+        fi    } || true
 }
 	
 # "全功能调度器"
 service_ctrl() {
     local action="$1"
-    [[ "$action" == "restart" ]] && { 
-        echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."
-        [ -d "/etc/sing-box/certs" ] && chmod 755 /etc/sing-box/certs && chmod 644 /etc/sing-box/certs/* >/dev/null 2>&1 || true
-        optimize_system >/dev/null 2>&1 || true
-        setup_service
-        apply_firewall
-        if [ -x "/etc/init.d/sing-box" ]; then rc-service sing-box restart
-        else systemctl daemon-reload >/dev/null 2>&1; systemctl restart sing-box; fi
-        return 0
-    }
+    [[ "$action" == "restart" ]] && { echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."; optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall; return 0; }
     if [ -x "/etc/init.d/sing-box" ]; then rc-service sing-box "$action"
     else systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box; fi
 }
@@ -707,115 +664,53 @@ install_singbox() {
 # ==========================================
 # 配置文件生成
 # ==========================================
-create_config() {  
-    : "${PORT_VLESS:=443}"
+create_config() {
     local PORT_HY2="${1:-}"
-    local cur_bw="${VAR_HY2_BW:-200}"
+	local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
-    
-    # 基础环境与 DNS 策略
-    local ds="ipv4_only"
+    local ds="ipv4_only"; local PSK=""; local SALA_PASS=""
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
+	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
+	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
     # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then 
-            PORT_HY2=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' /etc/sing-box/config.json)
-            PORT_VLESS=$(jq -r '.inbounds[] | select(.type=="vless") | .listen_port // 443' /etc/sing-box/config.json)
-        else 
-            PORT_HY2=$(printf "\n" | prompt_for_port)
-        fi
+        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
+        else PORT_HY2=$(printf "\n" | prompt_for_port); fi
     fi
-    [ -z "$PORT_VLESS" ] && PORT_VLESS=443
     
-    # 2. 凭据生成 (Hy2 PSK & VLESS UUID)
-    local PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
-    
-    local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 12)
+    # 2. PSK (密码) 确定逻辑
+    [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
+    [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
 
-    local v_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
-
-    # 3. [关键] ECH 密钥对生成与导出
-    # 必须导出 RAW 变量供后续生成 v2rayN 链接使用
-    local ech_output=$(/usr/bin/sing-box generate ech-keypair 2>/dev/null)
-    local ech_priv=$(echo "$ech_output" | grep "Private key" | awk '{print $3}')
-    local ech_pub=$(echo "$ech_output" | grep "Public key" | awk '{print $3}')
-    local ech_cfg=$(echo "$ech_output" | grep "ECHConfig" | awk '{print $2}')
-	local WS_PATH="/$(openssl rand -hex 6)"
+    # 3. Salamander 混淆密码确定逻辑
+    [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
     # 4. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {
-    "servers": [
-      {"address": "8.8.4.4", "detour": "direct-out"},
-      {"address": "1.1.1.1", "detour": "direct-out"}
-    ],
-    "strategy": "$ds"
-  },
-  "inbounds": [
-    {
-      "type": "hysteria2",
-      "tag": "hy2-in",
-      "listen": "::",
-      "listen_port": $PORT_HY2,
-      "users": [ { "password": "$PSK" } ],
-      "up_mbps": $cur_bw,
-      "down_mbps": $cur_bw,
-      "udp_timeout": "$timeout",
-      "udp_fragment": true,
-      "tls": {
-        "enabled": true,
-        "alpn": ["h3"],
-        "min_version": "1.3",
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-        "key_path": "/etc/sing-box/certs/privkey.pem"
-      },
-      "obfs": {"type": "salamander", "password": "$SALA_PASS"}
-    },
-    {
-      "type": "vless",
-      "tag": "vless-in",
-      "listen": "::",
-      "listen_port": $PORT_VLESS,
-      "users": [ { "uuid": "$v_uuid" } ],
-      "tls": {
-        "enabled": true,
-        "server_name": "${TLS_DOMAIN:-www.microsoft.com}",
-        "alpn": ["http/1.1"],
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-        "key_path": "/etc/sing-box/certs/privkey.pem",
-        "ech": {
-          "enabled": true,
-          "key": ["$ech_priv"]
-        }
-      },
-      "transport": {
-        "type": "ws",
-        "path": "$WS_PATH"
-      }
-    }
-  ],
-  "outbounds": [
-    { "type": "direct", "tag": "direct-out" }
-  ]
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
+  "inbounds": [{
+    "type": "hysteria2",
+    "tag": "hy2-in",
+    "listen": "::",
+    "listen_port": $PORT_HY2,
+    "users": [ { "password": "$PSK" } ],
+    "ignore_client_bandwidth": false,
+    "up_mbps": $cur_bw,
+    "down_mbps": $cur_bw,
+    "udp_timeout": "$timeout",
+    "udp_fragment": true,
+    "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
+    "obfs": {"type": "salamander", "password": "$SALA_PASS"},
+    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+  }],
+  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
 EOF
-
-    # 5. [新增] 专门存储链接生成所需的关键数据
-    echo "$ech_cfg" > /etc/sing-box/ech_config.txt
-    echo "$ech_pub" > /etc/sing-box/ech_pub.txt
-    echo "$v_uuid" > /etc/sing-box/vless_uuid.txt
-    
-    # 导出给当前 shell 进程，防止 show_link 函数读取不到
-    export RAW_VLESS_UUID="$v_uuid"
-    export RAW_ECH_CONFIG="$ech_cfg"
-
     chmod 600 "/etc/sing-box/config.json"
 }
 
@@ -843,7 +738,7 @@ setup_service() {
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
-description="Sing-box Service (Hy2 & VLESS)"
+description="Sing-box Service"
 supervisor="supervise-daemon"
 respawn_delay=10
 respawn_max=5
@@ -863,8 +758,8 @@ start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_err.
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true
-        sync
-        (rc-service sing-box restart >/dev/null 2>&1 || true) &
+        sync   # 确保环境文件与服务脚本落盘，防止启动瞬时读取失败
+		(rc-service sing-box restart >/dev/null 2>&1 || true) &
     else
         local mem_config=""; local cpu_quota=$((real_c * 100))
         local io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
@@ -875,7 +770,7 @@ EOF
         [ "${final_nice}" -eq 0 ] && systemd_nice_line="# Nice=0 (Environment restricted)"
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
-Description=Sing-box Service (Hy2 & VLESS)
+Description=Sing-box Service
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=0
@@ -904,26 +799,27 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload >/dev/null 2>&1
         systemctl enable sing-box >/dev/null 2>&1 || true
-        sync
-        (systemctl restart sing-box >/dev/null 2>&1 || true) &
+        sync   # 确保环境文件与服务配置落盘
+		(systemctl restart sing-box >/dev/null 2>&1 || true) &
     fi
-    set +e
+    set +e     # 关闭 set -e，这是防止脚本在 pidof 失败时直接退出的关键核心
     for i in {1..40}; do
         pid=$(pgrep -x "sing-box" 2>/dev/null | head -n 1)
         [ -z "${pid}" ] && pid=$(pgrep -f "sing-box run" | awk '{print $1}' | head -n 1)
         [ -n "${pid}" ] && [ -e "/proc/${pid}" ] && break
         sleep 0.3
     done
+    # 异步补课逻辑。在进程确认拉起后，从脚本主体执行一次优化，这样既保证了优化生效，又不会因为优化脚本运行时间长而导致服务启动超时
     ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 &
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
-        succ "sing-box 启动成功 | 模式: Hy2 + VLESS | 可用内存: $(( ${ma:-0} / 1024 )) MB"
+        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
     else
         err "服务拉起超时，请检查日志："
         [ "$OS" = "alpine" ] && { [ -f /var/log/messages ] && tail -n 10 /var/log/messages || logread | tail -n 10; } || journalctl -u sing-box -n 10 --no-pager 2>/dev/null
         set -e; exit 1
     fi
-    set -e
+	set -e
 }
 
 # ==========================================
@@ -932,16 +828,8 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    
-    # 提取 Hy2 核心数据
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-    read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
-    
-    # [ADD] 提取 VLESS & ECH 数据
-    RAW_VLESS_PORT=$(jq -r '.. | objects | select(.tag == "vless-in") | .listen_port' "$CONFIG_FILE" 2>/dev/null)
-    RAW_VLESS_UUID=$(cat /etc/sing-box/vless_uuid.txt 2>/dev/null)
-    RAW_ECH_CONFIG=$(cat /etc/sing-box/ech_config.txt 2>/dev/null || echo "")
-
+	read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
@@ -952,53 +840,30 @@ display_links() {
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
-    
+	
     _do_probe() {
         [ -z "$1" ] && return
-        (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
+		(nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
         echo -e "\033[1;32m (已连通)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
     }
-    
     if command -v nc >/dev/null 2>&1; then
         _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
         v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
     fi
-
-    echo -e "\n\033[1;32m[Hysteria2 节点]\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m"
+    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m\n"
+	
     [ -n "${RAW_IP4:-}" ] && {
-        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_hy2_v4"
+        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v4"
         echo -e "\033[1;35m[IPv4节点链接]\033[0m$v4_status\n$LINK_V4\n"
         FULL_CLIP="$LINK_V4"
     }
     [ -n "${RAW_IP6:-}" ] && {
-        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_hy2_v6"
+        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v6"
         echo -e "\033[1;36m[IPv6节点链接]\033[0m$v6_status\n$LINK_V6\n"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
     }
-
-    # --- VLESS 节点部分修正 ---
-    echo -e "\033[1;32m[VLESS 节点]\033[0m (端口: $RAW_VLESS_PORT)"
-    
-    # 修正 V_PARAM：移除 pbk (Reality专用)，确保 ech 和 ws 路径正确
-    local V_PARAM="encryption=none&security=tls&sni=$RAW_SNI&fp=chrome&type=ws&host=$RAW_SNI&path=%2Fvless-ws"
-    [ -n "$RAW_ECH_CONFIG" ] && V_PARAM="${V_PARAM}&ech=${RAW_ECH_CONFIG}"
-    
-    [ -n "${RAW_IP4:-}" ] && {
-        local LINK_VLESS="vless://$RAW_VLESS_UUID@$RAW_IP4:$RAW_VLESS_PORT?${V_PARAM}#$(hostname)_vless_ech"
-        echo -e "\033[1;35m[VLESS+ECH 链接]\033[0m\n$LINK_VLESS\n"
-        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_VLESS"
-    }
-
     echo -e "\033[1;34m==========================================\033[0m"
-    if [ -n "$RAW_ECH_CONFIG" ]; then
-        echo -e "\033[1;36m[v2rayN 配置指南]\033[0m"
-        echo -e "1. 导入后，双击节点 -> \033[1;33m传输设置\033[0m -> 确认 \033[1;32mWebSocket\033[0m 已选定。"
-        echo -e "2. \033[1;33m伪装路径\033[0m 应为: \033[1;32m/vless-ws\033[0m"
-        echo -e "3. \033[1;33mTLS设置\033[0m: \033[1;32mserverName\033[0m 填写 \033[1;32m$RAW_SNI\033[0m"
-        echo -e "4. \033[1;33mECH配置\033[0m: 若未自动生效，请将下方字符串手动填入 \033[1;35mECHConfig\033[0m 栏："
-        echo -e "\033[0;32m$RAW_ECH_CONFIG\033[0m\n"
-    fi
-    echo -e "\033[1;32m[安全提示]\033[0m 协议组：Hysteria2 (UDP) + VLESS-WS (TCP) + ECH"
+    [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m 证书 SHA256 指纹已集成，支持强校验"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
