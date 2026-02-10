@@ -972,10 +972,24 @@ EOF
         [ "$OS" = "alpine" ] && rc-service wireproxy status >/dev/null 2>&1 || systemctl is-active --quiet wireproxy
     }
 
+    # 获取 IP 信息（原生 vs WARP）
+    _display_ip_status() {
+        local native_ip=$(curl -s4m 5 https://api.ip.sb/ip || echo "获取失败")
+        echo -e "原生出口 IP: \033[1;33m$native_ip\033[0m"
+        
+        if _is_wp_running; then
+            # 通过 Wireproxy 的 Socks5 端口探测 IP
+            local warp_ip=$(curl -s4m 8 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo -e "\033[1;31m连接失败\033[0m")
+            echo -e "WARP 出口 IP: \033[1;32m$warp_ip\033[0m"
+        fi
+    }
+
     while true; do
         local st="[1;31m已禁用[0m"; _is_wp_running && st="[1;32m已启用 (127.0.0.1:$wp_port)[0m"
         echo -e "\n--- WARP 全自动管理 ---"
         echo -e "当前状态: $st"
+        _display_ip_status
+        echo -e "------------------------"
         echo -e "1. 启用/禁用 WARP"
         echo -e "2. 分流域名管理"
         echo -e "0. 返回主菜单"
@@ -1015,7 +1029,6 @@ EOF
                 ;;
             2)
                 _is_wp_running || { err "请先启用 WARP"; sleep 1; continue; }
-                # 提取当前的 domain_suffix 数组
                 local dom_list=$(jq -r '.route.rules[] | select(.outbound=="warp-out") | .domain_suffix[]' "$sb_conf" 2>/dev/null)
                 echo -e "\n--- 当前分流域名列表 ---"
                 if [ -z "$dom_list" ]; then echo " (列表为空)"; else echo "$dom_list" | sed 's/^/ - /'; fi
