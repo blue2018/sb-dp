@@ -903,9 +903,9 @@ get_warp_credentials() {
     id=$(echo "$res" | jq -r '.id // .result.id // empty')
     if [ -n "$id" ] && [ "$id" != "null" ]; then
         v6=$(echo "$res" | jq -r '.config.interface.addresses.v6 // .result.config.interface.addresses.v6 // empty')
-        [[ "$v6" != */* ]] && v6="${v6}/128"
+        [[ -n "$v6" && "$v6" != */* ]] && v6="${v6}/128"
         jq -nc --arg priv "$pr" --arg v6 "$v6" '{"priv":$priv,"v6":$v6}' > "$cache"
-        cat "$cache"
+        cat "$cache" && return 0
     else return 1; fi
 }
 
