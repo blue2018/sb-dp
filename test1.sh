@@ -906,9 +906,7 @@ get_warp_credentials() {
         [[ "$v6" != */* ]] && v6="${v6}/128"
         jq -nc --arg priv "$pr" --arg v6 "$v6" '{"priv":$priv,"v6":$v6}' > "$cache"
         cat "$cache"
-    else
-        return 1
-    fi
+    else return 1; fi
 }
 
 # WARP (Wireproxy) 管理主函数
@@ -948,8 +946,7 @@ warp_manager() {
     }
 
     while true; do
-        local st="[1;31m已禁用[0m"; _is_wp_running && st="[1;32m已启用 (127.0.0.1:$wp_port)[0m"
-        echo -e "\n--- WARP 全自动管理 ---\n当前状态: $st"; _display_ip_status
+        echo -e "\n--- WARP 全自动管理 ---"; _display_ip_status
         echo -e "------------------------\n1. 启用/禁用 WARP\n2. 分流域名管理\n0. 返回主菜单"
         read -r -p "请选择 [0-2]: " opt
         case "$opt" in
@@ -959,12 +956,15 @@ warp_manager() {
                else
                    _wp_install; local creds=$(get_warp_credentials) || { err "注册失败"; continue; }
                    cat > "$wp_conf" <<EOF
-[WG]
+[Interface]
 PrivateKey = $(echo "$creds" | jq -r .priv)
-IPv6 = $(echo "$creds" | jq -r .v6)
+Address = $(echo "$creds" | jq -r .v6)
 DNS = 1.1.1.1
-PeerPublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=
+
+[Peer]
+PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=
 Endpoint = engage.cloudflareclient.com:2408
+
 [Socks5]
 BindAddress = 127.0.0.1:$wp_port
 EOF
