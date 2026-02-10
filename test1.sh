@@ -923,14 +923,11 @@ warp_manager() {
         echo -e "原生出口: \033[1;33mIPV4: $v4 | IPV6: $v6\033[0m"
         
         if _is_warp_enabled; then
-            # 使用 sing-box 运行一个临时查询测试
-            info "正在通过 Sing-box 探测 WARP 状态..."
-            # 这里的逻辑是如果开启了，Sing-box 会自动处理分流
-            # 我们通过请求 google 来验证是否通畅
-            if curl -sI --connect-timeout 5 https://www.google.com >/dev/null; then
-                echo -e "WARP 状态: \033[1;32m已启用 (分流模式)\033[0m"
+            # 内部探测：验证分流是否生效
+            if curl -sI --connect-timeout 3 https://www.google.com >/dev/null; then
+                echo -e "WARP 状态: \033[1;32m已启用 (原生集成模式)\033[0m"
             else
-                echo -e "WARP 状态: \033[1;31m已配置但连接受阻\033[0m"
+                echo -e "WARP 状态: \033[1;33m已配置但握手失败 (查看日志)\033[0m"
             fi
         else
             echo -e "WARP 状态: \033[1;31m未启用\033[0m"
@@ -938,7 +935,7 @@ warp_manager() {
     }
 
     while true; do
-        echo -e "\n--- WARP 原生集成管理 (Sing-box 内置) ---"; _display_ip_status
+        echo -e "\n--- WARP 原生集成管理 (修复补丁版) ---"; _display_ip_status
         echo -e "----------------------------------------\n1. 启用/更新 WARP\n2. 禁用 WARP\n3. 分流域名管理\n0. 返回主菜单"
         read -r -p "请选择 [0-3]: " opt
         case "$opt" in
@@ -947,7 +944,6 @@ warp_manager() {
                local priv=$(echo "$creds" | jq -r .priv)
                local v6_addr=$(echo "$creds" | jq -r .v6)
                
-               # 构建 Sing-box 原生 Wireguard Outbound
                local warp_out=$(cat <<EOF
 {
   "type": "wireguard",
@@ -962,17 +958,23 @@ warp_manager() {
 }
 EOF
 )
-               # 写入配置：添加 outbound 并设置路由规则
+               # 核心修复：使用 // {} 和 // [] 确保路径存在，防止 Cannot iterate over null
                jq --argjson wout "$warp_out" --argjson doms "$DEFAULT_DOMAINS" '
+               (.outbounds //= []) | 
                del(.outbounds[]? | select(.tag=="warp-out")) | 
                .outbounds += [$wout] | 
+               (.route //= {}) | 
+               (.route.rules //= []) | 
                .route.rules |= (map(select(.outbound != "warp-out")) | [{ "domain_suffix": $doms, "outbound": "warp-out" }] + .)
                ' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
                
-               service_ctrl restart && succ "WARP 原生出口已启用" ;;
+               service_ctrl restart && succ "WARP 原生配置已更新并应用" ;;
             
             2) info "正在移除 WARP 配置..."
-               jq 'del(.outbounds[]? | select(.tag=="warp-out")) | .route.rules |= map(select(.outbound != "warp-out"))' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
+               jq '
+               (.outbounds //= []) | del(.outbounds[]? | select(.tag=="warp-out")) | 
+               (.route.rules //= []) | .route.rules |= map(select(.outbound != "warp-out"))
+               ' "$sb_conf" > "${sb_conf}.tmp" && mv "${sb_conf}.tmp" "$sb_conf"
                service_ctrl restart && succ "WARP 已禁用" ;;
             
             3) _is_warp_enabled || { err "未启用"; continue; }
@@ -984,7 +986,7 @@ EOF
                else 
                    jq --arg dom "$dom" '(.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) += [$dom] | (.route.rules[]? | select(.outbound=="warp-out") | .domain_suffix) |= unique' "$sb_conf" > "${sb_conf}.tmp"
                fi
-               mv "${sb_conf}.tmp" "$sb_conf" && service_ctrl restart && succ "分流列表已同步" ;;
+               mv "${sb_conf}.tmp" "$sb_conf" && service_ctrl restart && succ "分流列表同步成功" ;;
             
             0) return 0 ;;
         esac
