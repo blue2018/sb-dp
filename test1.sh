@@ -808,7 +808,7 @@ setup_service() {
         cat > /etc/init.d/sing-box <<EOF
 #!/sbin/openrc-run
 name="sing-box"
-description="Sing-box Service"
+description="Sing-box Service (Hy2 & VLESS)"
 supervisor="supervise-daemon"
 respawn_delay=10
 respawn_max=5
@@ -828,8 +828,8 @@ start_pre() { /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_err.
 EOF
         chmod +x /etc/init.d/sing-box
         rc-update add sing-box default >/dev/null 2>&1 || true
-        sync   # 确保环境文件与服务脚本落盘，防止启动瞬时读取失败
-		(rc-service sing-box restart >/dev/null 2>&1 || true) &
+        sync
+        (rc-service sing-box restart >/dev/null 2>&1 || true) &
     else
         local mem_config=""; local cpu_quota=$((real_c * 100))
         local io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
@@ -840,7 +840,7 @@ EOF
         [ "${final_nice}" -eq 0 ] && systemd_nice_line="# Nice=0 (Environment restricted)"
         cat > /etc/systemd/system/sing-box.service <<EOF
 [Unit]
-Description=Sing-box Service
+Description=Sing-box Service (Hy2 & VLESS)
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=0
@@ -869,27 +869,26 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload >/dev/null 2>&1
         systemctl enable sing-box >/dev/null 2>&1 || true
-        sync   # 确保环境文件与服务配置落盘
-		(systemctl restart sing-box >/dev/null 2>&1 || true) &
+        sync
+        (systemctl restart sing-box >/dev/null 2>&1 || true) &
     fi
-    set +e     # 关闭 set -e，这是防止脚本在 pidof 失败时直接退出的关键核心
+    set +e
     for i in {1..40}; do
         pid=$(pgrep -x "sing-box" 2>/dev/null | head -n 1)
         [ -z "${pid}" ] && pid=$(pgrep -f "sing-box run" | awk '{print $1}' | head -n 1)
         [ -n "${pid}" ] && [ -e "/proc/${pid}" ] && break
         sleep 0.3
     done
-    # 异步补课逻辑。在进程确认拉起后，从脚本主体执行一次优化，这样既保证了优化生效，又不会因为优化脚本运行时间长而导致服务启动超时
     ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 &
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
-        succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
+        succ "sing-box 启动成功 | 模式: Hy2 + VLESS | 可用内存: $(( ${ma:-0} / 1024 )) MB"
     else
         err "服务拉起超时，请检查日志："
         [ "$OS" = "alpine" ] && { [ -f /var/log/messages ] && tail -n 10 /var/log/messages || logread | tail -n 10; } || journalctl -u sing-box -n 10 --no-pager 2>/dev/null
         set -e; exit 1
     fi
-	set -e
+    set -e
 }
 
 # ==========================================
