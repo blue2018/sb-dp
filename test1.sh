@@ -926,18 +926,21 @@ warp_manager() {
 
     _wp_ctrl() {
         if [ "$1" = "start" ]; then
-            killall wireproxy >/dev/null 2>&1; nohup $wp_bin -c $wp_conf > /var/log/wireproxy.log 2>&1 & sleep 3
+            killall wireproxy >/dev/null 2>&1
+            nohup $wp_bin -c $wp_conf > /var/log/wireproxy.log 2>&1 &
+            sleep 5  # 延长等待时间，确保 WireGuard 握手成功
         else
             killall wireproxy >/dev/null 2>&1; rm -f /var/log/wireproxy.log
         fi
     }
 
-    _display_ip_status() {
+	_display_ip_status() {
         local v4=$(curl -s4m 3 https://api.ip.sb/ip || echo "无") v6=$(curl -s6m 3 https://api.ip.sb/ip || echo "无")
         echo -e "原生出口: \033[1;33mIPV4: $v4 | IPV6: $v6\033[0m"
         if _is_wp_running; then
-            local wv4=$(curl -s4m 6 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo "失败")
-            local wv6=$(curl -s6m 6 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo "失败")
+            # 增加 -L (跟随重定向) 和 --retry (重试)，给 WARP 握手留缓冲
+            local wv4=$(curl -s4L --retry 2 --retry-delay 2 -m 8 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo "失败")
+            local wv6=$(curl -s6L --retry 2 --retry-delay 2 -m 8 --proxy socks5h://127.0.0.1:$wp_port https://api.ip.sb/ip || echo "失败")
             echo -e "WARP 出口: \033[1;32mIPV4: $wv4 | IPV6: $wv6\033[0m"
         else
             echo -e "WARP 出口: \033[1;31m未运行\033[0m"
