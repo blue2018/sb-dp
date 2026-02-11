@@ -120,72 +120,27 @@ prompt_for_port() {
 
 # 生成 ECC P-256 高性能证书
 generate_cert() {
-    local domain="${1:-$TLS_DOMAIN}"
-    local mode="${2:-hy2}"
     local CERT_DIR="/etc/sing-box/certs"
+    [ -f "$CERT_DIR/fullchain.pem" ] && return 0
+    info "生成 ECC P-256 高性能证书..."
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-
-    if [ "$mode" = "vless" ]; then
-        info "正在校验域名解析: $domain ..."
-        local resolved_ip=$(nslookup "$domain" 8.8.8.8 2>/dev/null | grep -A 1 "Name:" | grep "Address" | awk '{print $2}' | head -n1)
-        [ -z "$resolved_ip" ] && resolved_ip=$(ping -c1 "$domain" 2>/dev/null | sed -n '1p' | sed 's/.*(\(.*\)).*/\1/' | cut -d: -f1)
-
-        if [ "$resolved_ip" != "$RAW_IP4" ] && [ "$resolved_ip" != "$RAW_IP6" ]; then
-            warn "域名解析未指向本机，VLESS 将使用自签名证书。"
-            cp "$CERT_DIR/fullchain.pem" "$CERT_DIR/vless_fullchain.pem"
-            cp "$CERT_DIR/privkey.pem" "$CERT_DIR/vless_privkey.pem"
-            return 0
-        fi
-        succ "解析校验通过 [✔]"
-
-        info "正在尝试申请正式证书 (Standalone)..."
-        # 使用隔离子 Shell，并设置 15 秒超时，防止死锁
-        (
-            [ -f /etc/alpine-release ] && apk add --no-cache socat curl >/dev/null 2>&1
-            fuser -k 80/tcp >/dev/null 2>&1 || true
-            
-            if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
-                curl -s https://get.acme.sh | sh >/dev/null 2>&1 || true
-            fi
-            
-            # 仅尝试一次 Let's Encrypt，不通则跳过
-            "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1
-            "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --timeout 15 >/dev/null 2>&1
-            
-            "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
-                --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
-                --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
-        ) || true
-
-        # 检查是否申请成功
-        if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
-            succ "VLESS 正式证书申请成功"
-        else
-            warn "正式证书申请环境受限，已自动切换为自签证书兜底"
-            cp "$CERT_DIR/fullchain.pem" "$CERT_DIR/vless_fullchain.pem"
-            cp "$CERT_DIR/privkey.pem" "$CERT_DIR/vless_privkey.pem"
-            succ "自签证书已就绪 (配合 CF 模式建议开启 TLS)"
-        fi
-    else
-        # 原始 ECC P-256 自签名逻辑 (必须运行，作为 VLESS 的来源)
-        [ -f "$CERT_DIR/fullchain.pem" ] && return 0
-        info "生成 ECC P-256 高性能证书..."
-        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+    
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+        -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
+        -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" \
+        -addext "basicConstraints=critical,CA:FALSE" \
+        -addext "subjectAltName=DNS:$TLS_DOMAIN,DNS:*.$TLS_DOMAIN" \
+        -addext "extendedKeyUsage=serverAuth" &>/dev/null || {
+        # 兼容老版本：去除扩展重试
+        openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
             -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-            -days 3650 -sha256 -subj "/CN=$domain" \
-            -addext "basicConstraints=critical,CA:FALSE" \
-            -addext "subjectAltName=DNS:$domain,DNS:*.$domain" \
-            -addext "extendedKeyUsage=serverAuth" &>/dev/null || {
-            openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
-                -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-                -days 3650 -subj "/CN=$domain" &>/dev/null
-        }
+            -days 3650 -subj "/CN=$TLS_DOMAIN" &>/dev/null
+    }
 
-        [ -s "$CERT_DIR/fullchain.pem" ] && {
-            openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-            chmod 600 "$CERT_DIR"/*.pem; succ "ECC 证书就绪"
-        } || { err "证书生成失败"; exit 1; }
-    fi
+    [ -s "$CERT_DIR/fullchain.pem" ] && {
+        openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
+        chmod 600 "$CERT_DIR"/*.pem; succ "ECC 证书就绪"
+    } || { err "证书生成失败"; exit 1; }
 }
 
 # 获取公网IP
