@@ -181,11 +181,9 @@ generate_cert() {
             if [ -n "$CF_TOKEN_TEMP" ]; then
                 info "执行 DNS-01 验证 (Cloudflare API)..."
                 export CF_Token="$CF_TOKEN_TEMP"
-                # DNS 模式完全不依赖本地端口，0 等待执行
-                $ACME --issue --dns dns_cf -d "$domain" --insecure
+				$ACME --issue --dns dns_cf -d "$domain" --dnssleep 10 --insecure
             else
                 info "执行 Standalone 验证 (占用 80 端口)..."
-                # 仅在 HTTP 模式下尝试释放 80 端口
                 fuser -k 80/tcp >/dev/null 2>&1 || true
                 $ACME --issue --standalone -d "$domain" --insecure --timeout 10
             fi
