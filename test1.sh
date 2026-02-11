@@ -779,6 +779,7 @@ create_config() {
     [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
+    # 基础配置：移除了 outbounds 里的 deprecated 字段，并预留了 route 结构以减少警告
     local config_json=$(cat <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -809,7 +810,14 @@ create_config() {
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
+  "outbounds": [
+    { "type": "direct", "tag": "direct-out" }
+  ],
+  "route": {
+    "rules": [
+      { "protocol": "dns", "outbound": "direct-out" }
+    ]
+  }
 }
 EOF
 )
@@ -818,29 +826,41 @@ EOF
         local v_path="/$(openssl rand -hex 4)"
         local SB_PATH=$(command -v sing-box || echo "/usr/bin/sing-box")
         
-        if [ ! -f /etc/sing-box/ech_key.json ]; then
-            $SB_PATH generate ech-keypair "$VLESS_DOMAIN" > /etc/sing-box/ech_key.json
+        # 修正点 1：使用 sed 提取带破折号外壳的完整 PEM 块，这是 v1.12.x 成功启动的关键
+        local raw_ech=$($SB_PATH generate ech-keypair "$VLESS_DOMAIN")
+        local epem=$(echo "$raw_ech" | sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p')
+        
+        # 兜底：如果提取为空，则不启用 ECH 以免导致 FATAL
+        if [ -n "$epem" ]; then
+            config_json=$(echo "$config_json" | jq --arg uuid "$v_uuid" --arg path "$v_path" --arg sni "$VLESS_DOMAIN" --arg epem "$epem" \
+            '.inbounds += [{
+                "type": "vless", "tag": "vless-in", "listen": "::", "listen_port": 443,
+                "users": [{"uuid": $uuid}],
+                "tls": {
+                    "enabled": true, "server_name": $sni,
+                    "certificate_path": "/etc/sing-box/certs/vless_fullchain.pem", 
+                    "key_path": "/etc/sing-box/certs/vless_privkey.pem",
+                    "ech": { 
+                        "enabled": true, 
+                        "key": [ $epem ] 
+                    }
+                },
+                "transport": {"type": "ws", "path": $path}
+            }]')
+        else
+            # 如果 ECH 密钥生成异常，退回到普通 TLS 模式，保证 VLESS 至少能跑
+            config_json=$(echo "$config_json" | jq --arg uuid "$v_uuid" --arg path "$v_path" --arg sni "$VLESS_DOMAIN" \
+            '.inbounds += [{
+                "type": "vless", "tag": "vless-in", "listen": "::", "listen_port": 443,
+                "users": [{"uuid": $uuid}],
+                "tls": {
+                    "enabled": true, "server_name": $sni,
+                    "certificate_path": "/etc/sing-box/certs/vless_fullchain.pem", 
+                    "key_path": "/etc/sing-box/certs/vless_privkey.pem"
+                },
+                "transport": {"type": "ws", "path": $path}
+            }]')
         fi
-        
-        local epub=$(jq -r '.public_key' /etc/sing-box/ech_key.json)
-        local epriv=$(jq -r '.private_key' /etc/sing-box/ech_key.json)
-        
-        # 【修正点】ECH 内部字段由 key_pairs 修改为 key
-        config_json=$(echo "$config_json" | jq --arg uuid "$v_uuid" --arg path "$v_path" --arg sni "$VLESS_DOMAIN" --arg epub "$epub" --arg epriv "$epriv" \
-        '.inbounds += [{
-            "type": "vless", "tag": "vless-in", "listen": "::", "listen_port": 443,
-            "users": [{"uuid": $uuid}],
-            "tls": {
-                "enabled": true, "server_name": $sni,
-                "certificate_path": "/etc/sing-box/certs/vless_fullchain.pem", 
-                "key_path": "/etc/sing-box/certs/vless_privkey.pem",
-                "ech": { 
-                    "enabled": true, 
-                    "key": [{"public_key": $epub, "private_key": $epriv}] 
-                }
-            },
-            "transport": {"type": "ws", "path": $path}
-        }]')
     fi
     echo "$config_json" > "/etc/sing-box/config.json" && chmod 600 "/etc/sing-box/config.json"
 }
