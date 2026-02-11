@@ -131,8 +131,7 @@ generate_cert() {
         [ -z "$resolved_ip" ] && resolved_ip=$(ping -c1 "$domain" 2>/dev/null | sed -n '1p' | sed 's/.*(\(.*\)).*/\1/' | cut -d: -f1)
 
         if [ "$resolved_ip" != "$RAW_IP4" ] && [ "$resolved_ip" != "$RAW_IP6" ]; then
-            echo -e "\033[1;31m[错误] 域名解析校验失败！\033[0m"
-            warn "请先在 Cloudflare 关闭小云朵。跳过 VLESS 配置。"
+            warn "域名解析校验失败！解析: ${resolved_ip:-空} | 本机: $RAW_IP4"
             INSTALL_VLESS=false; return 1
         fi
         succ "解析校验通过 [✔]"
@@ -140,42 +139,45 @@ generate_cert() {
         info "正在申请 VLESS 正式证书 (Standalone 模式)..."
         
         (
-            [ -f /etc/alpine-release ] && apk add --no-cache socat curl >/dev/null 2>&1
+            # 1. 补齐依赖并【暴力放行 80 端口】
+            [ -f /etc/alpine-release ] && apk add --no-cache socat curl iproute2 >/dev/null 2>&1
+            iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1
+            ip6tables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1
+            
+            # 2. 彻底杀死可能占用 80 的进程 (Nginx/Caddy/Sing-box等)
+            fuser -k 80/tcp >/dev/null 2>&1 || true
+            
             if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
                 curl -s https://get.acme.sh | sh >/dev/null 2>&1 || true
             fi
             
-            # 【核心修复】强制释放端口，切换为 Let's Encrypt (兼容性更好且免邮箱)
-            fuser -k 80/tcp >/dev/null 2>&1 || true
+            # 3. 优先使用 Let's Encrypt
             "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1
             
-            # 申请并安装
-            "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --log /tmp/acme_vless.log && \
-            "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
-                --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
-                --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
+            # 尝试申请
+            if "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --log /tmp/acme_vless.log; then
+                "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
+                    --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
+                    --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
+            else
+                # 4. LE 失败则回退 ZeroSSL 并强制注册
+                info "LE 验证受阻，切换 ZeroSSL 备用..."
+                "$HOME/.acme.sh/acme.sh" --register-account -m "admin@$domain" --server zerossl >/dev/null 2>&1
+                "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --server zerossl --insecure >> /tmp/acme_vless.log 2>&1
+                "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
+                    --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
+                    --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
+            fi
         ) || true
 
         if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
             succ "VLESS 正式证书申请成功"
         else
-            # 如果 LE 申请失败，尝试为 ZeroSSL 自动注册并重试一次
-            info "LE 申请异常，尝试切换 ZeroSSL 备用节点..."
-            (
-                "$HOME/.acme.sh/acme.sh" --register-account -m "admin@$domain" --server zerossl >/dev/null 2>&1
-                "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --server zerossl --insecure >> /tmp/acme_vless.log 2>&1 && \
-                "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" --fullchain-file "$CERT_DIR/vless_fullchain.pem" --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
-            ) || true
-            
-            if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
-                succ "VLESS 正式证书申请成功 (ZeroSSL)"
-            else
-                warn "VLESS 证书申请失败。请检查 80 端口或 Cloudflare 小云朵状态。"
-                INSTALL_VLESS=false
-            fi
+            warn "证书申请最终失败，请检查防火墙设置。将不启用 VLESS。"
+            INSTALL_VLESS=false
         fi
     else
-        # 原有 ECC P-256 自签名逻辑 (保持不动)
+        # 原有 ECC P-256 自签名逻辑 (100% 保留)
         [ -f "$CERT_DIR/fullchain.pem" ] && return 0
         info "生成 ECC P-256 高性能证书..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
