@@ -47,10 +47,10 @@ detect_os() {
 # 依赖安装 (容错增强版)
 install_dependencies() {
     info "正在检查系统类型..."
-    local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd" OPT="ethtool kmod wireguard-tools"
-    if command -v apk >/dev/null 2>&1; then PM="apk"; DEPS="$DEPS coreutils util-linux-misc"
-    elif command -v apt-get >/dev/null 2>&1; then PM="apt"; DEPS="$DEPS util-linux"
-    else PM="yum"; DEPS="${DEPS//netcat-openbsd/nc}"; DEPS="${DEPS//procps/procps-ng} util-linux"; fi
+    local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd socat" OPT="ethtool kmod wireguard-tools"
+    if command -v apk >/dev/null 2>&1; then PM="apk"; DEPS="$DEPS coreutils util-linux-misc bind-tools"
+    elif command -v apt-get >/dev/null 2>&1; then PM="apt"; DEPS="$DEPS util-linux dnsutils"
+    else PM="yum"; DEPS="${DEPS//netcat-openbsd/nc}"; DEPS="${DEPS//procps/procps-ng} util-linux bind-utils"; fi
     [ -w /proc/sys/vm/drop_caches ] && sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
     case "$PM" in
         apk) info "检测到 Alpine 系统，执行分批安装依赖..."
@@ -71,7 +71,7 @@ install_dependencies() {
              $(command -v dnf || echo "yum") install -y $OPT >/dev/null 2>&1 || true ;;
     esac
     update-ca-certificates 2>/dev/null || true
-    for cmd in jq curl tar bash pgrep taskset; do command -v "$cmd" >/dev/null 2>&1 || { [ "$PM" = "apk" ] && apk add --no-cache util-linux >/dev/null 2>&1 || { err "核心依赖 ${cmd} 安装失败，请检查网络或源"; exit 1; }; } done
+    for cmd in jq curl tar bash pgrep taskset socat nslookup; do command -v "$cmd" >/dev/null 2>&1 || { [ "$PM" = "apk" ] && apk add --no-cache util-linux >/dev/null 2>&1 || { err "核心依赖 ${cmd} 安装失败，请检查网络或源"; exit 1; }; } done
     succ "所需依赖已就绪"
 }
 
@@ -126,17 +126,36 @@ generate_cert() {
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
 
     if [ "$mode" = "vless" ]; then
-        # VLESS 模式使用 acme.sh 申请正式证书
+        info "正在校验域名解析: $domain ..."
+        local resolved_ip=$(nslookup "$domain" 8.8.8.8 2>/dev/null | grep -A 1 "Name:" | grep "Address" | awk '{print $2}' | head -n1)
+        if [ -z "$resolved_ip" ]; then resolved_ip=$(ping -c1 "$domain" 2>/dev/null | sed -n '1p' | sed 's/.*(\(.*\)).*/\1/' | cut -d: -f1); fi
+
+        if [ "$resolved_ip" != "$RAW_IP4" ] && [ "$resolved_ip" != "$RAW_IP6" ]; then
+            warn "域名解析校验失败！"
+            echo -e "   域名解析地址: \033[1;31m${resolved_ip:-无法解析}\033[0m"
+            echo -e "   本机公网地址: \033[1;32m$RAW_IP4 / $RAW_IP6\033[0m"
+            warn "请确认解析已生效且暂时关闭了小云朵。将跳过 VLESS 配置。"
+            INSTALL_VLESS=false; return 1
+        fi
+        succ "解析校验通过 [✔]"
+
         info "正在为 VLESS 域名 $domain 申请正式证书..."
         [ ! -f ~/.acme.sh/acme.sh ] && curl https://get.acme.sh | sh &>/dev/null
+        command -v socat >/dev/null 2>&1 || { [ -f /etc/alpine-release ] && apk add --no-cache socat >/dev/null 2>&1; }
+        
         fuser -k 80/tcp >/dev/null 2>&1
-        ~/.acme.sh/acme.sh --issue --standalone -d "$domain" --force && \
+        ~/.acme.sh/acme.sh --issue --standalone -d "$domain" --force --insecure && \
         ~/.acme.sh/acme.sh --install-cert -d "$domain" \
             --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
-            --key-file "$CERT_DIR/vless_privkey.pem"
-        [ -s "$CERT_DIR/vless_fullchain.pem" ] && succ "VLESS 证书已就绪" || warn "VLESS 证书申请失败，可能影响其连接"
+            --key-file "$CERT_DIR/vless_privkey.pem" || true
+
+        if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
+            succ "VLESS 证书已就绪"
+        else
+            warn "VLESS 证书申请失败，将不启用 VLESS 协议。"
+            INSTALL_VLESS=false
+        fi
     else
-        # 100% 保留你原始的自签 ECC 逻辑
         [ -f "$CERT_DIR/fullchain.pem" ] && return 0
         info "生成 ECC P-256 高性能证书..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
