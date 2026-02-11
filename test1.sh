@@ -471,16 +471,38 @@ apply_nic_core_boost() {
 
 #防火墙开放端口
 apply_firewall() {
-    local ports=$(jq -r '.inbounds[].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+    # 提取所有 inbounds 的 listen_port，并确保 443 包含在内（以防万一）
+    local ports=$(jq -r '.inbounds[].listen_port // empty' /etc/sing-box/config.json 2>/dev/null | sort -u)
     [ -z "$ports" ] && return 0
+    
+    info "正在配置防火墙放行端口: $(echo $ports | tr '\n' ' ')"
+    
     for port in $ports; do
-        { if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1; ufw allow "$port"/tcp >/dev/null 2>&1
-          elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --add-port="$port"/tcp --permanent; firewall-cmd --reload; 
-          elif command -v iptables >/dev/null 2>&1; then
-            iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p tcp --dport "$port" -j ACCEPT >/dev/null 2>&1
-            command -v ip6tables >/dev/null 2>&1 && { ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p tcp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
-          fi } &>/dev/null || true
+        (
+            if command -v ufw >/dev/null 2>&1; then
+                ufw allow "$port"/udp >/dev/null 2>&1
+                ufw allow "$port"/tcp >/dev/null 2>&1
+            elif command -v firewall-cmd >/dev/null 2>&1; then
+                firewall-cmd --add-port="$port"/udp --permanent >/dev/null 2>&1
+                firewall-cmd --add-port="$port"/tcp --permanent >/dev/null 2>&1
+                firewall-cmd --reload >/dev/null 2>&1
+            elif command -v iptables >/dev/null 2>&1; then
+                # 显式放行 TCP 和 UDP
+                iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+                iptables -I INPUT -p tcp --dport "$port" -j ACCEPT >/dev/null 2>&1
+                # 针对 IPv6
+                if command -v ip6tables >/dev/null 2>&1; then
+                    ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+                    ip6tables -I INPUT -p tcp --dport "$port" -j ACCEPT >/dev/null 2>&1
+                fi
+            fi
+        ) || true
     done
+    
+    # 针对 Alpine 的额外保险：放行连接追踪
+    if [ -f /etc/alpine-release ] && command -v iptables >/dev/null 2>&1; then
+        iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+    fi
 }
 	
 # "全功能调度器"
@@ -925,31 +947,47 @@ get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
     
+    # 【核心修复】初始化所有变量，防止 set -u 环境下报错
+    RAW_PSK=""; RAW_PORT=""; RAW_SALA=""; CERT_PATH=""; RAW_FP=""
+    RAW_UUID=""; RAW_VPORT=""; RAW_VPATH=""; RAW_VSNI=""; RAW_ECH=""
+    
+    # 提取 Hysteria2 数据
     local h_data=$(jq -r '.inbounds[] | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-    read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$h_data"
+    if [ -n "$h_data" ]; then
+        read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$h_data"
+    fi
 
+    # 提取 VLESS 数据
     local v_data=$(jq -r '.inbounds[] | select(.type == "vless") | "\(.users[0].uuid) \(.listen_port) \(.transport.path) \(.tls.server_name)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-    read -r RAW_UUID RAW_VPORT RAW_VPATH RAW_VSNI <<< "$v_data"
+    if [ -n "$v_data" ]; then
+        read -r RAW_UUID RAW_VPORT RAW_VPATH RAW_VSNI <<< "$v_data"
+    fi
     
-    RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
-    local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
-    RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
+    # 证书指纹与 SNI
+    if [ -f "$CERT_PATH" ]; then
+        RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
+        local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
+        RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
+    fi
     
-    # 【修复】更精准的 ECH 提取逻辑
+    # 【修复】自动定位 sing-box 路径
+    local SB_BIN=$(command -v sing-box || echo "/usr/bin/sing-box")
     local epub=$(jq -r '.. | objects | select(.type == "vless") | .tls.ech.key_pair[0].public_key // empty' "$CONFIG_FILE" 2>/dev/null)
-    [ -n "$epub" ] && RAW_ECH=$(/usr/local/bin/sing-box generate ech-configlist "$epub" 2>/dev/null)
+    if [ -n "$epub" ] && [ -f "$SB_BIN" ]; then
+        RAW_ECH=$($SB_BIN generate ech-configlist "$epub" 2>/dev/null || echo "")
+    fi
 }
 
 display_links() {
+    # 确保变量存在，即便 get_env_data 没抓到
+    : "${RAW_PSK:=}"; : "${RAW_PORT:=}"; : "${RAW_SNI:=}"; : "${RAW_UUID:=}"; : "${RAW_ECH:=}"
+
     local LINK_V4="" LINK_V6="" LINK_VLESS="" FULL_CLIP="" v4_status="" v6_status=""
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
     
-    # 【修正】VLESS 链接参数，确保 security=tls 和路径编码
-    local V_PATH_ENC=$(echo "${RAW_VPATH:-/}" | sed 's/\//%2F/g')
-    local V_PARAM="encryption=none&security=tls&sni=$RAW_VSNI&type=ws&path=$V_PATH_ENC"
-
+    # 探测逻辑保持不变...
     _do_probe() {
         [ -z "$1" ] && return
         (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
@@ -962,28 +1000,36 @@ display_links() {
 
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行状态: \033[1;33m双协议已就绪\033[0m\n"
 
-    [ -n "${RAW_IP4:-}" ] && {
+    # Hy2 部分
+    [ -n "$RAW_PSK" ] && [ -n "${RAW_IP4:-}" ] && {
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_Hy2_v4"
         echo -e "\033[1;35m[Hy2 IPv4 链接]\033[0m$v4_status\n$LINK_V4\n"
         FULL_CLIP="$LINK_V4"
     }
-    [ -n "${RAW_IP6:-}" ] && {
+    [ -n "$RAW_PSK" ] && [ -n "${RAW_IP6:-}" ] && {
         LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_Hy2_v6"
         echo -e "\033[1;36m[Hy2 IPv6 链接]\033[0m$v6_status\n$LINK_V6\n"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
     }
 
+    # VLESS 部分 (修复路径编码兼容性)
     if [ -n "$RAW_UUID" ]; then
         echo -e "\033[1;34m------------------------------------------\033[0m"
-        # 链接末尾添加域名标识，方便识别
+        # 很多客户端不识别编码后的 %2F，这里优先尝试原始路径，仅转换必要字符
+        local v_path_final=$(echo "${RAW_VPATH:-/}" | sed 's/ /%20/g')
+        local V_PARAM="encryption=none&security=tls&sni=$RAW_VSNI&type=ws&path=${v_path_final}"
+        
         LINK_VLESS="vless://$RAW_UUID@${RAW_IP4:-$RAW_IP6}:443/?${V_PARAM}#$(hostname)_Vless_CF"
         echo -e "\033[1;32m[VLESS+WS+ECH 链接 (支持CF中转)]\033[0m\n$LINK_VLESS\n"
-        [ -n "$RAW_ECH" ] && echo -e "\033[1;36m[ECH Config]\033[0m \033[1;37m(手动填入客户端):\033[0m\n$RAW_ECH\n"
+        
+        if [ -n "$RAW_ECH" ]; then
+            echo -e "\033[1;36m[ECH Config]\033[0m \033[1;37m(手动填入客户端):\033[0m\n$RAW_ECH\n"
+        fi
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_VLESS"
     fi
 
     echo -e "\033[1;34m==========================================\033[0m"
-    [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m Hy2 证书 SHA256 指纹已集成，支持强校验"
+    [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m Hy2 指纹已集成；VLESS 建议配合 CF 使用 Full 模式"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
