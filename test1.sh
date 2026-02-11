@@ -120,27 +120,41 @@ prompt_for_port() {
 
 # 生成 ECC P-256 高性能证书
 generate_cert() {
+    local domain="${1:-$TLS_DOMAIN}"
+    local mode="${2:-hy2}"
     local CERT_DIR="/etc/sing-box/certs"
-    [ -f "$CERT_DIR/fullchain.pem" ] && return 0
-    info "生成 ECC P-256 高性能证书..."
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-    
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-        -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-        -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" \
-        -addext "basicConstraints=critical,CA:FALSE" \
-        -addext "subjectAltName=DNS:$TLS_DOMAIN,DNS:*.$TLS_DOMAIN" \
-        -addext "extendedKeyUsage=serverAuth" &>/dev/null || {
-        # 兼容老版本：去除扩展重试
-        openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
-            -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-            -days 3650 -subj "/CN=$TLS_DOMAIN" &>/dev/null
-    }
 
-    [ -s "$CERT_DIR/fullchain.pem" ] && {
-        openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        chmod 600 "$CERT_DIR"/*.pem; succ "ECC 证书就绪"
-    } || { err "证书生成失败"; exit 1; }
+    if [ "$mode" = "vless" ]; then
+        # VLESS 模式使用 acme.sh 申请正式证书
+        info "正在为 VLESS 域名 $domain 申请正式证书..."
+        [ ! -f ~/.acme.sh/acme.sh ] && curl https://get.acme.sh | sh &>/dev/null
+        fuser -k 80/tcp >/dev/null 2>&1
+        ~/.acme.sh/acme.sh --issue --standalone -d "$domain" --force && \
+        ~/.acme.sh/acme.sh --install-cert -d "$domain" \
+            --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
+            --key-file "$CERT_DIR/vless_privkey.pem"
+        [ -s "$CERT_DIR/vless_fullchain.pem" ] && succ "VLESS 证书已就绪" || warn "VLESS 证书申请失败，可能影响其连接"
+    else
+        # 100% 保留你原始的自签 ECC 逻辑
+        [ -f "$CERT_DIR/fullchain.pem" ] && return 0
+        info "生成 ECC P-256 高性能证书..."
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
+            -days 3650 -sha256 -subj "/CN=$domain" \
+            -addext "basicConstraints=critical,CA:FALSE" \
+            -addext "subjectAltName=DNS:$domain,DNS:*.$domain" \
+            -addext "extendedKeyUsage=serverAuth" &>/dev/null || {
+            openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
+                -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
+                -days 3650 -subj "/CN=$domain" &>/dev/null
+        }
+
+        [ -s "$CERT_DIR/fullchain.pem" ] && {
+            openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
+            chmod 600 "$CERT_DIR"/*.pem; succ "ECC 证书就绪"
+        } || { err "证书生成失败"; exit 1; }
+    fi
 }
 
 # 获取公网IP
@@ -404,14 +418,16 @@ apply_nic_core_boost() {
 
 #防火墙开放端口
 apply_firewall() {
-    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    [ -z "$port" ] && return 0
-    {   if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
-        elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --list-ports | grep -q "$port/udp" || { firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --reload; } >/dev/null 2>&1
-        elif command -v iptables >/dev/null 2>&1; then
-            iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
-            command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
-        fi    } || true
+    local ports=$(jq -r '.inbounds[].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+    [ -z "$ports" ] && return 0
+    for port in $ports; do
+        { if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1; ufw allow "$port"/tcp >/dev/null 2>&1
+          elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --add-port="$port"/tcp --permanent; firewall-cmd --reload; 
+          elif command -v iptables >/dev/null 2>&1; then
+            iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p tcp --dport "$port" -j ACCEPT >/dev/null 2>&1
+            command -v ip6tables >/dev/null 2>&1 && { ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p tcp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
+          fi } &>/dev/null || true
+    done
 }
 	
 # "全功能调度器"
@@ -666,30 +682,30 @@ install_singbox() {
 # ==========================================
 create_config() {
     local PORT_HY2="${1:-}"
-	local cur_bw="${VAR_HY2_BW:-200}"
+    local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"; local PSK=""; local SALA_PASS=""
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
+    # 保留原始内存自适应逻辑
+    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
+    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # 1. 端口确定逻辑
+    # 1. 端口确定
     if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
+        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(printf "\n" | prompt_for_port); fi
     fi
-    
-    # 2. PSK (密码) 确定逻辑
+    [ "$PORT_HY2" = "443" ] && PORT_HY2=36588 
+
+    # 2. 保留 PSK 和 Salamander 原始提取逻辑
     [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
-
-    # 3. Salamander 混淆密码确定逻辑
     [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 4. 写入 Sing-box 配置文件
-    cat > "/etc/sing-box/config.json" <<EOF
+    # 3. 动态构建 Inbounds (Jq 注入，保留所有原始 TLS 细节)
+    local config_json=$(cat <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
   "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
@@ -711,7 +727,27 @@ create_config() {
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
 EOF
-    chmod 600 "/etc/sing-box/config.json"
+)
+    # 如果开启 VLESS，则追加入站
+    if [ "${INSTALL_VLESS:-false}" = "true" ]; then
+        local v_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
+        local v_path="/$(openssl rand -hex 4)"
+        [ ! -f /etc/sing-box/ech_key.json ] && /usr/bin/sing-box generate ech-keypair > /etc/sing-box/ech_key.json
+        local epub=$(jq -r '.public_key' /etc/sing-box/ech_key.json)
+        local epriv=$(jq -r '.private_key' /etc/sing-box/ech_key.json)
+        config_json=$(echo "$config_json" | jq --arg uuid "$v_uuid" --arg path "$v_path" --arg sni "$VLESS_DOMAIN" --arg epub "$epub" --arg epriv "$epriv" \
+        '.inbounds += [{
+            "type": "vless", "tag": "vless-in", "listen": "::", "listen_port": 443,
+            "users": [{"uuid": $uuid}],
+            "tls": {
+                "enabled": true, "server_name": $sni,
+                "certificate_path": "/etc/sing-box/certs/vless_fullchain.pem", "key_path": "/etc/sing-box/certs/vless_privkey.pem",
+                "ech": { "enabled": true, "dynamic_key_pair": {"public_key": $epub, "private_key": $epriv} }
+            },
+            "transport": {"type": "ws", "path": $path}
+        }]')
+    fi
+    echo "$config_json" > "/etc/sing-box/config.json" && chmod 600 "/etc/sing-box/config.json"
 }
 
 # ==========================================
@@ -828,42 +864,69 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-	read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
+    # 提取 Hy2
+    local h_data=$(jq -r '.inbounds[] | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
+    read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$h_data"
+    # 提取 VLESS (若有)
+    local v_data=$(jq -r '.inbounds[] | select(.type == "vless") | "\(.users[0].uuid) \(.listen_port) \(.transport.path) \(.tls.server_name)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
+    read -r RAW_UUID RAW_VPORT RAW_VPATH RAW_VSNI <<< "$v_data"
+    
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
+    
+    local epub=$(jq -r '.. | objects | select(.type == "vless") | .tls.ech.dynamic_key_pair.public_key // empty' "$CONFIG_FILE" 2>/dev/null)
+    [ -n "$epub" ] && RAW_ECH=$(/usr/bin/sing-box generate ech-configlist "$epub" 2>/dev/null)
 }
 
 display_links() {
-    local LINK_V4="" LINK_V6="" FULL_CLIP="" v4_status="" v6_status=""
+    local LINK_V4="" LINK_V6="" LINK_VLESS="" FULL_CLIP="" v4_status="" v6_status=""
+    # 1. 准备 Hy2 参数 (完全保留原始逻辑)
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
-	
+    
+    # 2. 准备 VLESS 参数 (新增逻辑)
+    local V_PATH_ENC=$(echo "${RAW_VPATH:-/}" | sed 's/\//%2F/g')
+    local V_PARAM="encryption=none&security=tls&sni=$RAW_VSNI&type=ws&path=$V_PATH_ENC"
+
+    # 3. 原始并行探测逻辑 (100% 保留)
     _do_probe() {
         [ -z "$1" ] && return
-		(nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
-        echo -e "\033[1;32m (已连通)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
+        (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
+        echo -e "\033[1;32m (已连通)\033[0m" || echo -e "\033[1;33m (直连受阻)\033[0m"
     }
     if command -v nc >/dev/null 2>&1; then
         _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
         v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
     fi
-    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m\n"
-	
+
+    # 4. 节点信息头部
+    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行状态: \033[1;33m双协议已就绪\033[0m\n"
+
+    # 5. 展示 Hysteria2 (保留 v4/v6 原始逻辑)
     [ -n "${RAW_IP4:-}" ] && {
-        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v4"
-        echo -e "\033[1;35m[IPv4节点链接]\033[0m$v4_status\n$LINK_V4\n"
+        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_Hy2_v4"
+        echo -e "\033[1;35m[Hy2 IPv4 链接]\033[0m$v4_status\n$LINK_V4\n"
         FULL_CLIP="$LINK_V4"
     }
     [ -n "${RAW_IP6:-}" ] && {
-        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v6"
-        echo -e "\033[1;36m[IPv6节点链接]\033[0m$v6_status\n$LINK_V6\n"
+        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_Hy2_v6"
+        echo -e "\033[1;36m[Hy2 IPv6 链接]\033[0m$v6_status\n$LINK_V6\n"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
     }
+
+    # 6. 展示 VLESS (新增逻辑：仅当 UUID 存在时展示)
+    if [ -n "$RAW_UUID" ]; then
+        echo -e "\033[1;34m------------------------------------------\033[0m"
+        LINK_VLESS="vless://$RAW_UUID@${RAW_IP4:-$RAW_IP6}:443/?${V_PARAM}#$(hostname)_Vless_CF"
+        echo -e "\033[1;32m[VLESS+WS+ECH 链接 (支持CF中转)]\033[0m\n$LINK_VLESS\n"
+        [ -n "$RAW_ECH" ] && echo -e "\033[1;36m[ECH Config]\033[0m \033[1;37m(用于强力混淆):\033[0m\n$RAW_ECH\n"
+        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_VLESS"
+    fi
+
     echo -e "\033[1;34m==========================================\033[0m"
-    [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m 证书 SHA256 指纹已集成，支持强校验"
+    [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m Hy2 证书 SHA256 指纹已集成，支持强校验"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
@@ -897,9 +960,11 @@ display_system_status() {
 # ==========================================
 create_sb_tool() {
     mkdir -p /etc/sing-box
-    local FINAL_SALA=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
+    local FINAL_SALA=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    local FINAL_VDOMAIN=$(jq -r '.. | objects | select(.type == "vless") | .tls.server_name // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     local CORE_TMP=$(mktemp) || CORE_TMP="/tmp/core_script_$$.sh"
-    # 写入固化变量
+    
+    # 固化所有原始性能变量 + 新增协议变量
     cat > "$CORE_TMP" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
@@ -918,13 +983,13 @@ VAR_SYSTEMD_NICE='${VAR_SYSTEMD_NICE:--5}'
 VAR_SYSTEMD_IOSCHED='$VAR_SYSTEMD_IOSCHED'
 OS_DISPLAY='$OS_DISPLAY'
 TLS_DOMAIN='$TLS_DOMAIN'
+VLESS_DOMAIN='$FINAL_VDOMAIN'
 RAW_SNI='${RAW_SNI:-$TLS_DOMAIN}'
 RAW_SALA='$FINAL_SALA'
 RAW_IP4='${RAW_IP4:-}'
 RAW_IP6='${RAW_IP6:-}'
 IS_V6_OK='${IS_V6_OK:-false}'
 EOF
-
     # 导出函数
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port
         get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard
@@ -1024,9 +1089,18 @@ export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
 USER_PORT=$(prompt_for_port)
+echo -e "\n\033[1;36m[可选] 是否新增 VLESS+WS+ECH 协议 (支持 CF 优选)？\033[0m"
+echo -e "提示：若需要安装，请输入已解析到本机 IP 的域名；若回车则不安装。"
+read -p "请输入 Cloudflare 域名: " V_DOMAIN_INPUT
+if [ -n "$V_DOMAIN_INPUT" ]; then
+    INSTALL_VLESS=true; VLESS_DOMAIN="$V_DOMAIN_INPUT"
+else
+    INSTALL_VLESS=false
+fi
 optimize_system
 install_singbox "install"
-generate_cert
+generate_cert "$TLS_DOMAIN" "hy2"
+[ "$INSTALL_VLESS" = "true" ] && generate_cert "$VLESS_DOMAIN" "vless"
 create_config "$USER_PORT"
 create_sb_tool
 setup_service
