@@ -131,6 +131,7 @@ generate_cert() {
         
         if [ -z "$V_DOMAIN_INPUT" ]; then
             INSTALL_VLESS=false
+            VLESS_DOMAIN="$TLS_DOMAIN" # 兜底，防止变量为空
             break
         fi
 
@@ -142,6 +143,7 @@ generate_cert() {
             succ "解析校验通过 [✔]"
             INSTALL_VLESS=true
             domain="$V_DOMAIN_INPUT"
+            VLESS_DOMAIN="$V_DOMAIN_INPUT" # 给后续 ECH 命令使用
             echo -e "\n\033[1;33m[提示] 若 80 端口被商家封锁，建议使用 DNS 验证申请证书\033[0m"
             read -p "请输入 Cloudflare API Token (直接回车则尝试 80 端口模式): " CF_TOKEN_TEMP
             break
@@ -158,13 +160,13 @@ generate_cert() {
         info "生成 ECC P-256 高性能证书..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-            -days 3650 -sha256 -subj "/CN=${VLESS_DOMAIN:-$TLS_DOMAIN}" \
+            -days 3650 -sha256 -subj "/CN=${VLESS_DOMAIN}" \
             -addext "basicConstraints=critical,CA:FALSE" \
-            -addext "subjectAltName=DNS:${VLESS_DOMAIN:-$TLS_DOMAIN}" \
+            -addext "subjectAltName=DNS:${VLESS_DOMAIN}" \
             -addext "extendedKeyUsage=serverAuth" &>/dev/null || {
             openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
                 -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-                -days 3650 -subj "/CN=${VLESS_DOMAIN:-$TLS_DOMAIN}" &>/dev/null
+                -days 3650 -subj "/CN=${VLESS_DOMAIN}" &>/dev/null
         }
         [ -s "$CERT_DIR/fullchain.pem" ] && {
             openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
@@ -178,6 +180,9 @@ generate_cert() {
         (
             [ ! -f "$HOME/.acme.sh/acme.sh" ] && curl -s https://get.acme.sh | sh >/dev/null 2>&1
             
+            # 【核心修改】强制切换 CA 到 Let's Encrypt，避开 ZeroSSL 的注册坑
+            "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1
+
             if [ -n "$CF_TOKEN_TEMP" ]; then
                 info "采用 Cloudflare DNS-01 验证模式..."
                 export CF_Token="$CF_TOKEN_TEMP"
@@ -186,7 +191,6 @@ generate_cert() {
                 info "采用 Standalone 80 端口验证模式..."
                 fuser -k 80/tcp >/dev/null 2>&1 || true
                 iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1
-                "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1
                 "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --timeout 20 --log /tmp/acme_vless.log
             fi
 
@@ -195,7 +199,6 @@ generate_cert() {
                 --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
         ) || true
 
-        # 校验申请结果与安全清理
         if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
             succ "VLESS 正式证书申请成功"
         else
@@ -204,7 +207,7 @@ generate_cert() {
             cp "$CERT_DIR/privkey.pem" "$CERT_DIR/vless_privkey.pem"
         fi
 
-        # 【安全擦除】删除配置文件中的 Token 并取消环境变量
+        # 【安全擦除】清理 Token
         sed -i '/CF_Token/d' ~/.acme.sh/account.conf 2>/dev/null || true
         unset CF_Token CF_TOKEN_TEMP
         info "临时敏感信息已清理"
@@ -740,25 +743,25 @@ create_config() {
     mkdir -p /etc/sing-box
     local ds="ipv4_only"; local PSK=""; local SALA_PASS=""
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-    # 保留原始内存自适应逻辑
+    
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
-    # 1. 端口确定
     if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' /etc/sing-box/config.json)
-        else PORT_HY2=$(printf "\n" | prompt_for_port); fi
+        if [ -f /etc/sing-box/config.json ]; then 
+            PORT_HY2=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' /etc/sing-box/config.json)
+        else 
+            PORT_HY2=$(printf "\n" | prompt_for_port); 
+        fi
     fi
     [ "$PORT_HY2" = "443" ] && PORT_HY2=36588 
 
-    # 2. 保留 PSK 和 Salamander 原始提取逻辑
     [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
     [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 3. 动态构建 Inbounds (Jq 注入，保留所有原始 TLS 细节)
     local config_json=$(cat <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -782,21 +785,28 @@ create_config() {
 }
 EOF
 )
-    # 如果开启 VLESS，则追加入站
     if [ "${INSTALL_VLESS:-false}" = "true" ]; then
         local v_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
         local v_path="/$(openssl rand -hex 4)"
-        [ ! -f /etc/sing-box/ech_key.json ] && /usr/bin/sing-box generate ech-keypair > /etc/sing-box/ech_key.json
+        # 【核心修复】增加域名参数，适配新版 sing-box
+        if [ ! -f /etc/sing-box/ech_key.json ]; then
+            /usr/local/bin/sing-box generate ech-keypair "$VLESS_DOMAIN" > /etc/sing-box/ech_key.json
+        fi
         local epub=$(jq -r '.public_key' /etc/sing-box/ech_key.json)
         local epriv=$(jq -r '.private_key' /etc/sing-box/ech_key.json)
+        
         config_json=$(echo "$config_json" | jq --arg uuid "$v_uuid" --arg path "$v_path" --arg sni "$VLESS_DOMAIN" --arg epub "$epub" --arg epriv "$epriv" \
         '.inbounds += [{
             "type": "vless", "tag": "vless-in", "listen": "::", "listen_port": 443,
             "users": [{"uuid": $uuid}],
             "tls": {
                 "enabled": true, "server_name": $sni,
-                "certificate_path": "/etc/sing-box/certs/vless_fullchain.pem", "key_path": "/etc/sing-box/certs/vless_privkey.pem",
-                "ech": { "enabled": true, "dynamic_key_pair": {"public_key": $epub, "private_key": $epriv} }
+                "certificate_path": "/etc/sing-box/certs/vless_fullchain.pem", 
+                "key_path": "/etc/sing-box/certs/vless_privkey.pem",
+                "ech": { 
+                    "enabled": true, 
+                    "key_pair": [{"public_key": $epub, "private_key": $epriv}] 
+                }
             },
             "transport": {"type": "ws", "path": $path}
         }]')
@@ -918,10 +928,10 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    # 提取 Hy2
+    
     local h_data=$(jq -r '.inbounds[] | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$h_data"
-    # 提取 VLESS (若有)
+
     local v_data=$(jq -r '.inbounds[] | select(.type == "vless") | "\(.users[0].uuid) \(.listen_port) \(.transport.path) \(.tls.server_name)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r RAW_UUID RAW_VPORT RAW_VPATH RAW_VSNI <<< "$v_data"
     
@@ -929,22 +939,21 @@ get_env_data() {
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
     
-    local epub=$(jq -r '.. | objects | select(.type == "vless") | .tls.ech.dynamic_key_pair.public_key // empty' "$CONFIG_FILE" 2>/dev/null)
-    [ -n "$epub" ] && RAW_ECH=$(/usr/bin/sing-box generate ech-configlist "$epub" 2>/dev/null)
+    # 【修复】更精准的 ECH 提取逻辑
+    local epub=$(jq -r '.. | objects | select(.type == "vless") | .tls.ech.key_pair[0].public_key // empty' "$CONFIG_FILE" 2>/dev/null)
+    [ -n "$epub" ] && RAW_ECH=$(/usr/local/bin/sing-box generate ech-configlist "$epub" 2>/dev/null)
 }
 
 display_links() {
     local LINK_V4="" LINK_V6="" LINK_VLESS="" FULL_CLIP="" v4_status="" v6_status=""
-    # 1. 准备 Hy2 参数 (完全保留原始逻辑)
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
     
-    # 2. 准备 VLESS 参数 (新增逻辑)
+    # 【修正】VLESS 链接参数，确保 security=tls 和路径编码
     local V_PATH_ENC=$(echo "${RAW_VPATH:-/}" | sed 's/\//%2F/g')
     local V_PARAM="encryption=none&security=tls&sni=$RAW_VSNI&type=ws&path=$V_PATH_ENC"
 
-    # 3. 原始并行探测逻辑 (100% 保留)
     _do_probe() {
         [ -z "$1" ] && return
         (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
@@ -955,10 +964,8 @@ display_links() {
         v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
     fi
 
-    # 4. 节点信息头部
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行状态: \033[1;33m双协议已就绪\033[0m\n"
 
-    # 5. 展示 Hysteria2 (保留 v4/v6 原始逻辑)
     [ -n "${RAW_IP4:-}" ] && {
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_Hy2_v4"
         echo -e "\033[1;35m[Hy2 IPv4 链接]\033[0m$v4_status\n$LINK_V4\n"
@@ -970,12 +977,12 @@ display_links() {
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
     }
 
-    # 6. 展示 VLESS (新增逻辑：仅当 UUID 存在时展示)
     if [ -n "$RAW_UUID" ]; then
         echo -e "\033[1;34m------------------------------------------\033[0m"
+        # 链接末尾添加域名标识，方便识别
         LINK_VLESS="vless://$RAW_UUID@${RAW_IP4:-$RAW_IP6}:443/?${V_PARAM}#$(hostname)_Vless_CF"
         echo -e "\033[1;32m[VLESS+WS+ECH 链接 (支持CF中转)]\033[0m\n$LINK_VLESS\n"
-        [ -n "$RAW_ECH" ] && echo -e "\033[1;36m[ECH Config]\033[0m \033[1;37m(用于强力混淆):\033[0m\n$RAW_ECH\n"
+        [ -n "$RAW_ECH" ] && echo -e "\033[1;36m[ECH Config]\033[0m \033[1;37m(手动填入客户端):\033[0m\n$RAW_ECH\n"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_VLESS"
     fi
 
