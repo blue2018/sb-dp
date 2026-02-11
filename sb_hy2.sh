@@ -118,29 +118,21 @@ prompt_for_port() {
     done
 }
 
-# 生成 ECC P-256 高性能证书
+# 生成 ECC Ed25519 高性能证书
 generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"
     [ -f "$CERT_DIR/fullchain.pem" ] && return 0
-    info "生成 ECC P-256 高性能证书..."
+    info "生成 ECC Ed25519 高性能证书 (域名: $TLS_DOMAIN)..."
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-    
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-        -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-        -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" \
-        -addext "basicConstraints=critical,CA:FALSE" \
-        -addext "subjectAltName=DNS:$TLS_DOMAIN,DNS:*.$TLS_DOMAIN" \
-        -addext "extendedKeyUsage=serverAuth" &>/dev/null || {
-        # 兼容老版本：去除扩展重试
-        openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
-            -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-            -days 3650 -subj "/CN=$TLS_DOMAIN" &>/dev/null
-    }
 
-    [ -s "$CERT_DIR/fullchain.pem" ] && {
-        openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        chmod 600 "$CERT_DIR"/*.pem; succ "ECC 证书就绪"
-    } || { err "证书生成失败"; exit 1; }
+    openssl req -x509 -newkey ed25519 -nodes -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" -days 3650 -subj "/CN=$TLS_DOMAIN" -addext "subjectAltName=DNS:$TLS_DOMAIN" &>/dev/null || \
+    openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" -days 3650 -subj "/CN=$TLS_DOMAIN" &>/dev/null
+
+    if [ -s "$CERT_DIR/fullchain.pem" ]; then
+        openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
+        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem"
+        succ "ECC 证书就绪"
+    else err "证书生成失败"; exit 1; fi
 }
 
 # 获取公网IP
