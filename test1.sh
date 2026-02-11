@@ -133,7 +133,6 @@ generate_cert() {
             INSTALL_VLESS=false; break
         fi
 
-        # 快速解析校验
         info "正在校验域名解析: $V_DOMAIN_INPUT ..."
         local resolved_ip=$(nslookup "$V_DOMAIN_INPUT" 8.8.8.8 2>/dev/null | grep -A 1 "Name:" | grep "Address" | awk '{print $2}' | head -n1)
         [ -z "$resolved_ip" ] && resolved_ip=$(ping -c1 "$V_DOMAIN_INPUT" 2>/dev/null | sed -n '1p' | sed 's/.*(\(.*\)).*/\1/' | cut -d: -f1)
@@ -142,72 +141,73 @@ generate_cert() {
             succ "解析校验通过 [✔]"
             INSTALL_VLESS=true; domain="$V_DOMAIN_INPUT"; VLESS_DOMAIN="$V_DOMAIN_INPUT"
             
-            # 【高效逻辑】如果证书已存在，直接退出循环，不触发任何 acme.sh 逻辑
             if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
-                echo -e "\033[1;32m域名 $domain 证书已存在，直接复用\033[0m"
+                echo -e "\033[1;32m[秒杀] 域名 $domain 证书已存在，直接复用\033[0m"
                 break
             fi
 
-            echo -e "\n\033[1;33m[提示] 建议提供 CF Token 使用 DNS 验证，成功率 100% 且速度快\033[0m"
+            echo -e "\n\033[1;33m[提示] 建议提供 CF Token 使用 DNS 验证，成功率 100% 且速度极快\033[0m"
             read -p "请输入 Cloudflare API Token (回车则尝试 80 端口模式): " CF_TOKEN_TEMP
             break
         else
             warn "域名解析校验失败！"
-            echo -e "请检查解析是否生效，重新输入或回车取消"
+            echo -e "当前解析到: ${resolved_ip:-未知} | 本机 IPv4: $RAW_IP4"
+            echo -e "请检查 DNS 设置或等待解析生效"
         fi
     done
 
-    # --- 2. Hysteria2 基础证书 (只在不存在时生成) ---
+    # --- 2. Hysteria2 基础证书 (同步伪装域名) ---
     if [ ! -s "$CERT_DIR/fullchain.pem" ]; then
-        info "生成 ECC 基础证书..."
+        info "生成 ECC 基础证书 (伪装目标: ${TLS_DOMAIN})..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-            -days 3650 -subj "/CN=bing.com" &>/dev/null
-        # 提取指纹供后续使用
+            -days 3650 -subj "/CN=${TLS_DOMAIN:-www.bing.com}" &>/dev/null
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        succ "ECC 基础证书就绪"
+        succ "ECC 基础证书已就绪"
     fi
 
-    # --- 3. VLESS 正式证书申请 (仅在需要安装且证书不存在时运行) ---
+    # --- 3. VLESS 正式证书申请 (极速模式) ---
     if [ "$INSTALL_VLESS" = "true" ] && [ ! -s "$CERT_DIR/vless_fullchain.pem" ]; then
-        info "正在申请正式证书..."
+        info "正在申请正式证书 (Let's Encrypt)..."
         (
-            # acme.sh 安装与 CA 切换
+            # acme.sh 安装与环境初始化
             if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
                 curl -s https://get.acme.sh | sh >/dev/null 2>&1
             fi
-            # 强制使用 Let's Encrypt 避开 ZeroSSL 注册
-            "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1
+            local ACME="$HOME/.acme.sh/acme.sh"
             
+            # 切换 CA 为 Let's Encrypt (ZeroSSL 经常在大陆或部分海外节点连接缓慢)
+            $ACME --set-default-ca --server letsencrypt >/dev/null 2>&1
             if [ -n "$CF_TOKEN_TEMP" ]; then
-                info "执行 DNS-01 验证 (Cloudflare)..."
+                info "执行 DNS-01 验证 (Cloudflare API)..."
                 export CF_Token="$CF_TOKEN_TEMP"
-                "$HOME/.acme.sh/acme.sh" --issue --dns dns_cf -d "$domain" --force --insecure
+                # DNS 模式完全不依赖本地端口，0 等待执行
+                $ACME --issue --dns dns_cf -d "$domain" --insecure
             else
-                info "执行 Standalone 80 端口验证..."
+                info "执行 Standalone 验证 (占用 80 端口)..."
+                # 仅在 HTTP 模式下尝试释放 80 端口
                 fuser -k 80/tcp >/dev/null 2>&1 || true
-                "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --timeout 10
+                $ACME --issue --standalone -d "$domain" --insecure --timeout 10
             fi
 
-            # 安装证书
-            "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
+            $ACME --install-cert -d "$domain" \
                 --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
                 --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
         ) || true
 
-        # 结果判定与清理
+        # 结果判定与保底逻辑
         if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
             succ "正式证书申请成功"
         else
-            warn "申请失败，自动回退至自签证书兜底"
+            warn "正式证书申请未通过，已回退至自签证书保底运行"
             cp "$CERT_DIR/fullchain.pem" "$CERT_DIR/vless_fullchain.pem"
             cp "$CERT_DIR/privkey.pem" "$CERT_DIR/vless_privkey.pem"
         fi
         
-        # 【安全】强制清除 Token
-        sed -i '/CF_Token/d' ~/.acme.sh/account.conf 2>/dev/null || true
+        # --- 深度清理敏感信息 ---
+        [ -d "$HOME/.acme.sh" ] && sed -i '/CF_Token/d' "$HOME/.acme.sh/account.conf" 2>/dev/null || true
         unset CF_Token CF_TOKEN_TEMP
-		info "临时敏感信息已清理"
+        info "敏感信息已从磁盘和内存中抹除"
     fi
 }
 
