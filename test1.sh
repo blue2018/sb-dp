@@ -153,7 +153,7 @@ generate_cert() {
             break
         else
             warn "域名解析校验失败！"
-            echo -e "   提示：请检查解析是否生效。重新输入或回车取消"
+            echo -e "   请检查解析是否生效，重新输入或回车取消"
         fi
     done
 
@@ -207,6 +207,7 @@ generate_cert() {
         # 【安全】强制清除 Token
         sed -i '/CF_Token/d' ~/.acme.sh/account.conf 2>/dev/null || true
         unset CF_Token CF_TOKEN_TEMP
+		info "临时敏感信息已清理"
     fi
 }
 
@@ -806,10 +807,14 @@ EOF
     if [ "${INSTALL_VLESS:-false}" = "true" ]; then
         local v_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
         local v_path="/$(openssl rand -hex 4)"
-        # 【核心修复】增加域名参数，适配新版 sing-box
+        
+        # --- 修复点：动态获取 sing-box 路径，避免 No such file 报错 ---
+        local SB_PATH=$(command -v sing-box || echo "/usr/bin/sing-box")
+        
         if [ ! -f /etc/sing-box/ech_key.json ]; then
-            /usr/local/bin/sing-box generate ech-keypair "$VLESS_DOMAIN" > /etc/sing-box/ech_key.json
+            $SB_PATH generate ech-keypair "$VLESS_DOMAIN" > /etc/sing-box/ech_key.json
         fi
+        
         local epub=$(jq -r '.public_key' /etc/sing-box/ech_key.json)
         local epriv=$(jq -r '.private_key' /etc/sing-box/ech_key.json)
         
