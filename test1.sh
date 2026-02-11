@@ -717,9 +717,6 @@ install_singbox() {
 # ==========================================
 # 配置文件生成
 # ==========================================
-# ==========================================
-# 配置文件生成
-# ==========================================
 create_config() {
     local PORT_HY2="${1:-}"
     local cur_bw="${VAR_HY2_BW:-200}"
@@ -751,52 +748,20 @@ create_config() {
     [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # --- 6. 核心：VLESS 动态块预生成 (修正版) ---
+    # --- 6. 【临时禁用】VLESS 块，先确保 HY2 正常 ---
     local vless_block=""
-    if [ "${INSTALL_VLESS:-false}" = "true" ]; then
-        local v_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
-        local v_path="/$(openssl rand -hex 4)"
-        local SB_PATH=$(command -v sing-box || echo "/usr/bin/sing-box")
-        
-        # 生成 ECH 密钥对
-        local raw_ech=$($SB_PATH generate ech-keypair "$VLESS_DOMAIN" 2>/dev/null || echo "")
-        
-        # 提取私钥和公钥（去除所有空格和换行）
-        local epriv=$(echo "$raw_ech" | grep -A1 "Private Key" | tail -n1 | tr -d ' \t\n\r')
-        local epub=$(echo "$raw_ech" | grep -A1 "Public Key" | tail -n1 | tr -d ' \t\n\r')
-        
-        # 构造 VLESS 块（标准 JSON 格式，保持你的代码风格）
-        vless_block=",
-    {
-      \"type\": \"vless\",
-      \"tag\": \"vless-in\",
-      \"listen\": \"::\",
-      \"listen_port\": 443,
-      \"users\": [{\"uuid\": \"$v_uuid\"}],
-      \"tls\": {
-        \"enabled\": true,
-        \"server_name\": \"$VLESS_DOMAIN\",
-        \"certificate_path\": \"/etc/sing-box/certs/vless_fullchain.pem\",
-        \"key_path\": \"/etc/sing-box/certs/vless_privkey.pem\",
-        \"ech\": {
-          \"enabled\": true,
-          \"key\": [{
-            \"private_key\": \"$epriv\",
-            \"public_key\": \"$epub\"
-          }]
-        }
-      },
-      \"transport\": {
-        \"type\": \"ws\",
-        \"path\": \"$v_path\"
-      }
-    }"
-    fi
+    # 注释掉 VLESS 逻辑，等 HY2 恢复后再调试
+    # if [ "${INSTALL_VLESS:-false}" = "true" ]; then
+    #     ...
+    # fi
 
-    # --- 7. 写入配置 (完全保留你原本的 JSON 结构) ---
+    # --- 7. 写入纯 HY2 配置 ---
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "fatal", "timestamp": true },
+  "log": { 
+    "level": "warn",
+    "timestamp": true 
+  },
   "dns": {
     "servers": [
       { "tag": "google", "address": "8.8.4.4", "detour": "direct-out" },
@@ -826,28 +791,35 @@ create_config() {
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem"
       },
-      "obfs": {"type": "salamander", "password": "$SALA_PASS"},
+      "obfs": {
+        "type": "salamander", 
+        "password": "$SALA_PASS"
+      },
       "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
-    }${vless_block}
+    }
   ],
   "outbounds": [
-    { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }
-  ],
-  "route": {
-    "rules": [
-      { "protocol": "dns", "outbound": "direct-out" }
-    ]
-  }
+    { 
+      "type": "direct", 
+      "tag": "direct-out", 
+      "domain_strategy": "$ds" 
+    }
+  ]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
     
-    # --- 8. 配置校验（新增安全检查）---
-    if ! /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_check.log 2>&1; then
-        err "配置文件生成失败，JSON 格式错误："
+    # --- 8. 配置校验 ---
+    if ! /usr/bin/sing-box check -c /etc/sing-box/config.json 2>/tmp/sb_check.log; then
+        err "配置文件生成失败："
         cat /tmp/sb_check.log
+        # 输出完整配置用于调试
+        echo "=== 生成的配置内容 ===" >&2
+        cat /etc/sing-box/config.json >&2
         return 1
     fi
+    
+    succ "HY2 配置已生成（VLESS 已临时禁用，待 HY2 恢复后再启用）"
 }
 
 # ==========================================
