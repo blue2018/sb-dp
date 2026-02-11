@@ -127,52 +127,48 @@ generate_cert() {
 
     if [ "$mode" = "vless" ]; then
         info "正在校验域名解析: $domain ..."
-        # 1. 解析预检逻辑
+        # [改动] 增加域名解析预检，防止填错域名导致申请被封 IP
         local resolved_ip=$(nslookup "$domain" 8.8.8.8 2>/dev/null | grep -A 1 "Name:" | grep "Address" | awk '{print $2}' | head -n1)
         [ -z "$resolved_ip" ] && resolved_ip=$(ping -c1 "$domain" 2>/dev/null | sed -n '1p' | sed 's/.*(\(.*\)).*/\1/' | cut -d: -f1)
 
         if [ "$resolved_ip" != "$RAW_IP4" ] && [ "$resolved_ip" != "$RAW_IP6" ]; then
             warn "域名解析校验失败！"
-            echo -e "   域名解析地址: \033[1;31m${resolved_ip:-无法解析}\033[0m"
+            echo -e "   域名解析地址: \033[1;31m${resolved_ip:-解析失败}\033[0m"
             echo -e "   本机公网地址: \033[1;32m$RAW_IP4 / $RAW_IP6\033[0m"
-            warn "请确认解析已生效且关闭了小云朵。将跳过 VLESS 配置。"
+            warn "解析未指向本机或小云朵未关闭，跳过 VLESS 证书申请。"
             INSTALL_VLESS=false; return 1
         fi
         succ "解析校验通过 [✔]"
 
-        # 2. VLESS 模式申请证书 (针对 Alpine 深度加固)
         info "正在为 VLESS 域名 $domain 申请正式证书..."
+        # [改动] 补齐 Alpine 必需的 socat 依赖
+        command -v socat >/dev/null 2>&1 || { [ -f /etc/alpine-release ] && apk add --no-cache socat >/dev/null 2>&1; }
         
-        # 强制安装 acme.sh 并确保环境
-        if [ ! -f ~/.acme.sh/acme.sh ]; then
-            # 使用 --log 避免由于 stdout 截断导致的闪退
-            curl -s https://get.acme.sh | sh > /tmp/acme_install.log 2>&1
-        fi
-        
-        # 确保 Alpine 下 socat 软链接正确
-        [ -f /usr/bin/socat ] || apk add --no-cache socat >/dev/null 2>&1
-        
-        fuser -k 80/tcp >/dev/null 2>&1
-        
-        # 使用子 shell 运行 acme.sh 并强制重定向错误，防止主进程中断
+        # [改动] 隔离执行环境，防止 acme.sh 闪退导致主脚本中断
         (
-            export LE_WORKING_DIR="${HOME}/.acme.sh"
-            ${HOME}/.acme.sh/acme.sh --issue --standalone -d "$domain" --force --insecure --log /tmp/acme_issue.log
-        )
-        
-        # 尝试安装证书
-        ${HOME}/.acme.sh/acme.sh --install-cert -d "$domain" \
-            --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
-            --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1 || true
+            # 确保 acme.sh 安装
+            if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
+                curl -s https://get.acme.sh | sh >/dev/null 2>&1
+            fi
+            
+            # 停止 80 端口占用
+            fuser -k 80/tcp >/dev/null 2>&1
+            
+            # 申请证书
+            "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --log /tmp/acme_vless.log && \
+            "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
+                --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
+                --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
+        ) || true
 
         if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
             succ "VLESS 证书已就绪"
         else
-            warn "VLESS 证书申请失败，详细日志见 /tmp/acme_issue.log"
+            warn "VLESS 证书申请失败，详细日志见 /tmp/acme_vless.log"
             INSTALL_VLESS=false
         fi
     else
-        # 3. 100% 保留你原始的自签 ECC 逻辑
+        # [保持原始风格] ECC P-256 自签逻辑
         [ -f "$CERT_DIR/fullchain.pem" ] && return 0
         info "生成 ECC P-256 高性能证书..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
