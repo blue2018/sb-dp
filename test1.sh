@@ -120,23 +120,25 @@ prompt_for_port() {
 
 # 生成 ECC P-256 高性能证书
 generate_cert() {
-    local CERT_DIR="/etc/sing-box/certs"
-    mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
+    local CERT_DIR="/etc/sysconfig/sing-box/certs"
+    [ ! -d "$CERT_DIR" ] && mkdir -p "$CERT_DIR"
+    chmod 755 "$CERT_DIR" # 必须 755，否则非 root 进程无法读取证书
     
     # 优先复用已有证书，不折腾
-    [ -f "$CERT_DIR/fullchain.pem" ] && return 0
-    
-    info "生成 ECC P-256 高性能证书..."
-    # 使用你最稳的 openssl 参数
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-        -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-        -days 3650 -subj "/CN=${TLS_DOMAIN:-www.microsoft.com}" &>/dev/null
-    
-    # 生成指纹
-    openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-    chmod 644 "$CERT_DIR"/*.pem
+    if [ -s "$CERT_DIR/fullchain.pem" ] && [ -s "$CERT_DIR/privkey.pem" ]; then
+        info "检测到已有证书，跳过自签逻辑..."
+    else
+        info "生成 ECC P-256 高性能证书..."
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
+            -days 3650 -subj "/CN=${TLS_DOMAIN:-www.microsoft.com}" &>/dev/null
+        
+        # 生成指纹 (用于客户端 pinsha256)
+        openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
+        chmod 644 "$CERT_DIR"/*.pem "$CERT_DIR"/*.txt
+    fi
 
-    # 处理 VLESS 正式证书申请 (如果有输入)
+    # 处理 VLESS 正式证书申请
     echo -e "\n\033[1;36m[可选] 是否配置 VLESS+WS+ECH？\033[0m"
     read -p "请输入解析到本机的域名 (回车跳过): " V_DOMAIN_INPUT
     
@@ -144,7 +146,6 @@ generate_cert() {
         INSTALL_VLESS=true; VLESS_DOMAIN="$V_DOMAIN_INPUT"
         read -p "请输入 Cloudflare API Token (回车尝试 80 模式): " CF_TOKEN_TEMP
         
-        # acme.sh 极速申请
         [ ! -f "$HOME/.acme.sh/acme.sh" ] && curl -s https://get.acme.sh | sh >/dev/null 2>&1
         local ACME="$HOME/.acme.sh/acme.sh"
         $ACME --set-default-ca --server letsencrypt >/dev/null 2>&1
@@ -159,11 +160,12 @@ generate_cert() {
         
         # 安装证书，失败则软链接回退自签
         if ! $ACME --install-cert -d "$VLESS_DOMAIN" --fullchain-file "$CERT_DIR/vless_fullchain.pem" --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1; then
+            warn "正式证书申请失败，回退自签证书..."
             cp "$CERT_DIR/fullchain.pem" "$CERT_DIR/vless_fullchain.pem"
             cp "$CERT_DIR/privkey.pem" "$CERT_DIR/vless_privkey.pem"
         fi
         
-        # --- 敏感信息清理 ---
+        # --- 敏感信息清理 (严格保留) ---
         [ -d "$HOME/.acme.sh" ] && sed -i '/CF_Token/d' "$HOME/.acme.sh/account.conf" 2>/dev/null
         unset CF_Token CF_TOKEN_TEMP
         succ "证书处理完成且敏感信息已清理"
@@ -748,14 +750,10 @@ create_config() {
     [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # --- 6. 【临时禁用】VLESS 块，先确保 HY2 正常 ---
-    local vless_block=""
-    # 注释掉 VLESS 逻辑，等 HY2 恢复后再调试
-    # if [ "${INSTALL_VLESS:-false}" = "true" ]; then
-    #     ...
-    # fi
+    # --- 6. 域名清理 (防止 masquerade 格式错误) ---
+    local m_domain=$(echo "${TLS_DOMAIN:-www.microsoft.com}" | sed 's|https://||g; s|http://||g')
 
-    # --- 7. 写入纯 HY2 配置 ---
+    # --- 7. 写入配置 ---
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { 
@@ -767,10 +765,7 @@ create_config() {
       { "tag": "google", "address": "8.8.4.4", "detour": "direct-out" },
       { "tag": "cloudflare", "address": "1.1.1.1", "detour": "direct-out" }
     ],
-    "strategy": "$ds",
-    "independent_cache": false,
-    "disable_cache": false,
-    "disable_expire": false
+    "strategy": "$ds"
   },
   "inbounds": [
     {
@@ -788,14 +783,14 @@ create_config() {
         "enabled": true,
         "alpn": ["h3"],
         "min_version": "1.3",
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-        "key_path": "/etc/sing-box/certs/privkey.pem"
+        "certificate_path": "/etc/sysconfig/sing-box/certs/fullchain.pem",
+        "key_path": "/etc/sysconfig/sing-box/certs/privkey.pem"
       },
       "obfs": {
         "type": "salamander", 
         "password": "$SALA_PASS"
       },
-      "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+      "masquerade": "https://$m_domain"
     }
   ],
   "outbounds": [
@@ -810,16 +805,13 @@ EOF
     chmod 600 "/etc/sing-box/config.json"
     
     # --- 8. 配置校验 ---
-    if ! /usr/bin/sing-box check -c /etc/sing-box/config.json 2>/tmp/sb_check.log; then
-        err "配置文件生成失败："
+    if ! /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_check.log 2>&1; then
+        err "配置文件校验失败，日志如下："
         cat /tmp/sb_check.log
-        # 输出完整配置用于调试
-        echo "=== 生成的配置内容 ===" >&2
-        cat /etc/sing-box/config.json >&2
         return 1
     fi
     
-    succ "HY2 配置已生成（VLESS 已临时禁用，待 HY2 恢复后再启用）"
+    succ "HY2 配置已生成 (VLESS 块已按逻辑跳过)"
 }
 
 # ==========================================
