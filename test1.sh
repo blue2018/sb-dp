@@ -760,6 +760,7 @@ create_config() {
     mkdir -p /etc/sing-box
     local ds="ipv4_only"; local PSK=""; local SALA_PASS=""
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
+    
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
@@ -823,6 +824,8 @@ EOF
         
         local epub=$(jq -r '.public_key' /etc/sing-box/ech_key.json)
         local epriv=$(jq -r '.private_key' /etc/sing-box/ech_key.json)
+        
+        # 【修正点】ECH 内部字段由 key_pairs 修改为 key
         config_json=$(echo "$config_json" | jq --arg uuid "$v_uuid" --arg path "$v_path" --arg sni "$VLESS_DOMAIN" --arg epub "$epub" --arg epriv "$epriv" \
         '.inbounds += [{
             "type": "vless", "tag": "vless-in", "listen": "::", "listen_port": 443,
@@ -833,7 +836,7 @@ EOF
                 "key_path": "/etc/sing-box/certs/vless_privkey.pem",
                 "ech": { 
                     "enabled": true, 
-                    "key_pairs": [{"public_key": $epub, "private_key": $epriv}] 
+                    "key": [{"public_key": $epub, "private_key": $epriv}] 
                 }
             },
             "transport": {"type": "ws", "path": $path}
