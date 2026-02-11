@@ -1089,9 +1089,9 @@ export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
 USER_PORT=$(prompt_for_port)
-echo -e "\n\033[1;36m[可选] 是否新增 VLESS+WS+ECH 协议 (支持 CF 优选)？\033[0m"
-echo -e "提示：若需要安装，请输入已解析到本机 IP 的域名；若回车则不安装。"
-read -p "请输入 Cloudflare 域名: " V_DOMAIN_INPUT
+echo -e "\n\033[1;36m[可选] 是否新增 VLESS+WS+ECH 协议(支持 CF 优选)？\033[0m"
+echo -e "请输入已解析到本机 IP 的域名,直接回车则取消新增"
+read -p "请输入已解析本机IP的域名（直接回车则取消新增）: " V_DOMAIN_INPUT
 if [ -n "$V_DOMAIN_INPUT" ]; then
     INSTALL_VLESS=true; VLESS_DOMAIN="$V_DOMAIN_INPUT"
 else
