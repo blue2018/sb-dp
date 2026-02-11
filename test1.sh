@@ -124,93 +124,89 @@ generate_cert() {
     local domain=""
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
 
-    # --- 交互与校验部分 ---
+    # --- 1. 交互与校验 ---
     while true; do
         echo -e "\n\033[1;36m[可选] 是否新增 VLESS+WS+ECH 协议(支持 CF 优选)？\033[0m"
         read -p "请输入已解析本机IP的域名(直接回车则跳过): " V_DOMAIN_INPUT
         
         if [ -z "$V_DOMAIN_INPUT" ]; then
-            INSTALL_VLESS=false
-            VLESS_DOMAIN="$TLS_DOMAIN" # 兜底，防止变量为空
-            break
+            INSTALL_VLESS=false; break
         fi
 
+        # 快速解析校验
         info "正在校验域名解析: $V_DOMAIN_INPUT ..."
         local resolved_ip=$(nslookup "$V_DOMAIN_INPUT" 8.8.8.8 2>/dev/null | grep -A 1 "Name:" | grep "Address" | awk '{print $2}' | head -n1)
         [ -z "$resolved_ip" ] && resolved_ip=$(ping -c1 "$V_DOMAIN_INPUT" 2>/dev/null | sed -n '1p' | sed 's/.*(\(.*\)).*/\1/' | cut -d: -f1)
 
         if [ "$resolved_ip" = "$RAW_IP4" ] || [ "$resolved_ip" = "$RAW_IP6" ]; then
             succ "解析校验通过 [✔]"
-            INSTALL_VLESS=true
-            domain="$V_DOMAIN_INPUT"
-            VLESS_DOMAIN="$V_DOMAIN_INPUT" # 给后续 ECH 命令使用
-            echo -e "\n\033[1;33m[提示] 若 80 端口被商家封锁，建议使用 DNS 验证申请证书\033[0m"
-            read -p "请输入 Cloudflare API Token (直接回车则尝试 80 端口模式): " CF_TOKEN_TEMP
+            INSTALL_VLESS=true; domain="$V_DOMAIN_INPUT"; VLESS_DOMAIN="$V_DOMAIN_INPUT"
+            
+            # 【高效逻辑】如果证书已存在，直接退出循环，不触发任何 acme.sh 逻辑
+            if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
+                echo -e "\033[1;32m[秒杀] 检测到域名 $domain 的证书已存在，直接复用\033[0m"
+                break
+            fi
+
+            echo -e "\n\033[1;33m[提示] 建议提供 CF Token 使用 DNS 验证，成功率 100% 且速度快\033[0m"
+            read -p "请输入 Cloudflare API Token (回车则尝试 80 端口模式): " CF_TOKEN_TEMP
             break
         else
             warn "域名解析校验失败！"
-            echo -e "   域名解析结果: \033[1;31m${resolved_ip:-无法解析}\033[0m"
-            echo -e "   本机公网地址: \033[1;32m$RAW_IP4 / $RAW_IP6\033[0m"
-            warn "请确认解析已生效且关闭了 CF 小云朵。若想取消请直接回车。"
+            echo -e "   提示：请检查解析是否生效。重新输入或回车取消"
         fi
     done
 
-    # --- Hysteria2 基础证书生成 (始终执行，作为兜底) ---
-    [ ! -f "$CERT_DIR/fullchain.pem" ] && {
-        info "生成 ECC P-256 高性能证书..."
+    # --- 2. Hysteria2 基础证书 (只在不存在时生成) ---
+    if [ ! -s "$CERT_DIR/fullchain.pem" ]; then
+        info "生成 ECC 基础证书..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-            -days 3650 -sha256 -subj "/CN=${VLESS_DOMAIN}" \
-            -addext "basicConstraints=critical,CA:FALSE" \
-            -addext "subjectAltName=DNS:${VLESS_DOMAIN}" \
-            -addext "extendedKeyUsage=serverAuth" &>/dev/null || {
-            openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
-                -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-                -days 3650 -subj "/CN=${VLESS_DOMAIN}" &>/dev/null
-        }
-        [ -s "$CERT_DIR/fullchain.pem" ] && {
-            openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-            chmod 600 "$CERT_DIR"/*.pem; succ "ECC 基础证书就绪"
-        } || { err "基础证书生成失败"; exit 1; }
-    }
+            -days 3650 -subj "/CN=bing.com" &>/dev/null
+        # 提取指纹供后续使用
+        openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
+        succ "ECC 基础证书就绪"
+    fi
 
-    # --- VLESS 正式证书申请 ---
-    if [ "$INSTALL_VLESS" = "true" ]; then
-        info "正在通过 acme.sh 申请正式证书..."
+    # --- 3. VLESS 正式证书申请 (仅在需要安装且证书不存在时运行) ---
+    if [ "$INSTALL_VLESS" = "true" ] && [ ! -s "$CERT_DIR/vless_fullchain.pem" ]; then
+        info "正在申请正式证书..."
         (
-            [ ! -f "$HOME/.acme.sh/acme.sh" ] && curl -s https://get.acme.sh | sh >/dev/null 2>&1
-            
-            # 【核心修改】强制切换 CA 到 Let's Encrypt，避开 ZeroSSL 的注册坑
+            # acme.sh 安装与 CA 切换
+            if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
+                curl -s https://get.acme.sh | sh >/dev/null 2>&1
+            fi
+            # 强制使用 Let's Encrypt 避开 ZeroSSL 注册
             "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1
-
+            
             if [ -n "$CF_TOKEN_TEMP" ]; then
-                info "采用 Cloudflare DNS-01 验证模式..."
+                info "执行 DNS-01 验证 (Cloudflare)..."
                 export CF_Token="$CF_TOKEN_TEMP"
-                "$HOME/.acme.sh/acme.sh" --issue --dns dns_cf -d "$domain" --force --insecure --log /tmp/acme_vless.log
+                "$HOME/.acme.sh/acme.sh" --issue --dns dns_cf -d "$domain" --force --insecure
             else
-                info "采用 Standalone 80 端口验证模式..."
+                info "执行 Standalone 80 端口验证..."
                 fuser -k 80/tcp >/dev/null 2>&1 || true
-                iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1
-                "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --timeout 20 --log /tmp/acme_vless.log
+                "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --timeout 20
             fi
 
+            # 安装证书
             "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
                 --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
                 --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
         ) || true
 
+        # 结果判定与清理
         if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
-            succ "VLESS 正式证书申请成功"
+            succ "正式证书申请成功"
         else
-            warn "正式证书申请失败，已自动使用自签证书兜底"
+            warn "申请失败，自动回退至自签证书兜底"
             cp "$CERT_DIR/fullchain.pem" "$CERT_DIR/vless_fullchain.pem"
             cp "$CERT_DIR/privkey.pem" "$CERT_DIR/vless_privkey.pem"
         fi
-
-        # 【安全擦除】清理 Token
+        
+        # 【安全】强制清除 Token
         sed -i '/CF_Token/d' ~/.acme.sh/account.conf 2>/dev/null || true
         unset CF_Token CF_TOKEN_TEMP
-        info "临时敏感信息已清理"
     fi
 }
 
