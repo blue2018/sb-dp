@@ -762,7 +762,6 @@ create_config() {
     mkdir -p /etc/sing-box
     local ds="ipv4_only"; local PSK=""; local SALA_PASS=""
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-    
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
@@ -784,19 +783,30 @@ create_config() {
     local config_json=$(cat <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
+  "dns": {
+    "servers": [
+      { "tag": "google", "address": "8.8.4.4", "detour": "direct-out" },
+      { "tag": "cloudflare", "address": "1.1.1.1", "detour": "direct-out" }
+    ],
+    "strategy": "$ds"
+  },
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
-    "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
     "udp_fragment": true,
-    "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
+    "tls": {
+      "enabled": true, 
+      "alpn": ["h3"], 
+      "min_version": "1.3", 
+      "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
+      "key_path": "/etc/sing-box/certs/privkey.pem"
+    },
     "obfs": {"type": "salamander", "password": "$SALA_PASS"},
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
@@ -807,8 +817,6 @@ EOF
     if [ "${INSTALL_VLESS:-false}" = "true" ]; then
         local v_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
         local v_path="/$(openssl rand -hex 4)"
-        
-        # --- 修复点：动态获取 sing-box 路径，避免 No such file 报错 ---
         local SB_PATH=$(command -v sing-box || echo "/usr/bin/sing-box")
         
         if [ ! -f /etc/sing-box/ech_key.json ]; then
@@ -817,7 +825,6 @@ EOF
         
         local epub=$(jq -r '.public_key' /etc/sing-box/ech_key.json)
         local epriv=$(jq -r '.private_key' /etc/sing-box/ech_key.json)
-        
         config_json=$(echo "$config_json" | jq --arg uuid "$v_uuid" --arg path "$v_path" --arg sni "$VLESS_DOMAIN" --arg epub "$epub" --arg epriv "$epriv" \
         '.inbounds += [{
             "type": "vless", "tag": "vless-in", "listen": "::", "listen_port": 443,
@@ -828,7 +835,7 @@ EOF
                 "key_path": "/etc/sing-box/certs/vless_privkey.pem",
                 "ech": { 
                     "enabled": true, 
-                    "key_pair": [{"public_key": $epub, "private_key": $epriv}] 
+                    "key_pairs": [{"public_key": $epub, "private_key": $epriv}] 
                 }
             },
             "transport": {"type": "ws", "path": $path}
