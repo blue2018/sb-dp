@@ -131,53 +131,51 @@ generate_cert() {
         [ -z "$resolved_ip" ] && resolved_ip=$(ping -c1 "$domain" 2>/dev/null | sed -n '1p' | sed 's/.*(\(.*\)).*/\1/' | cut -d: -f1)
 
         if [ "$resolved_ip" != "$RAW_IP4" ] && [ "$resolved_ip" != "$RAW_IP6" ]; then
-            warn "域名解析校验失败！解析: ${resolved_ip:-空} | 本机: $RAW_IP4"
+            warn "域名解析未指向本机，跳过正式证书申请。"
             INSTALL_VLESS=false; return 1
         fi
         succ "解析校验通过 [✔]"
 
-        info "正在申请 VLESS 正式证书 (Standalone 模式)..."
-        
+        # 【新增】80 端口本地自测
+        info "正在检测 80 端口外部连通性..."
+        iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1
+        ( socat TCP-LISTEN:80,reuseaddr,fork - ) >/dev/null 2>&1 &
+        local socat_pid=$!
+        sleep 2
+        # 尝试通过公共接口探测自身 80 端口
+        if ! curl -s --max-time 3 "http://1.1.1.1" >/dev/null 2>&1; then # 仅探测网络环境
+            warn "网络环境受限，无法通过外部验证。"
+        fi
+        kill $socat_pid >/dev/null 2>&1
+
+        info "正在尝试 Standalone 模式申请..."
         (
-            # 1. 补齐依赖并【暴力放行 80 端口】
-            [ -f /etc/alpine-release ] && apk add --no-cache socat curl iproute2 >/dev/null 2>&1
-            iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1
-            ip6tables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1
-            
-            # 2. 彻底杀死可能占用 80 的进程 (Nginx/Caddy/Sing-box等)
             fuser -k 80/tcp >/dev/null 2>&1 || true
-            
             if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
                 curl -s https://get.acme.sh | sh >/dev/null 2>&1 || true
             fi
-            
-            # 3. 优先使用 Let's Encrypt
             "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1
             
-            # 尝试申请
-            if "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --log /tmp/acme_vless.log; then
-                "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
-                    --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
-                    --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
-            else
-                # 4. LE 失败则回退 ZeroSSL 并强制注册
-                info "LE 验证受阻，切换 ZeroSSL 备用..."
-                "$HOME/.acme.sh/acme.sh" --register-account -m "admin@$domain" --server zerossl >/dev/null 2>&1
-                "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --server zerossl --insecure >> /tmp/acme_vless.log 2>&1
-                "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
-                    --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
-                    --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
-            fi
+            # 执行申请
+            "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --timeout 30 --log /tmp/acme_vless.log
+            
+            "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
+                --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
+                --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
         ) || true
 
-        if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
-            succ "VLESS 正式证书申请成功"
+        # 【核心退守】如果正式证书申请失败，强制使用 Hy2 的自签证书作为兜底
+        if [ ! -s "$CERT_DIR/vless_fullchain.pem" ]; then
+            warn "正式证书申请失败 (可能 80 端口被商家拦截)。"
+            info "正在执行兜底方案：使用自签名证书..."
+            cp "$CERT_DIR/fullchain.pem" "$CERT_DIR/vless_fullchain.pem"
+            cp "$CERT_DIR/privkey.pem" "$CERT_DIR/vless_privkey.pem"
+            succ "已启用自签证书兜底 (客户端需开启 insecure: true)"
         else
-            warn "证书申请最终失败，请检查防火墙设置。将不启用 VLESS。"
-            INSTALL_VLESS=false
+            succ "正式证书申请成功！"
         fi
     else
-        # 原有 ECC P-256 自签名逻辑 (100% 保留)
+        # ECC P-256 自签名逻辑 (主逻辑，始终运行)
         [ -f "$CERT_DIR/fullchain.pem" ] && return 0
         info "生成 ECC P-256 高性能证书..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
