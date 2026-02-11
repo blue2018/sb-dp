@@ -151,7 +151,7 @@ generate_cert() {
         return 0
     fi
     
-    # === VLESS: 使用 ACME 申请真实证书 ===
+    # === VLESS: 使用 ACME 申请真实证书（虚拟化小鸡专用 DNS API 模式）===
     if [ "$cert_type" = "vless" ]; then
         local vless_cert="$CERT_DIR/vless_fullchain.pem"
         local vless_key="$CERT_DIR/vless_privkey.pem"
@@ -170,7 +170,7 @@ generate_cert() {
             fi
         fi
         
-        info "准备为 VLESS 申请 Let's Encrypt 证书: $domain"
+        info "检测到虚拟化环境，准备使用 DNS API 模式申请证书: $domain"
         
         # 安装 acme.sh（跨系统兼容）
         local ACME_HOME="$HOME/.acme.sh"
@@ -179,9 +179,9 @@ generate_cert() {
             
             # 预安装依赖
             case "$OS" in
-                alpine) apk add --no-cache socat coreutils >/dev/null 2>&1 ;;
-                debian) apt-get install -y socat cron >/dev/null 2>&1 ;;
-                redhat) $(command -v dnf || echo yum) install -y socat cronie >/dev/null 2>&1 ;;
+                alpine) apk add --no-cache curl coreutils >/dev/null 2>&1 ;;
+                debian) apt-get install -y curl cron >/dev/null 2>&1 ;;
+                redhat) $(command -v dnf || echo yum) install -y curl cronie >/dev/null 2>&1 ;;
             esac
             
             # 下载并安装 acme.sh（容错下载）
@@ -215,7 +215,8 @@ generate_cert() {
         local check_count=0
         while [ $check_count -lt 3 ]; do
             resolved_ip=$(nslookup "$domain" 2>/dev/null | awk '/^Address: / { print $2 }' | grep -v ':' | head -n1)
-            [ -z "$resolved_ip" ] && resolved_ip=$(dig +short "$domain" 2>/dev/null | grep -E '^[0-9.]+$' | head -n1)
+            [ -z "$resolved_ip" ] && resolved_ip=$(dig +short "$domain" 2>/dev/null | grep -E '^[0-9.]+
+} | head -n1)
             [ -z "$resolved_ip" ] && resolved_ip=$(host "$domain" 2>/dev/null | awk '/has address/ {print $4}' | head -n1)
             
             if [ -n "$resolved_ip" ]; then
@@ -236,59 +237,119 @@ generate_cert() {
             return 1
         fi
         
-        # 释放 80 端口（临时停止可能占用的服务）
-        local port_80_pid=$(lsof -ti:80 2>/dev/null || ss -tlnp | awk '/:80 / {print $6}' | grep -oE '[0-9]+' | head -n1)
-        local stopped_service=""
-        if [ -n "$port_80_pid" ]; then
-            info "检测到 80 端口被占用，尝试临时释放..."
-            for svc in nginx apache2 httpd caddy; do
-                if systemctl is-active "$svc" >/dev/null 2>&1; then
-                    systemctl stop "$svc" && stopped_service="$svc"
-                    break
-                elif rc-service "$svc" status >/dev/null 2>&1; then
-                    rc-service "$svc" stop && stopped_service="$svc"
-                    break
+        # 检测 DNS 服务商并引导用户配置 API
+        info "检测 DNS 服务商..."
+        local dns_provider=""
+        local root_domain=$(echo "$domain" | awk -F. '{print $(NF-1)"."$NF}')
+        local ns_servers=$(nslookup -type=ns "$root_domain" 2>/dev/null | awk '/nameserver =/{print $NF}' | head -n2)
+        
+        case "$ns_servers" in
+            *cloudflare*) dns_provider="cloudflare" ;;
+            *dnspod*|*tencent*) dns_provider="dnspod" ;;
+            *alidns*|*aliyun*) dns_provider="alidns" ;;
+            *aws*|*route53*) dns_provider="route53" ;;
+            *gandi*) dns_provider="gandi" ;;
+            *) dns_provider="unknown" ;;
+        esac
+        
+        echo -e "\n\033[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+        echo -e "\033[1;36m[虚拟化小鸡证书申请指南]\033[0m"
+        echo -e "\033[1;33m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\033[0m"
+        echo -e "检测到域名 NS 服务商: \033[1;32m${dns_provider}\033[0m"
+        echo -e "\n由于虚拟化环境无法使用 80/443 端口，需配置 DNS API 自动验证。"
+        echo -e "这是 \033[1;31m一次性配置\033[0m，完成后证书将 \033[1;32m自动续期\033[0m（90天有效期）。\n"
+        
+        case "$dns_provider" in
+            cloudflare)
+                echo -e "\033[1;32m[Cloudflare API 获取步骤]\033[0m"
+                echo -e "1. 访问: \033[4mhttps://dash.cloudflare.com/profile/api-tokens\033[0m"
+                echo -e "2. 点击 'Create Token' → 使用模板 'Edit zone DNS'"
+                echo -e "3. Zone Resources: 选择 'Include' → 'Specific zone' → 你的域名"
+                echo -e "4. 点击 'Continue to summary' → 'Create Token'"
+                echo -e "5. 复制生成的 Token（格式: \033[1;33mxxxx-xxxxxxxxxxxxxxxxxxxxxxxx\033[0m）\n"
+                
+                read -r -p "请粘贴 Cloudflare API Token: " CF_Token
+                [ -z "$CF_Token" ] && { err "未输入 API Token，放弃申请"; return 1; }
+                
+                export CF_Token="$CF_Token"
+                echo "export CF_Token='$CF_Token'" >> "$ACME_HOME/account.conf"
+                
+                info "开始申请证书（DNS验证约需 120 秒）..."
+                if "$ACME_CMD" --issue --dns dns_cf --keylength ec-256 \
+                    -d "$domain" --server letsencrypt \
+                    --log /tmp/acme_issue.log 2>&1 | tee /tmp/acme_verbose.log; then
+                    issue_success=true
+                else
+                    issue_success=false
                 fi
-            done
-            sleep 2
-        fi
+                ;;
+                
+            dnspod)
+                echo -e "\033[1;32m[DNSPod API 获取步骤]\033[0m"
+                echo -e "1. 访问: \033[4mhttps://console.dnspod.cn/account/token/token\033[0m"
+                echo -e "2. 点击 '创建密钥' → 输入名称（如: acme）"
+                echo -e "3. 复制 'ID' 和 'Token'（格式: \033[1;33m123456,abcdef123456\033[0m）\n"
+                
+                read -r -p "请输入 DNSPod ID: " DP_Id
+                read -r -p "请输入 DNSPod Token: " DP_Key
+                [ -z "$DP_Id" ] || [ -z "$DP_Key" ] && { err "未输入完整 API 信息"; return 1; }
+                
+                export DP_Id="$DP_Id" DP_Key="$DP_Key"
+                echo -e "export DP_Id='$DP_Id'\nexport DP_Key='$DP_Key'" >> "$ACME_HOME/account.conf"
+                
+                info "开始申请证书（DNS验证约需 120 秒）..."
+                if "$ACME_CMD" --issue --dns dns_dp --keylength ec-256 \
+                    -d "$domain" --server letsencrypt \
+                    --log /tmp/acme_issue.log 2>&1 | tee /tmp/acme_verbose.log; then
+                    issue_success=true
+                else
+                    issue_success=false
+                fi
+                ;;
+                
+            alidns)
+                echo -e "\033[1;32m[阿里云 DNS API 获取步骤]\033[0m"
+                echo -e "1. 访问: \033[4mhttps://ram.console.aliyun.com/manage/ak\033[0m"
+                echo -e "2. 点击 '创建AccessKey' → 完成安全验证"
+                echo -e "3. 复制 'AccessKey ID' 和 'AccessKey Secret'\n"
+                
+                read -r -p "请输入 AccessKey ID: " Ali_Key
+                read -r -p "请输入 AccessKey Secret: " Ali_Secret
+                [ -z "$Ali_Key" ] || [ -z "$Ali_Secret" ] && { err "未输入完整 API 信息"; return 1; }
+                
+                export Ali_Key="$Ali_Key" Ali_Secret="$Ali_Secret"
+                echo -e "export Ali_Key='$Ali_Key'\nexport Ali_Secret='$Ali_Secret'" >> "$ACME_HOME/account.conf"
+                
+                info "开始申请证书（DNS验证约需 120 秒）..."
+                if "$ACME_CMD" --issue --dns dns_ali --keylength ec-256 \
+                    -d "$domain" --server letsencrypt \
+                    --log /tmp/acme_issue.log 2>&1 | tee /tmp/acme_verbose.log; then
+                    issue_success=true
+                else
+                    issue_success=false
+                fi
+                ;;
+                
+            *)
+                echo -e "\033[1;33m[通用 DNS API 配置]\033[0m"
+                echo -e "acme.sh 支持 150+ DNS 服务商，请访问查看你的服务商:"
+                echo -e "\033[4mhttps://github.com/acmesh-official/acme.sh/wiki/dnsapi\033[0m\n"
+                echo -e "配置完成后，手动执行以下命令申请证书:"
+                echo -e "\033[1;32m~/.acme.sh/acme.sh --issue --dns dns_xxx -d $domain --keylength ec-256\033[0m"
+                echo -e "然后将证书安装到: $vless_cert 和 $vless_key\n"
+                
+                warn "未识别的 DNS 服务商，需要手动配置 API 后申请证书"
+                return 1
+                ;;
+        esac
         
-        # 申请证书（Standalone 模式 + ECC）
-        info "开始申请证书（可能需要 30-60 秒）..."
-        local issue_success=false
-        
-        # 优先使用 Standalone 模式（最稳定）
-        if "$ACME_CMD" --issue --standalone --keylength ec-256 \
-            -d "$domain" --server letsencrypt \
-            --httpport 80 --log /tmp/acme_issue.log >/dev/null 2>&1; then
-            issue_success=true
-        # 容错：切换到 ZeroSSL（备选 CA）
-        elif "$ACME_CMD" --issue --standalone --keylength ec-256 \
-            -d "$domain" --server zerossl \
-            --httpport 80 >/dev/null 2>&1; then
-            issue_success=true
-        # 容错：切换到 Webroot 模式（适配小内存环境）
-        elif mkdir -p /var/www/html && \
-             "$ACME_CMD" --issue --webroot /var/www/html --keylength ec-256 \
-             -d "$domain" >/dev/null 2>&1; then
-            issue_success=true
-        fi
-        
-        # 恢复之前停止的服务
-        [ -n "$stopped_service" ] && {
-            if command -v systemctl >/dev/null 2>&1; then
-                systemctl start "$stopped_service" >/dev/null 2>&1
-            else
-                rc-service "$stopped_service" start >/dev/null 2>&1
-            fi
-        }
-        
-        if [ "$issue_success" = false ]; then
-            err "证书申请失败，请检查："
-            echo "  1. 域名是否正确解析到本机 IP: $RAW_IP4"
-            echo "  2. 80 端口是否可从外网访问（防火墙/安全组）"
-            echo "  3. 是否有其他服务占用 80 端口"
-            [ -f /tmp/acme_issue.log ] && echo "详细日志: /tmp/acme_issue.log"
+        if [ "${issue_success:-false}" = false ]; then
+            err "证书申请失败，可能原因："
+            echo "  1. DNS API Token 无效或权限不足"
+            echo "  2. DNS 记录传播延迟（通常需要 60-120 秒）"
+            echo "  3. 域名 NS 服务器响应异常"
+            echo -e "\n详细日志: /tmp/acme_issue.log"
+            [ -f /tmp/acme_verbose.log ] && cat /tmp/acme_verbose.log
             return 1
         fi
         
@@ -316,13 +377,14 @@ generate_cert() {
                 fi
                 (crontab -l 2>/dev/null; echo "$cron_entry") | crontab -
             }
-            info "已配置证书自动续期任务"
+            info "已配置证书自动续期任务（每日 00:00 检查）"
         fi
         
         # 验证证书
         if openssl x509 -in "$vless_cert" -noout -dates >/dev/null 2>&1; then
             local expire_info=$(openssl x509 -in "$vless_cert" -noout -enddate | cut -d= -f2)
             succ "VLESS 证书申请成功！有效期至: $expire_info"
+            succ "API 配置已保存至 $ACME_HOME/account.conf，证书将自动续期"
         else
             err "证书验证失败"
             return 1
