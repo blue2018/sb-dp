@@ -119,28 +119,215 @@ prompt_for_port() {
 }
 
 # 生成 ECC P-256 高性能证书
+# 生成/申请证书（支持自签和 ACME 自动申请）
 generate_cert() {
+    local domain="${1:-$TLS_DOMAIN}"
+    local cert_type="${2:-hy2}"  # hy2 或 vless
     local CERT_DIR="/etc/sing-box/certs"
-    [ -f "$CERT_DIR/fullchain.pem" ] && return 0
-    info "生成 ECC P-256 高性能证书..."
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
     
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-        -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-        -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" \
-        -addext "basicConstraints=critical,CA:FALSE" \
-        -addext "subjectAltName=DNS:$TLS_DOMAIN,DNS:*.$TLS_DOMAIN" \
-        -addext "extendedKeyUsage=serverAuth" &>/dev/null || {
-        # 兼容老版本：去除扩展重试
-        openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
+    # === Hysteria2: 使用自签证书（性能优先） ===
+    if [ "$cert_type" = "hy2" ]; then
+        [ -f "$CERT_DIR/fullchain.pem" ] && [ -f "$CERT_DIR/privkey.pem" ] && return 0
+        info "生成 Hysteria2 自签 ECC P-256 证书..."
+        
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-            -days 3650 -subj "/CN=$TLS_DOMAIN" &>/dev/null
-    }
-
-    [ -s "$CERT_DIR/fullchain.pem" ] && {
-        openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        chmod 600 "$CERT_DIR"/*.pem; succ "ECC 证书就绪"
-    } || { err "证书生成失败"; exit 1; }
+            -days 3650 -sha256 -subj "/CN=$domain" \
+            -addext "basicConstraints=critical,CA:FALSE" \
+            -addext "subjectAltName=DNS:$domain,DNS:*.$domain" \
+            -addext "extendedKeyUsage=serverAuth" &>/dev/null || {
+            openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
+                -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
+                -days 3650 -subj "/CN=$domain" &>/dev/null
+        }
+        
+        [ -s "$CERT_DIR/fullchain.pem" ] && {
+            openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | \
+                cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
+            chmod 600 "$CERT_DIR"/*.pem
+            succ "Hysteria2 自签证书已生成"
+        } || { err "证书生成失败"; exit 1; }
+        return 0
+    fi
+    
+    # === VLESS: 使用 ACME 申请真实证书 ===
+    if [ "$cert_type" = "vless" ]; then
+        local vless_cert="$CERT_DIR/vless_fullchain.pem"
+        local vless_key="$CERT_DIR/vless_privkey.pem"
+        
+        # 检查证书是否已存在且有效（30天以上）
+        if [ -f "$vless_cert" ] && [ -f "$vless_key" ]; then
+            local expire_date=$(openssl x509 -in "$vless_cert" -noout -enddate 2>/dev/null | cut -d= -f2)
+            if [ -n "$expire_date" ]; then
+                local expire_ts=$(date -d "$expire_date" +%s 2>/dev/null || date -j -f "%b %d %T %Y %Z" "$expire_date" +%s 2>/dev/null)
+                local now_ts=$(date +%s)
+                local days_left=$(( (expire_ts - now_ts) / 86400 ))
+                if [ "$days_left" -gt 30 ]; then
+                    info "VLESS 证书有效期剩余 $days_left 天，跳过申请"
+                    return 0
+                fi
+            fi
+        fi
+        
+        info "准备为 VLESS 申请 Let's Encrypt 证书: $domain"
+        
+        # 安装 acme.sh（跨系统兼容）
+        local ACME_HOME="$HOME/.acme.sh"
+        if [ ! -d "$ACME_HOME" ]; then
+            info "安装 acme.sh 证书申请工具..."
+            
+            # 预安装依赖
+            case "$OS" in
+                alpine) apk add --no-cache socat coreutils >/dev/null 2>&1 ;;
+                debian) apt-get install -y socat cron >/dev/null 2>&1 ;;
+                redhat) $(command -v dnf || echo yum) install -y socat cronie >/dev/null 2>&1 ;;
+            esac
+            
+            # 下载并安装 acme.sh（容错下载）
+            local acme_url="https://get.acme.sh"
+            local acme_mirrors=("https://gitee.com/neilpang/acme.sh/raw/master/acme.sh" "https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh")
+            
+            if ! curl -fsSL "$acme_url" | sh -s -- --install-online >/dev/null 2>&1; then
+                warn "官方源失败，尝试镜像源..."
+                local installed=false
+                for mirror in "${acme_mirrors[@]}"; do
+                    if curl -fsSL "$mirror" -o /tmp/acme_install.sh && \
+                       sh /tmp/acme_install.sh --install >/dev/null 2>&1; then
+                        installed=true
+                        break
+                    fi
+                done
+                [ "$installed" = false ] && { err "acme.sh 安装失败"; return 1; }
+            fi
+            
+            rm -f /tmp/acme_install.sh
+            succ "acme.sh 安装完成"
+        fi
+        
+        # 加载 acme.sh 环境
+        [ -f "$ACME_HOME/acme.sh.env" ] && source "$ACME_HOME/acme.sh.env"
+        local ACME_CMD="$ACME_HOME/acme.sh"
+        
+        # 域名 DNS 解析校验
+        info "校验域名解析: $domain"
+        local resolved_ip=""
+        local check_count=0
+        while [ $check_count -lt 3 ]; do
+            resolved_ip=$(nslookup "$domain" 2>/dev/null | awk '/^Address: / { print $2 }' | grep -v ':' | head -n1)
+            [ -z "$resolved_ip" ] && resolved_ip=$(dig +short "$domain" 2>/dev/null | grep -E '^[0-9.]+$' | head -n1)
+            [ -z "$resolved_ip" ] && resolved_ip=$(host "$domain" 2>/dev/null | awk '/has address/ {print $4}' | head -n1)
+            
+            if [ -n "$resolved_ip" ]; then
+                if [ "$resolved_ip" = "$RAW_IP4" ] || [ "$resolved_ip" = "$RAW_IP6" ]; then
+                    succ "域名解析正确: $domain → $resolved_ip"
+                    break
+                else
+                    warn "域名解析不匹配: $domain → $resolved_ip (期望: $RAW_IP4)"
+                fi
+            fi
+            
+            check_count=$((check_count + 1))
+            [ $check_count -lt 3 ] && { warn "等待 DNS 传播... (${check_count}/3)"; sleep 5; }
+        done
+        
+        if [ -z "$resolved_ip" ]; then
+            err "域名解析失败，请检查: 1) 域名是否正确解析到本机IP  2) DNS服务器是否可达"
+            return 1
+        fi
+        
+        # 释放 80 端口（临时停止可能占用的服务）
+        local port_80_pid=$(lsof -ti:80 2>/dev/null || ss -tlnp | awk '/:80 / {print $6}' | grep -oE '[0-9]+' | head -n1)
+        local stopped_service=""
+        if [ -n "$port_80_pid" ]; then
+            info "检测到 80 端口被占用，尝试临时释放..."
+            for svc in nginx apache2 httpd caddy; do
+                if systemctl is-active "$svc" >/dev/null 2>&1; then
+                    systemctl stop "$svc" && stopped_service="$svc"
+                    break
+                elif rc-service "$svc" status >/dev/null 2>&1; then
+                    rc-service "$svc" stop && stopped_service="$svc"
+                    break
+                fi
+            done
+            sleep 2
+        fi
+        
+        # 申请证书（Standalone 模式 + ECC）
+        info "开始申请证书（可能需要 30-60 秒）..."
+        local issue_success=false
+        
+        # 优先使用 Standalone 模式（最稳定）
+        if "$ACME_CMD" --issue --standalone --keylength ec-256 \
+            -d "$domain" --server letsencrypt \
+            --httpport 80 --log /tmp/acme_issue.log >/dev/null 2>&1; then
+            issue_success=true
+        # 容错：切换到 ZeroSSL（备选 CA）
+        elif "$ACME_CMD" --issue --standalone --keylength ec-256 \
+            -d "$domain" --server zerossl \
+            --httpport 80 >/dev/null 2>&1; then
+            issue_success=true
+        # 容错：切换到 Webroot 模式（适配小内存环境）
+        elif mkdir -p /var/www/html && \
+             "$ACME_CMD" --issue --webroot /var/www/html --keylength ec-256 \
+             -d "$domain" >/dev/null 2>&1; then
+            issue_success=true
+        fi
+        
+        # 恢复之前停止的服务
+        [ -n "$stopped_service" ] && {
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl start "$stopped_service" >/dev/null 2>&1
+            else
+                rc-service "$stopped_service" start >/dev/null 2>&1
+            fi
+        }
+        
+        if [ "$issue_success" = false ]; then
+            err "证书申请失败，请检查："
+            echo "  1. 域名是否正确解析到本机 IP: $RAW_IP4"
+            echo "  2. 80 端口是否可从外网访问（防火墙/安全组）"
+            echo "  3. 是否有其他服务占用 80 端口"
+            [ -f /tmp/acme_issue.log ] && echo "详细日志: /tmp/acme_issue.log"
+            return 1
+        fi
+        
+        # 安装证书到指定目录
+        info "安装证书到 Sing-box 目录..."
+        "$ACME_CMD" --install-cert -d "$domain" --ecc \
+            --key-file "$vless_key" \
+            --fullchain-file "$vless_cert" \
+            --reloadcmd "systemctl reload sing-box 2>/dev/null || rc-service sing-box reload 2>/dev/null || true" \
+            >/dev/null 2>&1 || {
+            err "证书安装失败"
+            return 1
+        }
+        
+        chmod 600 "$vless_key" "$vless_cert"
+        
+        # 配置自动续期（添加到 crontab）
+        local cron_entry="0 0 * * * \"$ACME_CMD\" --cron --home \"$ACME_HOME\" >/dev/null 2>&1"
+        if ! crontab -l 2>/dev/null | grep -qF "$ACME_CMD"; then
+            (crontab -l 2>/dev/null; echo "$cron_entry") | crontab - 2>/dev/null || {
+                # Alpine 等系统可能需要启用 crond
+                if [ "$OS" = "alpine" ]; then
+                    rc-update add crond default 2>/dev/null
+                    rc-service crond start 2>/dev/null
+                fi
+                (crontab -l 2>/dev/null; echo "$cron_entry") | crontab -
+            }
+            info "已配置证书自动续期任务"
+        fi
+        
+        # 验证证书
+        if openssl x509 -in "$vless_cert" -noout -dates >/dev/null 2>&1; then
+            local expire_info=$(openssl x509 -in "$vless_cert" -noout -enddate | cut -d= -f2)
+            succ "VLESS 证书申请成功！有效期至: $expire_info"
+        else
+            err "证书验证失败"
+            return 1
+        fi
+    fi
 }
 
 # 获取公网IP
