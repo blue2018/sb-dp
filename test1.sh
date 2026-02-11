@@ -126,71 +126,68 @@ generate_cert() {
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
 
     if [ "$mode" = "vless" ]; then
-        # 1. 强效 IP 校验逻辑
         info "正在校验域名解析: $domain ..."
-        local resolved_ip=""
-        # 优先使用 nslookup，备选 ping
-        resolved_ip=$(nslookup "$domain" 8.8.8.8 2>/dev/null | grep -A 1 "Name:" | grep "Address" | awk '{print $2}' | head -n1)
+        local resolved_ip=$(nslookup "$domain" 8.8.8.8 2>/dev/null | grep -A 1 "Name:" | grep "Address" | awk '{print $2}' | head -n1)
         [ -z "$resolved_ip" ] && resolved_ip=$(ping -c1 "$domain" 2>/dev/null | sed -n '1p' | sed 's/.*(\(.*\)).*/\1/' | cut -d: -f1)
 
-        # 检查解析是否匹配本机 IP (IPv4 或 IPv6)
         if [ "$resolved_ip" != "$RAW_IP4" ] && [ "$resolved_ip" != "$RAW_IP6" ]; then
             echo -e "\033[1;31m[错误] 域名解析校验失败！\033[0m"
-            echo -e "   域名解析结果: \033[1;33m${resolved_ip:-解析不到地址}\033[0m"
-            echo -e "   本机公网地址: \033[1;32m$RAW_IP4 / $RAW_IP6\033[0m"
-            warn "请先在 Cloudflare 关闭小云朵并确认解析生效。跳过 VLESS 配置。"
-            INSTALL_VLESS=false
-            return 1
+            warn "请先在 Cloudflare 关闭小云朵。跳过 VLESS 配置。"
+            INSTALL_VLESS=false; return 1
         fi
         succ "解析校验通过 [✔]"
 
-        # 2. 隔离申请正式证书逻辑 (acme.sh)
         info "正在申请 VLESS 正式证书 (Standalone 模式)..."
         
-        # 使用子 Shell 运行，防止 acme.sh 脚本中断主脚本
         (
-            # 补齐 Alpine 依赖
             [ -f /etc/alpine-release ] && apk add --no-cache socat curl >/dev/null 2>&1
-            
-            # 安装 acme.sh
             if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
                 curl -s https://get.acme.sh | sh >/dev/null 2>&1 || true
             fi
             
-            # 强制释放 80 端口
+            # 【核心修复】强制释放端口，切换为 Let's Encrypt (兼容性更好且免邮箱)
             fuser -k 80/tcp >/dev/null 2>&1 || true
+            "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1
             
-            # 申请并安装证书 (封锁报错退出)
+            # 申请并安装
             "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --log /tmp/acme_vless.log && \
             "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
                 --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
                 --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
         ) || true
 
-        # 3. 结果判断
         if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
             succ "VLESS 正式证书申请成功"
         else
-            warn "VLESS 证书申请失败。原因：80端口占用或小云朵未关。详细请看 /tmp/acme_vless.log"
-            INSTALL_VLESS=false
+            # 如果 LE 申请失败，尝试为 ZeroSSL 自动注册并重试一次
+            info "LE 申请异常，尝试切换 ZeroSSL 备用节点..."
+            (
+                "$HOME/.acme.sh/acme.sh" --register-account -m "admin@$domain" --server zerossl >/dev/null 2>&1
+                "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --server zerossl --insecure >> /tmp/acme_vless.log 2>&1 && \
+                "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" --fullchain-file "$CERT_DIR/vless_fullchain.pem" --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
+            ) || true
+            
+            if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
+                succ "VLESS 正式证书申请成功 (ZeroSSL)"
+            else
+                warn "VLESS 证书申请失败。请检查 80 端口或 Cloudflare 小云朵状态。"
+                INSTALL_VLESS=false
+            fi
         fi
     else
-        # [保留原始逻辑] ECC P-256 自签名逻辑
+        # 原有 ECC P-256 自签名逻辑 (保持不动)
         [ -f "$CERT_DIR/fullchain.pem" ] && return 0
         info "生成 ECC P-256 高性能证书..."
-        
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
             -days 3650 -sha256 -subj "/CN=$domain" \
             -addext "basicConstraints=critical,CA:FALSE" \
             -addext "subjectAltName=DNS:$domain,DNS:*.$domain" \
             -addext "extendedKeyUsage=serverAuth" &>/dev/null || {
-            # 兼容逻辑
             openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
                 -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
                 -days 3650 -subj "/CN=$domain" &>/dev/null
         }
-
         [ -s "$CERT_DIR/fullchain.pem" ] && {
             openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
             chmod 600 "$CERT_DIR"/*.pem; succ "ECC 证书就绪"
