@@ -144,7 +144,7 @@ generate_cert() {
             
             # 【高效逻辑】如果证书已存在，直接退出循环，不触发任何 acme.sh 逻辑
             if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
-                echo -e "\033[1;32m[秒杀] 检测到域名 $domain 的证书已存在，直接复用\033[0m"
+                echo -e "\033[1;32m域名 $domain 证书已存在，直接复用\033[0m"
                 break
             fi
 
@@ -153,7 +153,7 @@ generate_cert() {
             break
         else
             warn "域名解析校验失败！"
-            echo -e "   请检查解析是否生效，重新输入或回车取消"
+            echo -e "请检查解析是否生效，重新输入或回车取消"
         fi
     done
 
@@ -186,7 +186,7 @@ generate_cert() {
             else
                 info "执行 Standalone 80 端口验证..."
                 fuser -k 80/tcp >/dev/null 2>&1 || true
-                "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --timeout 20
+                "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --timeout 10
             fi
 
             # 安装证书
