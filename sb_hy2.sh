@@ -135,7 +135,8 @@ generate_cert() {
         -days 3650 -subj "/CN=$TLS_DOMAIN" &>/dev/null
     if [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        chmod 600 "$CERT_DIR"/*.pem && succ "ECC 证书就绪"
+        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem"
+        succ "ECC 证书就绪"
     else err "证书生成失败"; exit 1; fi
 }
 
