@@ -131,51 +131,43 @@ generate_cert() {
         [ -z "$resolved_ip" ] && resolved_ip=$(ping -c1 "$domain" 2>/dev/null | sed -n '1p' | sed 's/.*(\(.*\)).*/\1/' | cut -d: -f1)
 
         if [ "$resolved_ip" != "$RAW_IP4" ] && [ "$resolved_ip" != "$RAW_IP6" ]; then
-            warn "域名解析未指向本机，跳过正式证书申请。"
-            INSTALL_VLESS=false; return 1
+            warn "域名解析未指向本机，VLESS 将使用自签名证书。"
+            cp "$CERT_DIR/fullchain.pem" "$CERT_DIR/vless_fullchain.pem"
+            cp "$CERT_DIR/privkey.pem" "$CERT_DIR/vless_privkey.pem"
+            return 0
         fi
         succ "解析校验通过 [✔]"
 
-        # 【新增】80 端口本地自测
-        info "正在检测 80 端口外部连通性..."
-        iptables -I INPUT -p tcp --dport 80 -j ACCEPT >/dev/null 2>&1
-        ( socat TCP-LISTEN:80,reuseaddr,fork - ) >/dev/null 2>&1 &
-        local socat_pid=$!
-        sleep 2
-        # 尝试通过公共接口探测自身 80 端口
-        if ! curl -s --max-time 3 "http://1.1.1.1" >/dev/null 2>&1; then # 仅探测网络环境
-            warn "网络环境受限，无法通过外部验证。"
-        fi
-        kill $socat_pid >/dev/null 2>&1
-
-        info "正在尝试 Standalone 模式申请..."
+        info "正在尝试申请正式证书 (Standalone)..."
+        # 使用隔离子 Shell，并设置 15 秒超时，防止死锁
         (
+            [ -f /etc/alpine-release ] && apk add --no-cache socat curl >/dev/null 2>&1
             fuser -k 80/tcp >/dev/null 2>&1 || true
+            
             if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
                 curl -s https://get.acme.sh | sh >/dev/null 2>&1 || true
             fi
-            "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1
             
-            # 执行申请
-            "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --timeout 30 --log /tmp/acme_vless.log
+            # 仅尝试一次 Let's Encrypt，不通则跳过
+            "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt >/dev/null 2>&1
+            "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --timeout 15 >/dev/null 2>&1
             
             "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
                 --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
                 --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
         ) || true
 
-        # 【核心退守】如果正式证书申请失败，强制使用 Hy2 的自签证书作为兜底
-        if [ ! -s "$CERT_DIR/vless_fullchain.pem" ]; then
-            warn "正式证书申请失败 (可能 80 端口被商家拦截)。"
-            info "正在执行兜底方案：使用自签名证书..."
+        # 检查是否申请成功
+        if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
+            succ "VLESS 正式证书申请成功"
+        else
+            warn "正式证书申请环境受限，已自动切换为自签证书兜底"
             cp "$CERT_DIR/fullchain.pem" "$CERT_DIR/vless_fullchain.pem"
             cp "$CERT_DIR/privkey.pem" "$CERT_DIR/vless_privkey.pem"
-            succ "已启用自签证书兜底 (客户端需开启 insecure: true)"
-        else
-            succ "正式证书申请成功！"
+            succ "自签证书已就绪 (配合 CF 模式建议开启 TLS)"
         fi
     else
-        # ECC P-256 自签名逻辑 (主逻辑，始终运行)
+        # 原始 ECC P-256 自签名逻辑 (必须运行，作为 VLESS 的来源)
         [ -f "$CERT_DIR/fullchain.pem" ] && return 0
         info "生成 ECC P-256 高性能证书..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
@@ -188,6 +180,7 @@ generate_cert() {
                 -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
                 -days 3650 -subj "/CN=$domain" &>/dev/null
         }
+
         [ -s "$CERT_DIR/fullchain.pem" ] && {
             openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
             chmod 600 "$CERT_DIR"/*.pem; succ "ECC 证书就绪"
