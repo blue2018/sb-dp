@@ -754,16 +754,20 @@ install_singbox() {
 # ==========================================
 # 配置文件生成
 # ==========================================
+# ==========================================
+# 配置文件生成 (修正版)
+# ==========================================
 create_config() {
     local PORT_HY2="${1:-}"
     local cur_bw="${VAR_HY2_BW:-200}"
-    mkdir -p /etc/sing-box
+    mkdir -p /etc/sing-box/certs
     local ds="ipv4_only"; local PSK=""; local SALA_PASS=""
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
+    # 端口处理
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then 
             PORT_HY2=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' /etc/sing-box/config.json)
@@ -773,13 +777,13 @@ create_config() {
     fi
     [ "$PORT_HY2" = "443" ] && PORT_HY2=36588 
 
+    # 密码与混淆处理
     [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
-    [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
+    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
     [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 基础配置：移除了 outbounds 里的 deprecated 字段，并预留了 route 结构以减少警告
+    # 1. 生成基础 Hy2 配置
     local config_json=$(cat <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -821,17 +825,19 @@ create_config() {
 }
 EOF
 )
+
+    # 2. VLESS 增强逻辑 (修正 ECH 注入)
     if [ "${INSTALL_VLESS:-false}" = "true" ]; then
         local v_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
         local v_path="/$(openssl rand -hex 4)"
         local SB_PATH=$(command -v sing-box || echo "/usr/bin/sing-box")
         
-        # 修正点 1：使用 sed 提取带破折号外壳的完整 PEM 块，这是 v1.12.x 成功启动的关键
-        local raw_ech=$($SB_PATH generate ech-keypair "$VLESS_DOMAIN")
+        # 核心修正：正确提取并格式化 ECH 密钥
+        local raw_ech=$($SB_PATH generate ech-keypair "$VLESS_DOMAIN" 2>/dev/null || echo "")
         local epem=$(echo "$raw_ech" | sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p')
         
-        # 兜底：如果提取为空，则不启用 ECH 以免导致 FATAL
         if [ -n "$epem" ]; then
+            # 使用 jq 的 --arg 确保 PEM 换行符被正确转义为单个 JSON 字符串
             config_json=$(echo "$config_json" | jq --arg uuid "$v_uuid" --arg path "$v_path" --arg sni "$VLESS_DOMAIN" --arg epem "$epem" \
             '.inbounds += [{
                 "type": "vless", "tag": "vless-in", "listen": "::", "listen_port": 443,
@@ -848,7 +854,7 @@ EOF
                 "transport": {"type": "ws", "path": $path}
             }]')
         else
-            # 如果 ECH 密钥生成异常，退回到普通 TLS 模式，保证 VLESS 至少能跑
+            # 备选方案
             config_json=$(echo "$config_json" | jq --arg uuid "$v_uuid" --arg path "$v_path" --arg sni "$VLESS_DOMAIN" \
             '.inbounds += [{
                 "type": "vless", "tag": "vless-in", "listen": "::", "listen_port": 443,
@@ -862,7 +868,10 @@ EOF
             }]')
         fi
     fi
-    echo "$config_json" > "/etc/sing-box/config.json" && chmod 600 "/etc/sing-box/config.json"
+
+    # 3. 落地配置
+    echo "$config_json" | jq . > "/etc/sing-box/config.json"
+    chmod 600 "/etc/sing-box/config.json"
 }
 
 # ==========================================
