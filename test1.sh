@@ -122,90 +122,92 @@ prompt_for_port() {
 generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"
     local domain=""
-    mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
+    mkdir -p "$CERT_DIR" && chmod 755 "$CERT_DIR"  # 提高到 755 确保子目录可读
 
-    # --- 1. 交互与校验 ---
+    # --- 1. 域名交互与解析校验 ---
     while true; do
-        echo -e "\n\033[1;36m[可选] 是否新增 VLESS+WS+ECH 协议(支持 CF 优选)？\033[0m"
-        read -p "请输入已解析本机IP的域名(直接回车则跳过): " V_DOMAIN_INPUT
+        echo -e "\n\033[1;36m[可选] 是否配置 VLESS+WS+ECH 协议？\033[0m"
+        read -p "请输入解析到本机的域名 (直接回车则仅安装 Hy2): " V_DOMAIN_INPUT
         
         if [ -z "$V_DOMAIN_INPUT" ]; then
             INSTALL_VLESS=false; break
         fi
 
         info "正在校验域名解析: $V_DOMAIN_INPUT ..."
+        # 优化解析：尝试多次获取
         local resolved_ip=$(nslookup "$V_DOMAIN_INPUT" 8.8.8.8 2>/dev/null | grep -A 1 "Name:" | grep "Address" | awk '{print $2}' | head -n1)
-        [ -z "$resolved_ip" ] && resolved_ip=$(ping -c1 "$V_DOMAIN_INPUT" 2>/dev/null | sed -n '1p' | sed 's/.*(\(.*\)).*/\1/' | cut -d: -f1)
+        [ -z "$resolved_ip" ] && resolved_ip=$(curl -s4m5 "https://da.gd/host/$V_DOMAIN_INPUT")
 
         if [ "$resolved_ip" = "$RAW_IP4" ] || [ "$resolved_ip" = "$RAW_IP6" ]; then
             succ "解析校验通过 [✔]"
             INSTALL_VLESS=true; domain="$V_DOMAIN_INPUT"; VLESS_DOMAIN="$V_DOMAIN_INPUT"
             
+            # 如果证书已存在且有效（非空且大于0），询问是否重用
             if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
-                echo -e "\033[1;32m[秒杀] 域名 $domain 证书已存在，直接复用\033[0m"
-                break
+                read -p "域名 $domain 已有证书，是否重新申请？[y/N]: " RE_CERT
+                [[ ! "$RE_CERT" =~ ^[Yy]$ ]] && break
             fi
 
-            echo -e "\n\033[1;33m[提示] 建议提供 CF Token 使用 DNS 验证，成功率 100% 且速度极快\033[0m"
-            read -p "请输入 Cloudflare API Token (回车则尝试 80 端口模式): " CF_TOKEN_TEMP
+            echo -e "\n\033[1;33m[提示] 建议提供 CF Token 使用 DNS 验证，成功率更高\033[0m"
+            read -p "请输入 Cloudflare API Token (回车则使用 80 端口模式): " CF_TOKEN_TEMP
             break
         else
-            warn "域名解析校验失败！"
-            echo -e "当前解析到: ${resolved_ip:-未知} | 本机 IPv4: $RAW_IP4"
-            echo -e "请检查 DNS 设置或等待解析生效"
+            warn "域名解析校验失败！当前解析: ${resolved_ip:-未知} | 本机 IPv4: $RAW_IP4"
+            read -p "解析尚未生效，是否强制继续申请证书？[y/N]: " FORCE_V
+            if [[ "$FORCE_V" =~ ^[Yy]$ ]]; then
+                INSTALL_VLESS=true; domain="$V_DOMAIN_INPUT"; VLESS_DOMAIN="$V_DOMAIN_INPUT"; break
+            fi
         fi
     done
 
-    # --- 2. Hysteria2 基础证书 (同步伪装域名) ---
-    if [ ! -s "$CERT_DIR/fullchain.pem" ]; then
-        info "生成 ECC 基础证书 (伪装目标: ${TLS_DOMAIN})..."
-        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-            -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-            -days 3650 -subj "/CN=${TLS_DOMAIN:-www.bing.com}" &>/dev/null
-        openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        succ "ECC 基础证书已就绪"
-    fi
+    # --- 2. Hysteria2 基础证书生成 (关键点：CN 匹配) ---
+    local HY2_CN="${domain:-$TLS_DOMAIN}"
+    [ -z "$HY2_CN" ] && HY2_CN="www.microsoft.com"
+    
+    info "生成 ECC 自签证书 (目标: $HY2_CN)..."
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+        -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
+        -days 3650 -subj "/CN=$HY2_CN" &>/dev/null
+    
+    # 强制权限，防止 sing-box 报错 permission denied
+    chmod 644 "$CERT_DIR/fullchain.pem" "$CERT_DIR/privkey.pem"
+    openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
 
-    # --- 3. VLESS 正式证书申请 (极速模式) ---
-    if [ "$INSTALL_VLESS" = "true" ] && [ ! -s "$CERT_DIR/vless_fullchain.pem" ]; then
+    # --- 3. acme.sh 申请正式证书 ---
+    if [ "$INSTALL_VLESS" = "true" ]; then
         info "正在申请正式证书 (Let's Encrypt)..."
-        (
-            # acme.sh 安装与环境初始化
-            if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
-                curl -s https://get.acme.sh | sh >/dev/null 2>&1
-            fi
-            local ACME="$HOME/.acme.sh/acme.sh"
-            
-            # 切换 CA 为 Let's Encrypt (ZeroSSL 经常在大陆或部分海外节点连接缓慢)
-            $ACME --set-default-ca --server letsencrypt >/dev/null 2>&1
-            if [ -n "$CF_TOKEN_TEMP" ]; then
-                info "执行 DNS-01 验证 (Cloudflare API)..."
-                export CF_Token="$CF_TOKEN_TEMP"
-				$ACME --issue --dns dns_cf -d "$domain" --dnssleep 10 --insecure
-            else
-                info "执行 Standalone 验证 (占用 80 端口)..."
-                fuser -k 80/tcp >/dev/null 2>&1 || true
-                $ACME --issue --standalone -d "$domain" --insecure --timeout 10
-            fi
-
-            $ACME --install-cert -d "$domain" \
-                --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
-                --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
-        ) || true
-
-        # 结果判定与保底逻辑
-        if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
-            succ "正式证书申请成功"
+        if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
+            curl -s https://get.acme.sh | sh >/dev/null 2>&1
+        fi
+        local ACME="$HOME/.acme.sh/acme.sh"
+        
+        # 预清理可能影响 80 端口的进程
+        [ -z "$CF_TOKEN_TEMP" ] && fuser -k 80/tcp >/dev/null 2>&1 || true
+        
+        $ACME --set-default-ca --server letsencrypt >/dev/null 2>&1
+        
+        if [ -n "$CF_TOKEN_TEMP" ]; then
+            export CF_Token="$CF_TOKEN_TEMP"
+            $ACME --issue --dns dns_cf -d "$domain" --dnssleep 10
         else
-            warn "正式证书申请未通过，已回退至自签证书保底运行"
-            cp "$CERT_DIR/fullchain.pem" "$CERT_DIR/vless_fullchain.pem"
-            cp "$CERT_DIR/privkey.pem" "$CERT_DIR/vless_privkey.pem"
+            $ACME --issue --standalone -d "$domain" --insecure
+        fi
+
+        $ACME --install-cert -d "$domain" \
+            --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
+            --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
+
+        # 结果校验
+        if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
+            succ "正式证书申请成功 [✔]"
+        else
+            warn "正式证书申请失败，正在建立软链接回退至自签证书..."
+            # 使用软链接，确保 config.json 引用的文件始终存在
+            ln -sf "$CERT_DIR/fullchain.pem" "$CERT_DIR/vless_fullchain.pem"
+            ln -sf "$CERT_DIR/privkey.pem" "$CERT_DIR/vless_privkey.pem"
         fi
         
-        # --- 深度清理敏感信息 ---
-        [ -d "$HOME/.acme.sh" ] && sed -i '/CF_Token/d' "$HOME/.acme.sh/account.conf" 2>/dev/null || true
         unset CF_Token CF_TOKEN_TEMP
-        info "敏感信息已从磁盘和内存中抹除"
     fi
 }
 
@@ -227,7 +229,7 @@ get_network_info() {
     [ -s "$t6" ] && RAW_IP6=$(tr -d '[:space:]' < "$t6" | grep -Ei '([a-f0-9:]+:+)+[a-f0-9]+' || echo "")
     rm -f "$t4" "$t6"
     # 状态判定：只有 RAW_IP6 真的包含冒号才判定 IPv6 可用
-    [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true" || IS_V6_OK="false"
+    [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true" || IS_V6_OK="false"  
     [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "错误: 未能探测到任何有效的公网 IP，安装中断"; exit 1; }
     # 输出信息
     [ -n "$RAW_IP4" ] && succ "IPv4: $RAW_IP4 [✔]" || info "IPv4: 不可用 (单栈 IPv6 环境)"
