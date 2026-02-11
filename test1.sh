@@ -126,57 +126,66 @@ generate_cert() {
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
 
     if [ "$mode" = "vless" ]; then
+        # 1. 强效 IP 校验逻辑
         info "正在校验域名解析: $domain ..."
-        # [改动] 增加域名解析预检，防止填错域名导致申请被封 IP
-        local resolved_ip=$(nslookup "$domain" 8.8.8.8 2>/dev/null | grep -A 1 "Name:" | grep "Address" | awk '{print $2}' | head -n1)
+        local resolved_ip=""
+        # 优先使用 nslookup，备选 ping
+        resolved_ip=$(nslookup "$domain" 8.8.8.8 2>/dev/null | grep -A 1 "Name:" | grep "Address" | awk '{print $2}' | head -n1)
         [ -z "$resolved_ip" ] && resolved_ip=$(ping -c1 "$domain" 2>/dev/null | sed -n '1p' | sed 's/.*(\(.*\)).*/\1/' | cut -d: -f1)
 
+        # 检查解析是否匹配本机 IP (IPv4 或 IPv6)
         if [ "$resolved_ip" != "$RAW_IP4" ] && [ "$resolved_ip" != "$RAW_IP6" ]; then
-            warn "域名解析校验失败！"
-            echo -e "   域名解析地址: \033[1;31m${resolved_ip:-解析失败}\033[0m"
+            echo -e "\033[1;31m[错误] 域名解析校验失败！\033[0m"
+            echo -e "   域名解析结果: \033[1;33m${resolved_ip:-解析不到地址}\033[0m"
             echo -e "   本机公网地址: \033[1;32m$RAW_IP4 / $RAW_IP6\033[0m"
-            warn "解析未指向本机或小云朵未关闭，跳过 VLESS 证书申请。"
-            INSTALL_VLESS=false; return 1
+            warn "请先在 Cloudflare 关闭小云朵并确认解析生效。跳过 VLESS 配置。"
+            INSTALL_VLESS=false
+            return 1
         fi
         succ "解析校验通过 [✔]"
 
-        info "正在为 VLESS 域名 $domain 申请正式证书..."
-        # [改动] 补齐 Alpine 必需的 socat 依赖
-        command -v socat >/dev/null 2>&1 || { [ -f /etc/alpine-release ] && apk add --no-cache socat >/dev/null 2>&1; }
+        # 2. 隔离申请正式证书逻辑 (acme.sh)
+        info "正在申请 VLESS 正式证书 (Standalone 模式)..."
         
-        # [改动] 隔离执行环境，防止 acme.sh 闪退导致主脚本中断
+        # 使用子 Shell 运行，防止 acme.sh 脚本中断主脚本
         (
-            # 确保 acme.sh 安装
+            # 补齐 Alpine 依赖
+            [ -f /etc/alpine-release ] && apk add --no-cache socat curl >/dev/null 2>&1
+            
+            # 安装 acme.sh
             if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
-                curl -s https://get.acme.sh | sh >/dev/null 2>&1
+                curl -s https://get.acme.sh | sh >/dev/null 2>&1 || true
             fi
             
-            # 停止 80 端口占用
-            fuser -k 80/tcp >/dev/null 2>&1
+            # 强制释放 80 端口
+            fuser -k 80/tcp >/dev/null 2>&1 || true
             
-            # 申请证书
+            # 申请并安装证书 (封锁报错退出)
             "$HOME/.acme.sh/acme.sh" --issue --standalone -d "$domain" --force --insecure --log /tmp/acme_vless.log && \
             "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" \
                 --fullchain-file "$CERT_DIR/vless_fullchain.pem" \
                 --key-file "$CERT_DIR/vless_privkey.pem" >/dev/null 2>&1
         ) || true
 
+        # 3. 结果判断
         if [ -s "$CERT_DIR/vless_fullchain.pem" ]; then
-            succ "VLESS 证书已就绪"
+            succ "VLESS 正式证书申请成功"
         else
-            warn "VLESS 证书申请失败，详细日志见 /tmp/acme_vless.log"
+            warn "VLESS 证书申请失败。原因：80端口占用或小云朵未关。详细请看 /tmp/acme_vless.log"
             INSTALL_VLESS=false
         fi
     else
-        # [保持原始风格] ECC P-256 自签逻辑
+        # [保留原始逻辑] ECC P-256 自签名逻辑
         [ -f "$CERT_DIR/fullchain.pem" ] && return 0
         info "生成 ECC P-256 高性能证书..."
+        
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
             -days 3650 -sha256 -subj "/CN=$domain" \
             -addext "basicConstraints=critical,CA:FALSE" \
             -addext "subjectAltName=DNS:$domain,DNS:*.$domain" \
             -addext "extendedKeyUsage=serverAuth" &>/dev/null || {
+            # 兼容逻辑
             openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
                 -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
                 -days 3650 -subj "/CN=$domain" &>/dev/null
