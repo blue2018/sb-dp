@@ -717,6 +717,9 @@ install_singbox() {
 # ==========================================
 # 配置文件生成
 # ==========================================
+# ==========================================
+# 配置文件生成
+# ==========================================
 create_config() {
     local PORT_HY2="${1:-}"
     local cur_bw="${VAR_HY2_BW:-200}"
@@ -748,27 +751,46 @@ create_config() {
     [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # --- 6. 核心：VLESS 动态块预生成 (修正换行，不破坏原始变量) ---
+    # --- 6. 核心：VLESS 动态块预生成 (修正版) ---
     local vless_block=""
     if [ "${INSTALL_VLESS:-false}" = "true" ]; then
         local v_uuid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
         local v_path="/$(openssl rand -hex 4)"
         local SB_PATH=$(command -v sing-box || echo "/usr/bin/sing-box")
-        # 提取 ECH 并转义换行符，确保在 cat 拼接中不报错
-        local raw_ech=$($SB_PATH generate ech-keypair "$VLESS_DOMAIN" 2>/dev/null || echo "")
-        local epem=$(echo "$raw_ech" | sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' | sed ':a;N;$!ba;s/\n/\\n/g')
         
-        vless_block=",{
-          \"type\": \"vless\", \"tag\": \"vless-in\", \"listen\": \"::\", \"listen_port\": 443,
-          \"users\": [{\"uuid\": \"$v_uuid\"}],
-          \"tls\": {
-            \"enabled\": true, \"server_name\": \"$VLESS_DOMAIN\",
-            \"certificate_path\": \"/etc/sing-box/certs/vless_fullchain.pem\",
-            \"key_path\": \"/etc/sing-box/certs/vless_privkey.pem\",
-            \"ech\": { \"enabled\": true, \"key\": [ \"$epem\" ] }
-          },
-          \"transport\": {\"type\": \"ws\", \"path\": \"$v_path\"}
-        }"
+        # 生成 ECH 密钥对
+        local raw_ech=$($SB_PATH generate ech-keypair "$VLESS_DOMAIN" 2>/dev/null || echo "")
+        
+        # 提取私钥和公钥（去除所有空格和换行）
+        local epriv=$(echo "$raw_ech" | grep -A1 "Private Key" | tail -n1 | tr -d ' \t\n\r')
+        local epub=$(echo "$raw_ech" | grep -A1 "Public Key" | tail -n1 | tr -d ' \t\n\r')
+        
+        # 构造 VLESS 块（标准 JSON 格式，保持你的代码风格）
+        vless_block=",
+    {
+      \"type\": \"vless\",
+      \"tag\": \"vless-in\",
+      \"listen\": \"::\",
+      \"listen_port\": 443,
+      \"users\": [{\"uuid\": \"$v_uuid\"}],
+      \"tls\": {
+        \"enabled\": true,
+        \"server_name\": \"$VLESS_DOMAIN\",
+        \"certificate_path\": \"/etc/sing-box/certs/vless_fullchain.pem\",
+        \"key_path\": \"/etc/sing-box/certs/vless_privkey.pem\",
+        \"ech\": {
+          \"enabled\": true,
+          \"key\": [{
+            \"private_key\": \"$epriv\",
+            \"public_key\": \"$epub\"
+          }]
+        }
+      },
+      \"transport\": {
+        \"type\": \"ws\",
+        \"path\": \"$v_path\"
+      }
+    }"
     fi
 
     # --- 7. 写入配置 (完全保留你原本的 JSON 结构) ---
@@ -785,27 +807,29 @@ create_config() {
     "disable_cache": false,
     "disable_expire": false
   },
-  "inbounds": [{
-    "type": "hysteria2",
-    "tag": "hy2-in",
-    "listen": "::",
-    "listen_port": $PORT_HY2,
-    "users": [ { "password": "$PSK" } ],
-    "ignore_client_bandwidth": false,
-    "up_mbps": $cur_bw,
-    "down_mbps": $cur_bw,
-    "udp_timeout": "$timeout",
-    "udp_fragment": true,
-    "tls": {
-      "enabled": true,
-      "alpn": ["h3"],
-      "min_version": "1.3",
-      "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-      "key_path": "/etc/sing-box/certs/privkey.pem"
-    },
-    "obfs": {"type": "salamander", "password": "$SALA_PASS"},
-    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
-  }${vless_block}],
+  "inbounds": [
+    {
+      "type": "hysteria2",
+      "tag": "hy2-in",
+      "listen": "::",
+      "listen_port": $PORT_HY2,
+      "users": [ { "password": "$PSK" } ],
+      "ignore_client_bandwidth": false,
+      "up_mbps": $cur_bw,
+      "down_mbps": $cur_bw,
+      "udp_timeout": "$timeout",
+      "udp_fragment": true,
+      "tls": {
+        "enabled": true,
+        "alpn": ["h3"],
+        "min_version": "1.3",
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+        "key_path": "/etc/sing-box/certs/privkey.pem"
+      },
+      "obfs": {"type": "salamander", "password": "$SALA_PASS"},
+      "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+    }${vless_block}
+  ],
   "outbounds": [
     { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }
   ],
@@ -817,6 +841,13 @@ create_config() {
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
+    
+    # --- 8. 配置校验（新增安全检查）---
+    if ! /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_check.log 2>&1; then
+        err "配置文件生成失败，JSON 格式错误："
+        cat /tmp/sb_check.log
+        return 1
+    fi
 }
 
 # ==========================================
