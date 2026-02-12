@@ -704,7 +704,7 @@ create_config() {
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
 
-    # 1. 端口与密码提取 (略，保持你原有逻辑)
+    # 1. 提取基础变量 (保留你原来的逻辑)
     if [ -z "$PORT_HY2" ]; then
         PORT_HY2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
         [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port)
@@ -714,20 +714,17 @@ create_config() {
     local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 2. VLESS 变量提取 (略，保持你原有逻辑)
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
+    [ -z "$V_PATH" ] && V_PATH="stream-$(openssl rand -hex 4)"
 
-    # 3. 参考 3X-UI 的 ECH 扁平化注入
+    # 2. ECH 固定密钥
     local PRESET_PUB="mS_MOf88G93Gf_uC92pBbeYc7y2Xo1R6N6N8p5rI5U0="
     local PRESET_PRIV="4D9v8u_O2P0VfS9V2n4R8_v3X1zM5P6O6N8p5rI5U0="
-    
-    # 保持本地 ech.key 为纯净 JSON 对象
     echo "{\"public_key\":\"$PRESET_PUB\",\"private_key\":\"$PRESET_PRIV\"}" > /etc/sing-box/certs/ech.key
 
-    # 4. 写入配置 (参考 3X-UI 针对 1.12+ 的扁平 inbound 结构)
+    # 3. 写入配置 - 严格适配 1.12.21：ech 内部直接写 key，不准用 key_pair 数组
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -739,8 +736,6 @@ create_config() {
       "listen": "::",
       "listen_port": $PORT_HY2,
       "users": [ { "password": "$PSK" } ],
-      "ignore_client_bandwidth": false,
-      "up_mbps": $cur_bw, "down_mbps": $cur_bw,
       "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
       "obfs": {"type": "salamander", "password": "$SALA_PASS"},
       "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
@@ -756,15 +751,11 @@ create_config() {
         "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem",
         "ech": { 
           "enabled": true,
-          "key_pair": [
-            {
-              "public_key": "$PRESET_PUB",
-              "private_key": "$PRESET_PRIV"
-            }
-          ]
+          "public_key": "$PRESET_PUB",
+          "private_key": "$PRESET_PRIV"
         }
       },
-      "transport": { "type": "ws", "path": "$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol" }
+      "transport": { "type": "ws", "path": "/$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol" }
     }
   ],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
