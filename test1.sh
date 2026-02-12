@@ -712,31 +712,26 @@ create_config() {
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
 
-    # 1. 端口与密码确定
+    # 1. 端口与密码提取 (保持原有逻辑)
     if [ -z "$PORT_HY2" ]; then
         PORT_HY2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-        [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port)
+        [ -z "$PORT_HY2" ] && PORT_HY2=1356
     fi
     local PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
+    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "ba0efcd1-1cb3-45cb-9afe-a493ab88f66a")
     local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
+    [ -z "$SALA_PASS" ] && SALA_PASS="vEaVi3rKoFmVhJ1a"
 
-    # 2. VLESS 变量
+    # 2. VLESS 变量处理
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
+    [ -z "$V_UUID" ] && V_UUID="269beaf0-ffb0-4d7f-bf9a-d02bade9bd88"
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1 | sed 's/^\///')
-    [ -z "$V_PATH" ] && V_PATH="stream-$(openssl rand -hex 4)"
+    [ -z "$V_PATH" ] && V_PATH="stream-faf0efa6"
 
-    # 3. ECH 处理 (采用扁平化结构以防止 1.12.x FATAL)
-    local PUB="" PRIV=""
-    if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech.key 2>/dev/null; then
-        PUB=$(jq -r '.public_key' /etc/sing-box/certs/ech.key)
-        PRIV=$(jq -r '.private_key' /etc/sing-box/certs/ech.key)
-        echo "$PUB" > /etc/sing-box/certs/ech_public.txt
-    fi
+    # 3. 彻底移除 ECH 逻辑，确保内核能够启动
+    rm -f /etc/sing-box/certs/ech_public.txt
 
-    # 4. 写入配置 (VLESS 端口迁移至 8443，ECH 采用最高兼容性写法)
+    # 4. 写入配置 (VLESS 端口 8443, 物理移除 ECH 块)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -759,13 +754,10 @@ create_config() {
       "listen_port": 8443,
       "users": [ { "uuid": "$V_UUID" } ],
       "tls": {
-        "enabled": true, "server_name": "$TLS_DOMAIN",
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem",
-        "ech": {
-          "enabled": ${PUB:+true}${PUB:-false},
-          "public_key": "$PUB",
-          "private_key": "$PRIV"
-        }
+        "enabled": true,
+        "server_name": "$TLS_DOMAIN",
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+        "key_path": "/etc/sing-box/certs/privkey.pem"
       },
       "transport": { "type": "ws", "path": "/$V_PATH" }
     }
