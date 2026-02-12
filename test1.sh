@@ -704,7 +704,7 @@ create_config() {
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
 
-    # 1. 提取基础变量 (保留你原来的逻辑)
+    # 1. 变量提取
     if [ -z "$PORT_HY2" ]; then
         PORT_HY2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
         [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port)
@@ -717,14 +717,21 @@ create_config() {
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_PATH" ] && V_PATH="stream-$(openssl rand -hex 4)"
+    [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
 
-    # 2. ECH 固定密钥
+    # 2. 生成/提取 ECH 密钥 (现在满血版内核支持 generate 了)
     local PRESET_PUB="mS_MOf88G93Gf_uC92pBbeYc7y2Xo1R6N6N8p5rI5U0="
     local PRESET_PRIV="4D9v8u_O2P0VfS9V2n4R8_v3X1zM5P6O6N8p5rI5U0="
-    echo "{\"public_key\":\"$PRESET_PUB\",\"private_key\":\"$PRESET_PRIV\"}" > /etc/sing-box/certs/ech.key
+    
+    # 尝试生成新密钥，失败则使用预设
+    if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech.key 2>/dev/null; then
+        PRESET_PUB=$(jq -r '.public_key' /etc/sing-box/certs/ech.key)
+        PRESET_PRIV=$(jq -r '.private_key' /etc/sing-box/certs/ech.key)
+    else
+        echo "{\"public_key\":\"$PRESET_PUB\",\"private_key\":\"$PRESET_PRIV\"}" > /etc/sing-box/certs/ech.key
+    fi
 
-    # 3. 写入配置 - 严格适配 1.12.21：ech 内部直接写 key，不准用 key_pair 数组
+    # 3. 写入配置 (标准 1.12.x key_pair 数组结构)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -751,11 +758,15 @@ create_config() {
         "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem",
         "ech": { 
           "enabled": true,
-          "public_key": "$PRESET_PUB",
-          "private_key": "$PRESET_PRIV"
+          "key_pair": [
+            {
+              "public_key": "$PRESET_PUB",
+              "private_key": "$PRESET_PRIV"
+            }
+          ]
         }
       },
-      "transport": { "type": "ws", "path": "/$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol" }
+      "transport": { "type": "ws", "path": "$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol" }
     }
   ],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
@@ -878,8 +889,6 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    
-    # 基础提取
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
     local v_data=$(jq -r '.. | objects | select(.type == "vless") | "\(.users[0].uuid) \(.transport.path) \(.tls.server_name)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
@@ -889,7 +898,7 @@ get_env_data() {
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
     
-    # 提取公钥：直接从我们刚才存的 JSON 里拿
+    # 提取 ECH 公钥用于链接生成
     V_ECH_PK=$(jq -r '.public_key // empty' /etc/sing-box/certs/ech.key 2>/dev/null)
 }
 
@@ -898,27 +907,17 @@ display_links() {
     local HY2_BASE="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && HY2_BASE="${HY2_BASE}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && HY2_BASE="${HY2_BASE}&obfs=salamander&obfs-password=${RAW_SALA}"
-    
-    # 1. 优化 VLESS 基础参数：保持 3X-UI 风格的参数顺序
     local VL_BASE="encryption=none&security=tls&sni=$RAW_SNI&type=ws&host=$RAW_SNI&path=${V_PATH#?}" 
-    # 注意：${V_PATH#?} 是为了防止路径里出现双斜杠，v2rayN 有时对这个敏感
-    
-    # 2. 注入 ECH 公钥 (这是 VLESS 通不通的关键)
     [ -n "${V_ECH_PK:-}" ] && VL_BASE="${VL_BASE}&pbk=${V_ECH_PK}"
-    
-    # 3. 添加指纹和安全选项
     VL_BASE="${VL_BASE}&fp=chrome&allowInsecure=1"
 
     _do_probe() {
         [ -z "$1" ] && return
-        # 小鸡环境 nc 可能被限，加一个超时保护
         (nc -z -w 2 "$1" 443 || nc -z -u -w 2 "$1" "$RAW_PORT") >/dev/null 2>&1 && echo -e "\033[1;32m (已放行)\033[0m" || echo -e "\033[1;33m (检测超时)\033[0m"
     }
     command -v nc >/dev/null && { _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait; v4_status=$(cat /tmp/sb_v4); v6_status=$(cat /tmp/sb_v6); }
 
     echo -e "\n\033[1;32m[双协议节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"} | 443\033[0m\n"
-    
-    # 4. 这里的拼接逻辑保持你的原样，非常稳健
     [ -n "${RAW_IP4:-}" ] && {
         local L4_HY2="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${HY2_BASE}#$(hostname)_Hy2_v4"
         local L4_VLS="vless://$V_UUID@$RAW_IP4:443?${VL_BASE}#$(hostname)_VLS_v4"
@@ -932,7 +931,6 @@ display_links() {
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}${L6_HY2}\n${L6_VLS}"
     }
     echo -e "\033[1;34m==========================================\033[0m"
-    # 根据 V_ECH_PK 是否存在，动态显示技术特征，避免误导
     if [ -n "${V_ECH_PK:-}" ]; then
         echo -e "\033[1;32m[技术特征]\033[0m VLESS 已启用 ECH 加密与 WebSocket 传输"
     else
