@@ -435,27 +435,31 @@ apply_nic_core_boost() {
 
 #防火墙开放端口
 apply_firewall() {
-    local port_hy2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    local port_vless=$(jq -r '.inbounds[] | select(.type == "vless") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$port_hy2" ] && [ -z "$port_vless" ] && return 0
+    local port_hy2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    local port_vless=$(jq -r '.inbounds[] | select(.type == "vless") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$port_hy2" ] && [ -z "$port_vless" ] && return 0
 
-    {   if command -v ufw >/dev/null 2>&1; then
-            [ -n "$port_hy2" ] && ufw allow "$port_hy2"/udp >/dev/null 2>&1
-            [ -n "$port_vless" ] && ufw allow "$port_vless"/tcp >/dev/null 2>&1
-        elif command -v firewall-cmd >/dev/null 2>&1; then
-            [ -n "$port_hy2" ] && { firewall-cmd --list-ports | grep -q "$port_hy2/udp" || firewall-cmd --add-port="$port_hy2"/udp --permanent; } >/dev/null 2>&1
-            [ -n "$port_vless" ] && { firewall-cmd --list-ports | grep -q "$port_vless/tcp" || firewall-cmd --add-port="$port_vless"/tcp --permanent; } >/dev/null 2>&1
-            firewall-cmd --reload >/dev/null 2>&1
-        elif command -v iptables >/dev/null 2>&1; then
-            if [ -n "$port_hy2" ]; then
-                iptables -D INPUT -p udp --dport "$port_hy2" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p udp --dport "$port_hy2" -j ACCEPT >/dev/null 2>&1
-                command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port_hy2" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p udp --dport "$port_hy2" -j ACCEPT >/dev/null 2>&1; }
-            fi
-            if [ -n "$port_vless" ]; then
-                iptables -D INPUT -p tcp --dport "$port_vless" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p tcp --dport "$port_vless" -j ACCEPT >/dev/null 2>&1
-                command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p tcp --dport "$port_vless" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p tcp --dport "$port_vless" -j ACCEPT >/dev/null 2>&1; }
-            fi
-        fi    } || true
+    {
+        if command -v ufw >/dev/null 2>&1; then
+            [ -n "$port_hy2" ] && ufw allow "$port_hy2"/udp >/dev/null 2>&1
+            [ -n "$port_vless" ] && ufw allow "$port_vless"/tcp >/dev/null 2>&1
+        elif command -v firewall-cmd >/dev/null 2>&1; then
+            [ -n "$port_hy2" ] && { firewall-cmd --list-ports | grep -q "$port_hy2/udp" || firewall-cmd --add-port="$port_hy2"/udp --permanent; } >/dev/null 2>&1
+            [ -n "$port_vless" ] && { firewall-cmd --list-ports | grep -q "$port_vless/tcp" || firewall-cmd --add-port="$port_vless"/tcp --permanent; } >/dev/null 2>&1
+            firewall-cmd --reload >/dev/null 2>&1
+        elif command -v iptables >/dev/null 2>&1; then
+            if [ -n "$port_hy2" ]; then
+                iptables -D INPUT -p udp --dport "$port_hy2" -j ACCEPT >/dev/null 2>&1
+                iptables -I INPUT -p udp --dport "$port_hy2" -j ACCEPT >/dev/null 2>&1
+                command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port_hy2" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p udp --dport "$port_hy2" -j ACCEPT >/dev/null 2>&1; }
+            fi
+            if [ -n "$port_vless" ]; then
+                iptables -D INPUT -p tcp --dport "$port_vless" -j ACCEPT >/dev/null 2>&1
+                iptables -I INPUT -p tcp --dport "$port_vless" -j ACCEPT >/dev/null 2>&1
+                command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p tcp --dport "$port_vless" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p tcp --dport "$port_vless" -j ACCEPT >/dev/null 2>&1; }
+            fi
+        fi
+    } || true
 }
 
 # "全功能调度器"
@@ -705,9 +709,6 @@ install_singbox() {
     else rm -rf "$TD" && err "校验失败：二进制文件缺失" && return 1; fi
 }
 
-# ==========================================
-# 配置文件生成
-# ==========================================
 # ==========================================
 # 配置文件生成
 # ==========================================
