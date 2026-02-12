@@ -47,10 +47,11 @@ detect_os() {
 # 依赖安装 (容错增强版)
 install_dependencies() {
     info "正在检查系统类型..."
+    # 补全了 dnsutils/bind-tools/bind-utils 依赖
     local PM="" DEPS="curl jq openssl ca-certificates bash tzdata tar iproute2 iptables procps netcat-openbsd" OPT="ethtool kmod wireguard-tools"
-    if command -v apk >/dev/null 2>&1; then PM="apk"; DEPS="$DEPS coreutils util-linux-misc"
-    elif command -v apt-get >/dev/null 2>&1; then PM="apt"; DEPS="$DEPS util-linux"
-    else PM="yum"; DEPS="${DEPS//netcat-openbsd/nc}"; DEPS="${DEPS//procps/procps-ng} util-linux"; fi
+    if command -v apk >/dev/null 2>&1; then PM="apk"; DEPS="$DEPS coreutils util-linux-misc bind-tools"
+    elif command -v apt-get >/dev/null 2>&1; then PM="apt"; DEPS="$DEPS util-linux dnsutils"
+    else PM="yum"; DEPS="${DEPS//netcat-openbsd/nc}"; DEPS="${DEPS//procps/procps-ng} util-linux bind-utils"; fi
     [ -w /proc/sys/vm/drop_caches ] && sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
     case "$PM" in
         apk) info "检测到 Alpine 系统，执行分批安装依赖..."
@@ -71,7 +72,9 @@ install_dependencies() {
              $(command -v dnf || echo "yum") install -y $OPT >/dev/null 2>&1 || true ;;
     esac
     update-ca-certificates 2>/dev/null || true
-    for cmd in jq curl tar bash pgrep taskset; do command -v "$cmd" >/dev/null 2>&1 || { [ "$PM" = "apk" ] && apk add --no-cache util-linux >/dev/null 2>&1 || { err "核心依赖 ${cmd} 安装失败，请检查网络或源"; exit 1; }; } done
+    for cmd in jq curl tar bash pgrep taskset dig; do 
+        command -v "$cmd" >/dev/null 2>&1 || { [ "$PM" = "apk" ] && apk add --no-cache util-linux >/dev/null 2>&1 || { err "核心依赖 ${cmd} 安装失败，请检查网络或源"; exit 1; }; } 
+    done
     succ "所需依赖已就绪"
 }
 
@@ -122,9 +125,8 @@ prompt_for_port() {
 generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-    
-    echo -e "\n\033[1;32m[证书配置]\033[0m"
-    echo "1. 快速模式: 生成 ECC 自签名证书 (Hy2 专用, VLESS 不支持 CDN)"
+    echo -e "\n\033[1;32m[VLESS证书配置]\033[0m"
+    echo "1. 快速模式: 生成 ECC 自签名证书 (VLESS 不支持 CDN)"
     echo "2. 进阶模式: Cloudflare API 申请正式证书 (支持 VLESS + CDN)"
     read -r -p "请选择证书方案 [1-2, 默认1]: " cert_opt
     CERT_MODE=${cert_opt:-1}
@@ -138,7 +140,6 @@ generate_cert() {
         local match=false
         [[ "$res_v4" == "$RAW_IP4" ]] && match=true
         [[ -n "$RAW_IP6" && "$res_v6" == "$RAW_IP6" ]] && match=true
-        
         if [ "$match" = true ]; then
             succ "解析校验通过，开始申请证书..."
             export CF_Token="$cf_token"
@@ -158,14 +159,19 @@ generate_cert() {
         info "生成 ECC P-256 高性能证书 (域名: $TLS_DOMAIN)..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-            -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" &>/dev/null
+            -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" &>/dev/null || \
+        openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
+            -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
+            -days 3650 -subj "/CN=$TLS_DOMAIN" &>/dev/null
     fi
 
     if [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
         chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem"
-        succ "证书环境就绪 ($([[ "$CERT_MODE" == "2" ]] && echo "正式" || echo "自签"))"
-    else err "证书生成失败"; exit 1; fi
+        succ "证书已生效 ($([[ "$CERT_MODE" == "2" ]] && echo "正式" || echo "自签"))"
+    else 
+        err "证书生成失败"; exit 1
+    fi
 }
 
 # 获取公网IP
@@ -693,31 +699,40 @@ create_config() {
     local PORT_HY2="${1:-}"
     local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box/certs
-    local ds="ipv4_only"; local PSK=""; local SALA_PASS=""
-    [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
+    [ ! -f /etc/sing-box/config.json ] && echo "{}" > /etc/sing-box/config.json
+    local ds="ipv4_only"; [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
 
-    # 1. 基础变量确定
-    [ -z "$PORT_HY2" ] && { if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json); else PORT_HY2=$(printf "\n" | prompt_for_port); fi; }
-    [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json | head -n 1)
-    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
-    [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json | head -n 1)
+    # 1. 端口确定逻辑
+    if [ -z "$PORT_HY2" ]; then
+        PORT_HY2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+        [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port)
+    fi
+    
+    # 2. 密码/混淆确定逻辑
+    local PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
+    local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 2. VLESS & ECH 变量固化
+    # 3. VLESS 变量固化
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
+    [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
-    /usr/bin/sing-box generate ech-key > /etc/sing-box/certs/ech.key 2>/dev/null
-    local ech_kp=$(cat /etc/sing-box/certs/ech.key | grep "key_pair" -A 4 | grep "key" | cut -d: -f2)
 
-    # 3. 写入配置文件
+    # 4. ECH 密钥安全生成 (增加 grep 容错)
+    local ech_kp=""
+    if /usr/bin/sing-box generate ech-key > /etc/sing-box/certs/ech.key 2>/dev/null; then
+        ech_kp=$(grep "key" /etc/sing-box/certs/ech.key | cut -d: -f2 | xargs echo -n 2>/dev/null || echo "")
+    fi
+
+    # 5. 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds"},
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false},
   "inbounds": [
     {
       "type": "hysteria2",
@@ -725,8 +740,11 @@ create_config() {
       "listen": "::",
       "listen_port": $PORT_HY2,
       "users": [ { "password": "$PSK" } ],
-      "up_mbps": $cur_bw, "down_mbps": $cur_bw,
-      "udp_timeout": "$timeout", "udp_fragment": true,
+      "ignore_client_bandwidth": false,
+      "up_mbps": $cur_bw,
+      "down_mbps": $cur_bw,
+      "udp_timeout": "$timeout",
+      "udp_fragment": true,
       "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
       "obfs": {"type": "salamander", "password": "$SALA_PASS"},
       "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
@@ -738,11 +756,13 @@ create_config() {
       "listen_port": 443,
       "users": [ { "uuid": "$V_UUID" } ],
       "tls": {
-        "enabled": true, "server_name": "$TLS_DOMAIN",
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem",
-        "ech": { "enabled": true, "key_pair": [ $ech_kp ] }
+        "enabled": true,
+        "server_name": "$TLS_DOMAIN",
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+        "key_path": "/etc/sing-box/certs/privkey.pem",
+        "ech": { "enabled": true, "key_pair": [ ${ech_kp:-""} ] }
       },
-      "transport": { "type": "ws", "path": "$V_PATH", "padding": true }
+      "transport": { "type": "ws", "path": "$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol", "padding": true }
     }
   ],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
