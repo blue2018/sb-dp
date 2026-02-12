@@ -720,11 +720,11 @@ create_config() {
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_PATH" ] && V_PATH="/$(openssl rand -hex 4)"
 
-    # 3. 写入配置
+    # 3. 写入配置（VLESS 使用 8443 端口）
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": {
-    "level": "trace",
+    "level": "info",
     "timestamp": true,
     "output": "/var/log/sing-box.log"
   },
@@ -774,7 +774,7 @@ create_config() {
       "type": "vless",
       "tag": "vless-in",
       "listen": "0.0.0.0",
-      "listen_port": 443,
+      "listen_port": 8443,
       "users": [
         {
           "uuid": "$V_UUID",
@@ -786,9 +786,7 @@ create_config() {
         "server_name": "${TLS_DOMAIN}",
         "alpn": ["h2", "http/1.1"],
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-        "key_path": "/etc/sing-box/certs/privkey.pem",
-        "min_version": "1.2",
-        "max_version": "1.3"
+        "key_path": "/etc/sing-box/certs/privkey.pem"
       },
       "transport": {
         "type": "ws",
@@ -810,7 +808,7 @@ create_config() {
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
-    info "配置已生成（VLESS TLS+WS 标准模式）"
+    info "配置已生成（VLESS 使用 8443 端口）"
 }
 
 # ==========================================
@@ -950,45 +948,31 @@ display_links() {
     [ -n "${RAW_FP:-}" ] && HY2_BASE="${HY2_BASE}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && HY2_BASE="${HY2_BASE}&obfs=salamander&obfs-password=${RAW_SALA}"
     
-    # VLESS 基础参数
-    local VL_BASE="encryption=none&security=tls&sni=$RAW_SNI&type=ws&path=${V_PATH}&host=$RAW_SNI&fp=chrome&alpn=h2,http/1.1"
-    
-    # 仅在 ECH 公钥存在时添加（修复版）
-    if [ -n "${V_ECH_PK:-}" ] && [ "$V_ECH_PK" != "" ]; then
-        VL_BASE="${VL_BASE}&ech=${V_ECH_PK}"
-        info "VLESS 链接已包含 ECH 公钥"
-    fi
-    
-    VL_BASE="${VL_BASE}&allowInsecure=1"
+    # VLESS 使用 8443 端口
+    local VLESS_PORT=8443
+    local VL_BASE="encryption=none&security=tls&sni=$RAW_SNI&type=ws&path=${V_PATH}&host=$RAW_SNI&fp=chrome&alpn=h2,http/1.1&allowInsecure=1"
 
     _do_probe() {
         [ -z "$1" ] && return
-        (nc -z -w 2 "$1" 443 || nc -z -u -w 2 "$1" "$RAW_PORT") >/dev/null 2>&1 && echo -e "\033[1;32m (已放行)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
+        (nc -z -w 2 "$1" "$VLESS_PORT" || nc -z -u -w 2 "$1" "$RAW_PORT") >/dev/null 2>&1 && echo -e "\033[1;32m (已放行)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
     }
     command -v nc >/dev/null && { _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait; v4_status=$(cat /tmp/sb_v4); v6_status=$(cat /tmp/sb_v6); }
 
-    echo -e "\n\033[1;32m[双协议节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"} | 443\033[0m\n"
+    echo -e "\n\033[1;32m[双协议节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"} | ${VLESS_PORT}\033[0m\n"
     [ -n "${RAW_IP4:-}" ] && {
         local L4_HY2="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${HY2_BASE}#$(hostname)_Hy2_v4"
-        local L4_VLS="vless://$V_UUID@$RAW_IP4:443?${VL_BASE}#$(hostname)_VLS_v4"
+        local L4_VLS="vless://$V_UUID@$RAW_IP4:$VLESS_PORT?${VL_BASE}#$(hostname)_VLS_v4"
         echo -e "\033[1;35m[IPv4 链接]\033[0m$v4_status\nHy2:  \033[0;36m$L4_HY2\033[0m\nVLS:  \033[0;36m$L4_VLS\033[0m\n"
         FULL_CLIP="${L4_HY2}\n${L4_VLS}"
     }
     [ -n "${RAW_IP6:-}" ] && {
         local L6_HY2="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${HY2_BASE}#$(hostname)_Hy2_v6"
-        local L6_VLS="vless://$V_UUID@[$RAW_IP6]:443?${VL_BASE}#$(hostname)_VLS_v6"
+        local L6_VLS="vless://$V_UUID@[$RAW_IP6]:$VLESS_PORT?${VL_BASE}#$(hostname)_VLS_v6"
         echo -e "\033[1;36m[IPv6 链接]\033[0m$v6_status\nHy2:  \033[0;36m$L6_HY2\033[0m\nVLS:  \033[0;36m$L6_VLS\033[0m\n"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}${L6_HY2}\n${L6_VLS}"
     }
     echo -e "\033[1;34m==========================================\033[0m"
-    
-    # 根据 ECH 状态显示不同信息
-    if [ -n "${V_ECH_PK:-}" ] && [ "$V_ECH_PK" != "" ]; then
-        echo -e "\033[1;32m[技术特征]\033[0m VLESS 已启用 ECH 加密 + WebSocket 传输"
-    else
-        echo -e "\033[1;33m[技术特征]\033[0m VLESS 使用标准 TLS + WebSocket 传输（ECH 未启用）"
-    fi
-    
+    echo -e "\033[1;33m[技术特征]\033[0m VLESS 使用 8443 端口 + TLS + WebSocket 传输"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
