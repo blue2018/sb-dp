@@ -134,16 +134,15 @@ generate_cert() {
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
 
-    # 2. 生成 ECH 密钥 (适配 v1.12+ 捕获模式)
+    # 2. 生成 ECH 密钥 (保留完整 PEM 格式以适配 key_path)
     if [ ! -f "$CERT_DIR/ech.key" ]; then
         info "正在生成 ECH 专用加密密钥..."
-        # 捕获完整输出
         /usr/bin/sing-box generate ech-keypair "dummy" > "$TMP_ECH" 2>&1
         
-        # 提取 KEYS (私钥)
-        sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" | grep -v "ECH KEYS" | tr -d '\n\r ' > "$CERT_DIR/ech.key"
-        # 提取 CONFIGS (公钥串)
-        sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" | grep -v "ECH CONFIGS" | tr -d '\n\r ' > "$CERT_DIR/ech.pub"
+        # 提取完整的 KEYS (保留 PEM 标头，供内核 key_path 使用)
+        sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
+        # 提取完整的 CONFIGS (保留 PEM 标头)
+        sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
         
         rm -f "$TMP_ECH"
     fi
@@ -724,7 +723,7 @@ create_config() {
       "key_path": "/etc/sing-box/certs/privkey.pem",
       "ech": {
         "enabled": true,
-        "key": [ "$(cat /etc/sing-box/certs/ech.key | tr -d '\n')" ]
+        "key_path": "/etc/sing-box/certs/ech.key"
       }
     },
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
@@ -857,10 +856,11 @@ get_env_data() {
     # 3. 提取证书 SHA256 指纹
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    # 4. 直接从文件读取已生成的 ECHConfigs Base64 字符串
+    # 4. 读取 ECHConfigs (过滤掉 PEM 标头，仅保留 Base64 字符串用于链接)
     local PUB_KEY_FILE="/etc/sing-box/certs/ech.pub"
     if [ -f "$PUB_KEY_FILE" ]; then
-        RAW_ECH=$(cat "$PUB_KEY_FILE" | tr -d '\n\r ')
+        # grep -v 过滤掉包含 ECH CONFIGS 的行，tr 删除所有空白符
+        RAW_ECH=$(grep -v "ECH CONFIGS" "$PUB_KEY_FILE" | tr -d '\n\r ')
     fi
 }
 
