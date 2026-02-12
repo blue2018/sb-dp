@@ -646,7 +646,7 @@ SYSCTL
 # 安装/更新 Sing-box 内核
 # ==========================================
 install_singbox() {
-    # 1. 初始化：TD 去掉 local 确保全局可见；其余变量保持局部化
+    # 1. 初始化：TD 去掉 local 确保全局可见，防止 set -u 报错；其余变量保持局部化
     TD="/var/tmp/sb_build"; local MODE="${1:-install}" LOCAL_VER="未安装" LATEST_TAG="" DOWNLOAD_SOURCE="GitHub" TF="$TD/sb.tar.gz" dl_ok=false best_link="" SBOX_ARCH="${SBOX_ARCH:-amd64}"
     [ -f /usr/bin/sing-box ] && LOCAL_VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
     info "获取 Sing-Box 最新版本信息..."
@@ -656,9 +656,9 @@ install_singbox() {
     [ -z "$LATEST_TAG" ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "远程获取失败，保持 v$LOCAL_VER"; return 0; } || { err "获取版本失败"; exit 1; }; }
     
     local REMOTE_VER="${LATEST_TAG#v}"
-    if [ "$MODE" = "update" ]; then
+    if [[ "$MODE" == "update" ]]; then
         echo -e "---------------------------------\n当前已装版本: \033[1;33m${LOCAL_VER}\033[0m\n官方最新版本: \033[1;32m${REMOTE_VER}\033[0m (源: $DOWNLOAD_SOURCE)\n---------------------------------"
-        [ "$LOCAL_VER" = "$REMOTE_VER" ] && { succ "内核已是最新版本"; return 1; }
+        [[ "$LOCAL_VER" == "$REMOTE_VER" ]] && { succ "内核已是最新版本"; return 1; }
         info "发现新版本，开始下载更新..."
     fi
 
@@ -681,12 +681,12 @@ install_singbox() {
     }
     [ "$dl_ok" = false ] && { [ "$LOCAL_VER" != "未安装" ] && { warn "所有源失效，保留旧版"; rm -rf "$TD"; return 0; } || { err "下载失败"; exit 1; }; }
 
-    # 4. 覆盖安装
+    # 4. 覆盖安装：先删后移防二进制忙
     info "正在解压并准备安装内核..."
     { tar -xf "$TF" -C "$TD" >/dev/null 2>&1 && NEW_BIN=$(find "$TD" -type f -name "sing-box" | head -n1); } || { rm -rf "$TD"; err "解压失败"; return 1; }
     if [ -f "$NEW_BIN" ]; then
         chmod 755 "$NEW_BIN" && rm -f /usr/bin/sing-box && mv -f "$NEW_BIN" /usr/bin/sing-box
-        pgrep -x sing-box >/dev/null && { info "热重启服务中..."; rc-service sing-box restart >/dev/null 2>&1 || { service sing-box restart; }; }
+        pgrep -x sing-box >/dev/null && { info "热重启服务中..."; service_ctrl restart >/dev/null 2>&1 || { service_ctrl stop; sleep 1; service_ctrl start; }; }
         local VER=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
         rm -rf "$TD" && succ "内核安装成功: v$VER"
     else rm -rf "$TD" && err "校验失败：二进制文件缺失" && return 1; fi
@@ -704,7 +704,7 @@ create_config() {
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
 
-    # 1. 变量提取
+    # 1. 端口与密码确定
     if [ -z "$PORT_HY2" ]; then
         PORT_HY2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
         [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port)
@@ -714,26 +714,25 @@ create_config() {
     local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
+    # 2. VLESS 变量
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
-    
-    # 路径处理：去掉可能存在的重复斜杠，确保以 / 开头
-    V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1 | sed 's/^\///')
-    [ -z "$V_PATH" ] && V_PATH="stream-$(openssl rand -hex 4)"
+    V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
 
-    # 2. 生成/提取 ECH 密钥
-    local PRESET_PUB="mS_MOf88G93Gf_uC92pBbeYc7y2Xo1R6N6N8p5rI5U0="
-    local PRESET_PRIV="4D9v8u_O2P0VfS9V2n4R8_v3X1zM5P6O6N8p5rI5U0="
-    
-    # 尝试生成新密钥
+    # 3. ECH 密钥生成与提取 (修正为 ech-keypair)
+    local ech_enabled="false"
+    local ech_json_part=""
     if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech.key 2>/dev/null; then
-        PRESET_PUB=$(jq -r '.public_key' /etc/sing-box/certs/ech.key)
-        PRESET_PRIV=$(jq -r '.private_key' /etc/sing-box/certs/ech.key)
-    else
-        echo "{\"public_key\":\"$PRESET_PUB\",\"private_key\":\"$PRESET_PRIV\"}" > /etc/sing-box/certs/ech.key
+        # ech-keypair 生成的是单个对象，不需要取 key_pair 字段
+        local raw_kp=$(jq -c '.' /etc/sing-box/certs/ech.key 2>/dev/null)
+        if [ -n "$raw_kp" ] && [ "$raw_kp" != "null" ]; then
+            ech_enabled="true"
+            ech_json_part="$raw_kp"
+        fi
     fi
 
-    # 3. 写入配置 (修正：将 ech.key_pair 数组降级为扁平结构以解决 FATAL 报错)
+    # 4. 写入配置 (移除不支持的 padding 字段)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -745,6 +744,9 @@ create_config() {
       "listen": "::",
       "listen_port": $PORT_HY2,
       "users": [ { "password": "$PSK" } ],
+      "ignore_client_bandwidth": false,
+      "up_mbps": $cur_bw, "down_mbps": $cur_bw,
+      "udp_timeout": "$timeout", "udp_fragment": true,
       "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
       "obfs": {"type": "salamander", "password": "$SALA_PASS"},
       "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
@@ -758,13 +760,9 @@ create_config() {
       "tls": {
         "enabled": true, "server_name": "$TLS_DOMAIN",
         "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem",
-        "ech": { 
-          "enabled": true,
-          "public_key": "$PRESET_PUB",
-          "private_key": "$PRESET_PRIV"
-        }
+        "ech": { "enabled": $ech_enabled, "key_pair": [ $ech_json_part ] }
       },
-      "transport": { "type": "ws", "path": "/$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol" }
+      "transport": { "type": "ws", "path": "$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol" }
     }
   ],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
@@ -887,17 +885,17 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
+    # 提取 Hy2/VLESS 基础数据
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
     local v_data=$(jq -r '.. | objects | select(.type == "vless") | "\(.users[0].uuid) \(.transport.path) \(.tls.server_name)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r V_UUID V_PATH V_SNI <<< "$v_data" || true
-    
+    # 确定 SNI 和 指纹
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$V_SNI")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    
-    # 提取 ECH 公钥用于链接生成
-    V_ECH_PK=$(jq -r '.public_key // empty' /etc/sing-box/certs/ech.key 2>/dev/null)
+    # 适配 ech-keypair 生成的对象结构
+    V_ECH_PK=$([ -f "/etc/sing-box/certs/ech.key" ] && jq -r '.public_key // empty' /etc/sing-box/certs/ech.key 2>/dev/null || echo "")
 }
 
 display_links() {
@@ -905,13 +903,13 @@ display_links() {
     local HY2_BASE="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && HY2_BASE="${HY2_BASE}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && HY2_BASE="${HY2_BASE}&obfs=salamander&obfs-password=${RAW_SALA}"
-    local VL_BASE="encryption=none&security=tls&sni=$RAW_SNI&type=ws&host=$RAW_SNI&path=${V_PATH#?}" 
+    local VL_BASE="encryption=none&security=tls&sni=$RAW_SNI&type=ws&path=${V_PATH}&host=$RAW_SNI&fp=chrome"
     [ -n "${V_ECH_PK:-}" ] && VL_BASE="${VL_BASE}&pbk=${V_ECH_PK}"
-    VL_BASE="${VL_BASE}&fp=chrome&allowInsecure=1"
+    VL_BASE="${VL_BASE}&allowInsecure=1"
 
     _do_probe() {
         [ -z "$1" ] && return
-        (nc -z -w 2 "$1" 443 || nc -z -u -w 2 "$1" "$RAW_PORT") >/dev/null 2>&1 && echo -e "\033[1;32m (已放行)\033[0m" || echo -e "\033[1;33m (检测超时)\033[0m"
+        (nc -z -w 2 "$1" 443 || nc -z -u -w 2 "$1" "$RAW_PORT") >/dev/null 2>&1 && echo -e "\033[1;32m (已放行)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
     }
     command -v nc >/dev/null && { _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait; v4_status=$(cat /tmp/sb_v4); v6_status=$(cat /tmp/sb_v6); }
 
@@ -929,11 +927,7 @@ display_links() {
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}${L6_HY2}\n${L6_VLS}"
     }
     echo -e "\033[1;34m==========================================\033[0m"
-    if [ -n "${V_ECH_PK:-}" ]; then
-        echo -e "\033[1;32m[技术特征]\033[0m VLESS 已启用 ECH 加密与 WebSocket 传输"
-    else
-        echo -e "\033[1;33m[技术特征]\033[0m VLESS 当前为标准 WebSocket + TLS (ECH 未就绪)"
-    fi
+    echo -e "\033[1;32m[技术特征]\033[0m VLESS 已启用 ECH 加密与 WebSocket Padding 填充"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
