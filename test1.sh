@@ -734,12 +734,13 @@ create_config() {
     local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 2. VLESS 变量
-    local V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
-    local V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
-    local SNI_DOMAIN="${TLS_DOMAIN:-www.microsoft.com}"
+    # 2. VLESS 变量 (修复 set -u 下的 unbound variable 问题)
+    local V_UUID V_PATH SNI_DOMAIN
+    V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "${V_UUID:-}" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
+    V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "${V_PATH:-}" ] && V_PATH="/stream-$(openssl rand -hex 4)"
+    SNI_DOMAIN="${TLS_DOMAIN:-www.microsoft.com}"
 
     # 3. 写入配置 (彻底剥离 ECH，确保 JSON 结构严谨)
     cat > "/etc/sing-box/config.json" <<EOF
@@ -1016,8 +1017,8 @@ RAW_SALA='$FINAL_SALA'
 RAW_IP4='${RAW_IP4:-}'
 RAW_IP6='${RAW_IP6:-}'
 IS_V6_OK='${IS_V6_OK:-false}'
-V_UUID='$V_UUID'
-V_PATH='$V_PATH'
+V_UUID='${V_UUID:-}'
+V_PATH='${V_PATH:-}'
 CERT_MODE='$CERT_MODE'
 EOF
 
