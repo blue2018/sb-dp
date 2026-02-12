@@ -120,10 +120,10 @@ prompt_for_port() {
 
 # 生成 ECC P-256 高性能证书 + ECH 密钥对
 generate_cert() {
-    local CERT_DIR="/etc/sing-box/certs"
+    local CERT_DIR="/etc/sing-box/certs"; local TMP_ECH="/tmp/ech_out"
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
     
-    # 1. 生成 ECC P-256 高性能证书
+    # 1. 生成 TLS 证书
     if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
         info "生成 ECC P-256 高性能证书 (域名: $TLS_DOMAIN)..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
@@ -134,37 +134,27 @@ generate_cert() {
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
 
-    # 2. 生成 ECH 密钥对 (适配新旧版本 CLI，取消静默以暴露错误)
+    # 2. 生成 ECH 密钥 (适配 v1.12+ 捕获模式)
     if [ ! -f "$CERT_DIR/ech.key" ]; then
         info "正在生成 ECH 专用加密密钥..."
-        # 尝试新版语法
-        /usr/bin/sing-box generate ech-keypair "$CERT_DIR/ech.key" > "$CERT_DIR/ech.pub" 2>/tmp/sb_ech_err
+        # 捕获完整输出
+        /usr/bin/sing-box generate ech-keypair "dummy" > "$TMP_ECH" 2>&1
         
-        # 如果生成失败或文件不存在/为空
-        if [ ! -f "$CERT_DIR/ech.key" ] || [ ! -s "$CERT_DIR/ech.key" ]; then
-            # 尝试旧版语法
-            /usr/bin/sing-box generate ech-keypair "$CERT_DIR/ech.key" "$CERT_DIR/ech.pub" >>/tmp/sb_ech_err 2>&1
-        fi
-
-        # 最终检查：如果还是没生成成功
-        if [ ! -f "$CERT_DIR/ech.key" ]; then
-            err "ECH 密钥生成失败。错误详情："
-            cat /tmp/sb_ech_err
-            exit 1
-        fi
+        # 提取 KEYS (私钥)
+        sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" | grep -v "ECH KEYS" | tr -d '\n\r ' > "$CERT_DIR/ech.key"
+        # 提取 CONFIGS (公钥串)
+        sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" | grep -v "ECH CONFIGS" | tr -d '\n\r ' > "$CERT_DIR/ech.pub"
         
-        # 清洗新版可能带有的前缀文本
-        [ -f "$CERT_DIR/ech.pub" ] && sed -i 's/Public key: //' "$CERT_DIR/ech.pub"
+        rm -f "$TMP_ECH"
     fi
 
-    # 3. 权限与指纹生成
-    if [ -s "$CERT_DIR/fullchain.pem" ]; then
+    # 3. 最终校验与权限
+    if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.key"
-        [ -f "$CERT_DIR/ech.pub" ] && chmod 600 "$CERT_DIR/ech.pub"
+        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.key" "$CERT_DIR/ech.pub"
         succ "ECC 证书与 ECH 密钥对就绪"
     else 
-        err "证书生成失败"; exit 1
+        err "证书或 ECH 密钥生成失败"; exit 1
     fi
 }
 
