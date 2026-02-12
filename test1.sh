@@ -715,34 +715,30 @@ create_config() {
     mkdir -p /etc/sing-box/certs
     [ ! -f /etc/sing-box/config.json ] && echo "{}" > /etc/sing-box/config.json
     local ds="ipv4_only"; [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
 
-    # 1. 变量提取 (保持原有逻辑)
+    # 1. 变量提取
     if [ -z "$PORT_HY2" ]; then
         PORT_HY2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
         [ -z "$PORT_HY2" ] && PORT_HY2=1356
     fi
     local PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
+    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
     local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
+    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -hex 8)
 
-    # 2. VLESS 变量：确保 V_PATH 始终带有 /
+    # 2. VLESS 变量：修复双斜杠逻辑
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
+    [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
     
-    local raw_path=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$raw_path" ] && raw_path="/stream-$(openssl rand -hex 4)"
-    [[ "$raw_path" != /* ]] && V_PATH="/$raw_path" || V_PATH="$raw_path"
+    # 提取路径并强制清理所有斜杠，然后只加一个
+    local raw_p=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1 | tr -d '/')
+    [ -z "$raw_p" ] && raw_p="stream-$(openssl rand -hex 4)"
+    V_PATH="/$raw_p"
 
-    # 3. 彻底移除 ECH 逻辑 (清理残留)
-    rm -f /etc/sing-box/certs/ech.key /etc/sing-box/certs/ech_public.txt
-
-    # 4. 写入配置 (参考成功版本：0.0.0.0, 8443, 补全 Headers)
+    # 3. 写入配置 (移除 ECH，移除 h2，修复监听)
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "fatal", "timestamp": true },
+  "log": { "level": "info", "timestamp": true },
   "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"}],"strategy":"$ds"},
   "inbounds": [
     {
@@ -752,12 +748,12 @@ create_config() {
       "listen_port": $PORT_HY2,
       "users": [ { "password": "$PSK" } ],
       "tls": {
-        "enabled": true, "alpn": ["h3"],
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+        "enabled": true, 
+        "alpn": ["h3"], 
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
         "key_path": "/etc/sing-box/certs/privkey.pem"
       },
-      "obfs": {"type": "salamander", "password": "$SALA_PASS"},
-      "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+      "obfs": {"type": "salamander", "password": "$SALA_PASS"}
     },
     {
       "type": "vless",
@@ -767,17 +763,15 @@ create_config() {
       "users": [ { "uuid": "$V_UUID" } ],
       "tls": {
         "enabled": true,
-        "server_name": "${TLS_DOMAIN:-www.microsoft.com}",
-        "alpn": ["h2", "http/1.1"],
+        "server_name": "${TLS_DOMAIN:-www.icloud.com}",
+        "alpn": ["http/1.1"],
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem"
       },
       "transport": {
         "type": "ws",
         "path": "$V_PATH",
-        "max_early_data": 2048,
-        "early_data_header_name": "Sec-WebSocket-Protocol",
-        "headers": { "Host": "${TLS_DOMAIN:-www.microsoft.com}" }
+        "headers": { "Host": "${TLS_DOMAIN:-www.icloud.com}" }
       }
     }
   ],
