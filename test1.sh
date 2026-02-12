@@ -134,18 +134,15 @@ generate_cert() {
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
 
-    # 2. 生成 ECH 密钥 (保留完整 PEM 格式以适配 key_path)
-    if [ ! -f "$CERT_DIR/ech.key" ]; then
-        info "正在生成 ECH 专用加密密钥..."
-        /usr/bin/sing-box generate ech-keypair "dummy" > "$TMP_ECH" 2>&1
-        
-        # 提取完整的 KEYS (保留 PEM 标头，供内核 key_path 使用)
-        sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
-        # 提取完整的 CONFIGS (保留 PEM 标头)
-        sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
-        
-        rm -f "$TMP_ECH"
-    fi
+    # 2. 生成 ECH 密钥 (核心修正：指定域名 + 保留 PEM 标头)
+    info "正在为 $TLS_DOMAIN 生成 ECH 密钥对..."
+    # 关键：这里不能用 "dummy"，必须用 $TLS_DOMAIN
+    /usr/bin/sing-box generate ech-keypair "$TLS_DOMAIN" > "$TMP_ECH" 2>&1
+    
+    # 保留完整 PEM 格式，满足 v1.12 内核要求
+    sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
+    sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
+    rm -f "$TMP_ECH"
 
     # 3. 最终校验与权限
     if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
@@ -856,11 +853,12 @@ get_env_data() {
     # 3. 提取证书 SHA256 指纹
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    # 4. 读取 ECHConfigs (过滤掉 PEM 标头，仅保留 Base64 字符串用于链接)
-    local PUB_KEY_FILE="/etc/sing-box/certs/ech.pub"
-    if [ -f "$PUB_KEY_FILE" ]; then
-        # grep -v 过滤掉包含 ECH CONFIGS 的行，tr 删除所有空白符
-        RAW_ECH=$(grep -v "ECH CONFIGS" "$PUB_KEY_FILE" | tr -d '\n\r ')
+    # 4. 读取 ECH 并进行 URL 编码
+    if [ -f "/etc/sing-box/certs/ech.pub" ]; then
+        # 1. 先提取纯 Base64 字符串
+        local raw=$(grep -v "ECH CONFIGS" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
+        # 2. 对特殊字符进行百分号编码 (适配客户端解析)
+        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g' | sed 's/%%/%/g')
     fi
 }
 
