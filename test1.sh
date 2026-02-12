@@ -884,17 +884,16 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    # 提取 Hy2 数据
+    # 提取 Hy2/VLESS 基础数据 (保持你原有的 read -r 风格)
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
-    # 提取 VLESS 数据
     local v_data=$(jq -r '.. | objects | select(.type == "vless") | "\(.users[0].uuid) \(.transport.path) \(.tls.server_name)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r V_UUID V_PATH V_SNI <<< "$v_data" || true
     # 确定 SNI 和 指纹
-    RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
+    RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$V_SNI")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    # 提取 ECH 公钥 (供链接使用)
+	# 【提取 ECH 公钥】供 display_links 使用
     V_ECH_PK=$([ -f "/etc/sing-box/certs/ech.key" ] && jq -r '.key_pair[0].public_key // empty' /etc/sing-box/certs/ech.key 2>/dev/null || echo "")
 }
 
