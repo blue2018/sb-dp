@@ -448,10 +448,8 @@ apply_firewall() {
                 firewall-cmd --add-port="$port"/"$proto" --permanent >/dev/null 2>&1
                 firewall-cmd --reload >/dev/null 2>&1
             elif command -v iptables >/dev/null 2>&1; then
-                # 清理旧规则并添加新规则 (兼容 IPv4)
                 iptables -D INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1
                 iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1
-                # 兼容 IPv6
                 if command -v ip6tables >/dev/null 2>&1; then
                     ip6tables -D INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1
                     ip6tables -I INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1
