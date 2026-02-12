@@ -916,7 +916,6 @@ display_system_status() {
 # ==========================================
 create_sb_tool() {
     mkdir -p /etc/sing-box
-    local FINAL_SALA=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     local CORE_TMP=$(mktemp) || CORE_TMP="/tmp/core_script_$$.sh"
     # 写入固化变量
     cat > "$CORE_TMP" <<EOF
@@ -1046,9 +1045,9 @@ optimize_system
 install_singbox "install"
 generate_cert
 create_config "$USER_PORT"
+get_env_data
 create_sb_tool
 setup_service
-get_env_data
 echo -e "\n\033[1;34m==========================================\033[0m"
 display_system_status
 echo -e "\033[1;34m------------------------------------------\033[0m"
