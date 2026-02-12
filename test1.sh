@@ -704,7 +704,7 @@ create_config() {
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
 
-    # 1. 端口与密码确定
+    # 1. 端口与密码确定 (保持原样)
     if [ -z "$PORT_HY2" ]; then
         PORT_HY2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
         [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port)
@@ -714,25 +714,24 @@ create_config() {
     local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 2. VLESS 变量
+    # 2. VLESS 变量 (保持原样)
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
 
-    # 3. ECH 密钥生成与提取 (修正为 ech-keypair)
+    # 3. ECH 密钥生成与提取 (修正生成逻辑)
     local ech_enabled="false"
     local ech_json_part=""
-    if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech.key 2>/dev/null; then
-        # ech-keypair 生成的是单个对象，不需要取 key_pair 字段
-        local raw_kp=$(jq -c '.' /etc/sing-box/certs/ech.key 2>/dev/null)
-        if [ -n "$raw_kp" ] && [ "$raw_kp" != "null" ]; then
-            ech_enabled="true"
-            ech_json_part="$raw_kp"
-        fi
+    # 尝试使用正确命令生成
+    local temp_ech=$(/usr/bin/sing-box generate ech-keypair 2>/dev/null)
+    if [ -n "$temp_ech" ]; then
+        echo "$temp_ech" > /etc/sing-box/certs/ech.key
+        ech_enabled="true"
+        ech_json_part=$(echo "$temp_ech" | jq -c '.')
     fi
 
-    # 4. 写入配置 (移除不支持的 padding 字段)
+    # 4. 写入配置 (移除导致崩溃的 padding 字段)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -885,7 +884,7 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    # 提取 Hy2/VLESS 基础数据
+    # 提取 Hy2/VLESS 基础数据 (保持原有风格)
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
     local v_data=$(jq -r '.. | objects | select(.type == "vless") | "\(.users[0].uuid) \(.transport.path) \(.tls.server_name)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
@@ -894,7 +893,7 @@ get_env_data() {
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$V_SNI")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    # 适配 ech-keypair 生成的对象结构
+    # 直接从对象根部提取 public_key
     V_ECH_PK=$([ -f "/etc/sing-box/certs/ech.key" ] && jq -r '.public_key // empty' /etc/sing-box/certs/ech.key 2>/dev/null || echo "")
 }
 
