@@ -720,7 +720,72 @@ create_config() {
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_PATH" ] && V_PATH="/$(openssl rand -hex 4)"
 
-    # 3. 写入配置（VLESS 使用 8443 端口）
+    # 3. ECH 密钥生成（增强版）
+    local ech_config=""
+    local ech_enabled="false"
+    
+    # 尝试生成 ECH 配置
+    if /usr/bin/sing-box generate reality-keypair > /tmp/ech_test.json 2>/dev/null; then
+        # 如果 reality-keypair 成功，说明支持新版本命令
+        rm -f /tmp/ech_test.json
+        
+        # 尝试生成 ECH
+        if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech_raw.json 2>/dev/null && \
+           [ -s /etc/sing-box/certs/ech_raw.json ]; then
+            
+            # 提取密钥（兼容两种格式）
+            local ech_private=$(jq -r '.private_key // .key // empty' /etc/sing-box/certs/ech_raw.json 2>/dev/null)
+            local ech_public=$(jq -r '.public_key // .config // empty' /etc/sing-box/certs/ech_raw.json 2>/dev/null)
+            
+            if [ -n "$ech_private" ] && [ "$ech_private" != "null" ] && [ "$ech_private" != "" ]; then
+                ech_enabled="true"
+                # 保存公钥供客户端使用
+                echo "$ech_public" > /etc/sing-box/certs/ech_public.txt
+                # 构建配置片段
+                ech_config=",
+        \"ech\": {
+          \"enabled\": true,
+          \"key\": [\"$ech_private\"]
+        }"
+                succ "ECH 密钥生成成功"
+            fi
+        fi
+    fi
+    
+    # 如果自动生成失败，尝试手动生成（兜底方案）
+    if [ "$ech_enabled" = "false" ]; then
+        info "sing-box 不支持 ECH 自动生成，尝试手动生成..."
+        
+        # 使用 openssl 生成 X25519 密钥对（ECH 使用 X25519）
+        if command -v openssl >/dev/null 2>&1; then
+            # 生成私钥
+            local ech_priv_raw=$(openssl genpkey -algorithm X25519 2>/dev/null | openssl pkey -text -noout | grep 'priv:' -A 3 | tail -n 3 | tr -d ' \n:')
+            local ech_pub_raw=$(openssl genpkey -algorithm X25519 2>/dev/null | openssl pkey -pubout -text -noout | grep 'pub:' -A 3 | tail -n 3 | tr -d ' \n:')
+            
+            if [ -n "$ech_priv_raw" ] && [ ${#ech_priv_raw} -eq 64 ]; then
+                # 转换为 Base64 URL-safe 格式
+                local ech_priv_b64=$(echo "$ech_priv_raw" | xxd -r -p | base64 | tr '+/' '-_' | tr -d '=')
+                local ech_pub_b64=$(echo "$ech_pub_raw" | xxd -r -p | base64 | tr '+/' '-_' | tr -d '=')
+                
+                ech_enabled="true"
+                echo "$ech_pub_b64" > /etc/sing-box/certs/ech_public.txt
+                ech_config=",
+        \"ech\": {
+          \"enabled\": true,
+          \"key\": [\"$ech_priv_b64\"]
+        }"
+                succ "ECH 手动生成成功"
+            fi
+        fi
+    fi
+    
+    # 如果所有方法都失败
+    if [ "$ech_enabled" = "false" ]; then
+        warn "ECH 生成失败，使用标准 TLS 模式"
+        ech_config=""
+    fi
+
+    # 4. 写入配置
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": {
@@ -786,7 +851,7 @@ create_config() {
         "server_name": "${TLS_DOMAIN}",
         "alpn": ["h2", "http/1.1"],
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-        "key_path": "/etc/sing-box/certs/privkey.pem"
+        "key_path": "/etc/sing-box/certs/privkey.pem"$ech_config
       },
       "transport": {
         "type": "ws",
@@ -808,7 +873,13 @@ create_config() {
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
-    info "配置已生成（VLESS 使用 8443 端口）"
+    
+    # 输出状态
+    if [ "$ech_enabled" = "true" ]; then
+        info "配置已生成（VLESS 8443 端口 + ECH 加密）"
+    else
+        info "配置已生成（VLESS 8443 端口，标准 TLS）"
+    fi
 }
 
 # ==========================================
@@ -925,20 +996,30 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
+    
     # 提取 Hy2/VLESS 基础数据
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
+    
     local v_data=$(jq -r '.. | objects | select(.type == "vless") | "\(.users[0].uuid) \(.transport.path) \(.tls.server_name)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r V_UUID V_PATH V_SNI <<< "$v_data" || true
+    
     # 确定 SNI 和 指纹
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$V_SNI")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    # 提取 ECH 公钥（修复版）
+    
+    # 提取 ECH 公钥
     if [ -f "/etc/sing-box/certs/ech_public.txt" ]; then
         V_ECH_PK=$(cat /etc/sing-box/certs/ech_public.txt 2>/dev/null | tr -d '\n\r ')
     else
-        V_ECH_PK=""
+        # 尝试从配置中检测 ECH 是否启用
+        local ech_enabled=$(jq -r '.. | objects | select(.type == "vless") | .tls.ech.enabled // false' "$CONFIG_FILE" 2>/dev/null)
+        if [ "$ech_enabled" = "true" ]; then
+            V_ECH_PK="AUTO_GENERATED"
+        else
+            V_ECH_PK=""
+        fi
     fi
 }
 
@@ -950,7 +1031,16 @@ display_links() {
     
     # VLESS 使用 8443 端口
     local VLESS_PORT=8443
-    local VL_BASE="encryption=none&security=tls&sni=$RAW_SNI&type=ws&path=${V_PATH}&host=$RAW_SNI&fp=chrome&alpn=h2,http/1.1&allowInsecure=1"
+    local VL_BASE="encryption=none&security=tls&sni=$RAW_SNI&type=ws&path=${V_PATH}&host=$RAW_SNI&fp=chrome&alpn=h2,http/1.1"
+    
+    # 添加 ECH 公钥（如果存在）
+    if [ -n "${V_ECH_PK:-}" ] && [ "$V_ECH_PK" != "" ]; then
+        if [ "$V_ECH_PK" != "AUTO_GENERATED" ]; then
+            VL_BASE="${VL_BASE}&ech=${V_ECH_PK}"
+        fi
+    fi
+    
+    VL_BASE="${VL_BASE}&allowInsecure=1"
 
     _do_probe() {
         [ -z "$1" ] && return
@@ -972,7 +1062,14 @@ display_links() {
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}${L6_HY2}\n${L6_VLS}"
     }
     echo -e "\033[1;34m==========================================\033[0m"
-    echo -e "\033[1;33m[技术特征]\033[0m VLESS 使用 8443 端口 + TLS + WebSocket 传输"
+    
+    # 根据 ECH 状态显示不同信息
+    if [ -n "${V_ECH_PK:-}" ] && [ "$V_ECH_PK" != "" ]; then
+        echo -e "\033[1;32m[技术特征]\033[0m VLESS 已启用 ECH 加密 + WebSocket 传输（端口 8443）"
+    else
+        echo -e "\033[1;33m[技术特征]\033[0m VLESS 使用标准 TLS + WebSocket 传输（端口 8443）"
+    fi
+    
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
