@@ -716,14 +716,16 @@ create_config() {
 
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
-    V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
+    
+    # 路径处理：去掉可能存在的重复斜杠，确保以 / 开头
+    V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1 | sed 's/^\///')
+    [ -z "$V_PATH" ] && V_PATH="stream-$(openssl rand -hex 4)"
 
-    # 2. 生成/提取 ECH 密钥 (现在满血版内核支持 generate 了)
+    # 2. 生成/提取 ECH 密钥
     local PRESET_PUB="mS_MOf88G93Gf_uC92pBbeYc7y2Xo1R6N6N8p5rI5U0="
     local PRESET_PRIV="4D9v8u_O2P0VfS9V2n4R8_v3X1zM5P6O6N8p5rI5U0="
     
-    # 尝试生成新密钥，失败则使用预设
+    # 尝试生成新密钥
     if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech.key 2>/dev/null; then
         PRESET_PUB=$(jq -r '.public_key' /etc/sing-box/certs/ech.key)
         PRESET_PRIV=$(jq -r '.private_key' /etc/sing-box/certs/ech.key)
@@ -731,7 +733,7 @@ create_config() {
         echo "{\"public_key\":\"$PRESET_PUB\",\"private_key\":\"$PRESET_PRIV\"}" > /etc/sing-box/certs/ech.key
     fi
 
-    # 3. 写入配置 (标准 1.12.x key_pair 数组结构)
+    # 3. 写入配置 (修正：将 ech.key_pair 数组降级为扁平结构以解决 FATAL 报错)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -758,15 +760,11 @@ create_config() {
         "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem",
         "ech": { 
           "enabled": true,
-          "key_pair": [
-            {
-              "public_key": "$PRESET_PUB",
-              "private_key": "$PRESET_PRIV"
-            }
-          ]
+          "public_key": "$PRESET_PUB",
+          "private_key": "$PRESET_PRIV"
         }
       },
-      "transport": { "type": "ws", "path": "$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol" }
+      "transport": { "type": "ws", "path": "/$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol" }
     }
   ],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
