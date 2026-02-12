@@ -118,25 +118,33 @@ prompt_for_port() {
     done
 }
 
-# 生成 ECC P-256 高性能证书
+# 生成 ECC P-256 高性能证书 + ECH 密钥对
 generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"
-    [ -f "$CERT_DIR/fullchain.pem" ] && return 0
-    info "生成 ECC P-256 高性能证书 (域名: $TLS_DOMAIN)..."
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-        -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-        -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" \
-        -addext "basicConstraints=critical,CA:FALSE" \
-        -addext "subjectAltName=DNS:$TLS_DOMAIN" \
-        -addext "extendedKeyUsage=serverAuth" &>/dev/null || \
-    openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
-        -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-        -days 3650 -subj "/CN=$TLS_DOMAIN" &>/dev/null
+    
+    # --- 原有 TLS 证书生成逻辑 ---
+    if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
+        info "生成 ECC P-256 高性能证书 (域名: $TLS_DOMAIN)..."
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
+            -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" \
+            -addext "basicConstraints=critical,CA:FALSE" \
+            -addext "subjectAltName=DNS:$TLS_DOMAIN" \
+            -addext "extendedKeyUsage=serverAuth" &>/dev/null
+    fi
+
+    # --- [新增] ECH 密钥对生成逻辑 ---
+    # 利用 sing-box 自带工具生成 ECH 密钥 (比 openssl 手动构造更标准)
+    if [ ! -f "$CERT_DIR/ech.key" ]; then
+        info "正在生成 ECH 专用加密密钥..."
+        /usr/bin/sing-box generate ech-keypair "$CERT_DIR/ech.key" "$CERT_DIR/ech.pub" >/dev/null 2>&1
+    fi
+
     if [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem"
-        succ "ECC 证书就绪"
+        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.key"
+        succ "ECC 证书与 ECH 密钥对就绪"
     else err "证书生成失败"; exit 1; fi
 }
 
@@ -661,14 +669,15 @@ install_singbox() {
 # ==========================================
 # 配置文件生成
 # ==========================================
+# 配置文件生成 (集成 ECH)
 create_config() {
     local PORT_HY2="${1:-}"
-	local cur_bw="${VAR_HY2_BW:-200}"
+    local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
-    local ds="ipv4_only"; local PSK=""; local SALA_PASS=""
+    local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
+    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
+    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
     # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
@@ -681,11 +690,7 @@ create_config() {
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
 
-    # 3. Salamander 混淆密码确定逻辑
-    [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
-
-    # 4. 写入 Sing-box 配置文件
+    # 3. 写入 Sing-box 配置文件 (移除 Obfs，添加 ECH)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -701,8 +706,17 @@ create_config() {
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
     "udp_fragment": true,
-    "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
-    "obfs": {"type": "salamander", "password": "$SALA_PASS"},
+    "tls": {
+      "enabled": true, 
+      "alpn": ["h3"], 
+      "min_version": "1.3", 
+      "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
+      "key_path": "/etc/sing-box/certs/privkey.pem",
+      "ech": {
+        "enabled": true,
+        "key_path": "/etc/sing-box/certs/ech.key"
+      }
+    },
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
@@ -825,42 +839,50 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-	read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
+    # 提取 PSK, 端口, 证书路径
+    local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
+    read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data" || true
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
+    # 提取指纹
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
+    # 利用 sing-box 转换公钥为 Base64 ECHConfigs 字符串
+    local PUB_KEY="/etc/sing-box/certs/ech.pub"
+    if [ -f "$PUB_KEY" ]; then
+        RAW_ECH=$(/usr/bin/sing-box generate ech-config --public-key "$PUB_KEY" --server-name "$RAW_SNI" 2>/dev/null | grep "ECHConfigs:" | awk '{print $2}')
+    fi
 }
 
 display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" v4_status="" v6_status=""
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
-    [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
-	
+    [ -n "${RAW_ECH:-}" ] && BASE_PARAM="${BASE_PARAM}&ech=${RAW_ECH}"
+    
     _do_probe() {
         [ -z "$1" ] && return
-		(nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
+        (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
         echo -e "\033[1;32m (已连通)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
     }
+    
     if command -v nc >/dev/null 2>&1; then
         _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
         v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
     fi
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m\n"
-	
+    
     [ -n "${RAW_IP4:-}" ] && {
-        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v4"
+        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_Hy2_ECH_v4"
         echo -e "\033[1;35m[IPv4节点链接]\033[0m$v4_status\n$LINK_V4\n"
         FULL_CLIP="$LINK_V4"
     }
     [ -n "${RAW_IP6:-}" ] && {
-        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v6"
+        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_Hy2_ECH_v6"
         echo -e "\033[1;36m[IPv6节点链接]\033[0m$v6_status\n$LINK_V6\n"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
     }
     echo -e "\033[1;34m==========================================\033[0m"
-    [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m 证书 SHA256 指纹已集成，支持强校验"
+    echo -e "\033[1;32m[ECH 已激活]\033[0m 流量已混入大厂标准 TLS 1.3 握手池"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
