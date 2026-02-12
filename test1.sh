@@ -435,27 +435,35 @@ apply_nic_core_boost() {
 
 #防火墙开放端口
 apply_firewall() {
-    local port_hy2=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    local port_vless=$(jq -r '.inbounds[1].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    
-    _add_rule() {
-        local p="$1"; local proto="$2"
-        [ -z "$p" ] && return
-        if command -v ufw >/dev/null 2>&1; then ufw allow "$p"/"$proto" >/dev/null 2>&1
-        elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$p"/"$proto" --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
-        elif command -v iptables >/dev/null 2>&1; then
-            iptables -I INPUT -p "$proto" --dport "$p" -j ACCEPT >/dev/null 2>&1
-            command -v ip6tables >/dev/null 2>&1 && ip6tables -I INPUT -p "$proto" --dport "$p" -j ACCEPT >/dev/null 2>&1
-        fi
-    }
-    _add_rule "$port_hy2" "udp"
-    _add_rule "$port_vless" "tcp"
+    local inbounds_data=$(jq -r '.inbounds[] | "\(.type) \(.listen_port)"' /etc/sing-box/config.json 2>/dev/null)
+    [ -z "$inbounds_data" ] && return 0
+    echo "$inbounds_data" | while read -r type port; do
+        [ -z "$port" ] || [ "$port" = "null" ] && continue
+        local proto="tcp"
+        [ "$type" = "hysteria2" ] && proto="udp"
+        {
+            if command -v ufw >/dev/null 2>&1; then
+                ufw allow "$port"/"$proto" >/dev/null 2>&1
+            elif command -v firewall-cmd >/dev/null 2>&1; then
+                firewall-cmd --add-port="$port"/"$proto" --permanent >/dev/null 2>&1
+                firewall-cmd --reload >/dev/null 2>&1
+            elif command -v iptables >/dev/null 2>&1; then
+                # 清理旧规则并添加新规则 (兼容 IPv4)
+                iptables -D INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1
+                iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1
+                # 兼容 IPv6
+                if command -v ip6tables >/dev/null 2>&1; then
+                    ip6tables -D INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1
+                    ip6tables -I INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1
+                fi
+            fi
+        } || true
+    done
 }
 	
 # "全功能调度器"
 service_ctrl() {
     local action="$1"
-    # 修改：将 [[ ]] 改为 [ ] 以完全兼容 Alpine ash
     [ "$action" = "restart" ] && { echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."; optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall; return 0; }
     if [ -x "/etc/init.d/sing-box" ]; then rc-service sing-box "$action"
     else systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box; fi
@@ -712,30 +720,32 @@ create_config() {
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
 
-    # 1. 端口与密码确定 (保持你的原有逻辑)
+    # 1. 变量提取 (保持原有逻辑)
     if [ -z "$PORT_HY2" ]; then
         PORT_HY2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-        [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port)
+        [ -z "$PORT_HY2" ] && PORT_HY2=1356
     fi
     local PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
     local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 2. VLESS 变量 (保持你的原有变量名)
+    # 2. VLESS 变量：确保 V_PATH 始终带有 /
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
-    V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
+    
+    local raw_path=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$raw_path" ] && raw_path="/stream-$(openssl rand -hex 4)"
+    [[ "$raw_path" != /* ]] && V_PATH="/$raw_path" || V_PATH="$raw_path"
 
-    # 3. 彻底移除 ECH 逻辑 (清理残留文件)
+    # 3. 彻底移除 ECH 逻辑 (清理残留)
     rm -f /etc/sing-box/certs/ech.key /etc/sing-box/certs/ech_public.txt
 
-    # 4. 写入配置 (参考你的成功版本：0.0.0.0 监听, 8443 端口, 补全 ALPN 和 Host)
+    # 4. 写入配置 (参考成功版本：0.0.0.0, 8443, 补全 Headers)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false},
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"}],"strategy":"$ds"},
   "inbounds": [
     {
       "type": "hysteria2",
@@ -743,13 +753,9 @@ create_config() {
       "listen": "::",
       "listen_port": $PORT_HY2,
       "users": [ { "password": "$PSK" } ],
-      "ignore_client_bandwidth": false,
-      "up_mbps": $cur_bw, "down_mbps": $cur_bw,
-      "udp_timeout": "$timeout", "udp_fragment": true,
       "tls": {
-        "enabled": true, 
-        "alpn": ["h3"], 
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
+        "enabled": true, "alpn": ["h3"],
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem"
       },
       "obfs": {"type": "salamander", "password": "$SALA_PASS"},
@@ -760,24 +766,24 @@ create_config() {
       "tag": "vless-in",
       "listen": "0.0.0.0",
       "listen_port": 8443,
-      "users": [ { "uuid": "$V_UUID", "flow": "" } ],
+      "users": [ { "uuid": "$V_UUID" } ],
       "tls": {
-        "enabled": true, 
+        "enabled": true,
         "server_name": "${TLS_DOMAIN:-www.microsoft.com}",
         "alpn": ["h2", "http/1.1"],
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem"
       },
-      "transport": { 
-        "type": "ws", 
-        "path": "$V_PATH", 
-        "max_early_data": 2048, 
+      "transport": {
+        "type": "ws",
+        "path": "$V_PATH",
+        "max_early_data": 2048,
         "early_data_header_name": "Sec-WebSocket-Protocol",
         "headers": { "Host": "${TLS_DOMAIN:-www.microsoft.com}" }
       }
     }
   ],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
+  "outbounds": [{"type": "direct", "tag": "direct-out"}]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
