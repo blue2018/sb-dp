@@ -435,20 +435,28 @@ apply_nic_core_boost() {
 
 #防火墙开放端口
 apply_firewall() {
-    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    [ -z "$port" ] && return 0
-    {   if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
-        elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --list-ports | grep -q "$port/udp" || { firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --reload; } >/dev/null 2>&1
+    local port_hy2=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+    local port_vless=$(jq -r '.inbounds[1].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+    
+    _add_rule() {
+        local p="$1"; local proto="$2"
+        [ -z "$p" ] && return
+        if command -v ufw >/dev/null 2>&1; then ufw allow "$p"/"$proto" >/dev/null 2>&1
+        elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$p"/"$proto" --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
         elif command -v iptables >/dev/null 2>&1; then
-            iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
-            command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
-        fi    } || true
+            iptables -I INPUT -p "$proto" --dport "$p" -j ACCEPT >/dev/null 2>&1
+            command -v ip6tables >/dev/null 2>&1 && ip6tables -I INPUT -p "$proto" --dport "$p" -j ACCEPT >/dev/null 2>&1
+        fi
+    }
+    _add_rule "$port_hy2" "udp"
+    _add_rule "$port_vless" "tcp"
 }
 	
 # "全功能调度器"
 service_ctrl() {
     local action="$1"
-    [[ "$action" == "restart" ]] && { echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."; optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall; return 0; }
+    # 修改：将 [[ ]] 改为 [ ] 以完全兼容 Alpine ash
+    [ "$action" = "restart" ] && { echo -e "\033[1;32m[INFO]\033[0m 正在应用调优并重启服务，请稍后..."; optimize_system >/dev/null 2>&1 || true; setup_service; apply_firewall; return 0; }
     if [ -x "/etc/init.d/sing-box" ]; then rc-service sing-box "$action"
     else systemctl daemon-reload >/dev/null 2>&1; systemctl "$action" sing-box; fi
 }
@@ -717,26 +725,22 @@ create_config() {
     # 2. VLESS 变量
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
-    V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
+    V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1 | sed 's/^\///')
+    [ -z "$V_PATH" ] && V_PATH="stream-$(openssl rand -hex 4)"
 
-    # 3. ECH 密钥生成与提取 (修正为 ech-keypair)
-    local ech_enabled="false"
-    local ech_json_part=""
+    # 3. ECH 处理 (采用扁平化结构以防止 1.12.x FATAL)
+    local PUB="" PRIV=""
     if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech.key 2>/dev/null; then
-        # ech-keypair 生成的是单个对象，不需要取 key_pair 字段
-        local raw_kp=$(jq -c '.' /etc/sing-box/certs/ech.key 2>/dev/null)
-        if [ -n "$raw_kp" ] && [ "$raw_kp" != "null" ]; then
-            ech_enabled="true"
-            ech_json_part="$raw_kp"
-        fi
+        PUB=$(jq -r '.public_key' /etc/sing-box/certs/ech.key)
+        PRIV=$(jq -r '.private_key' /etc/sing-box/certs/ech.key)
+        echo "$PUB" > /etc/sing-box/certs/ech_public.txt
     fi
 
-    # 4. 写入配置 (移除不支持的 padding 字段)
+    # 4. 写入配置 (VLESS 端口迁移至 8443，ECH 采用最高兼容性写法)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false},
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"}],"strategy":"$ds"},
   "inbounds": [
     {
       "type": "hysteria2",
@@ -744,9 +748,6 @@ create_config() {
       "listen": "::",
       "listen_port": $PORT_HY2,
       "users": [ { "password": "$PSK" } ],
-      "ignore_client_bandwidth": false,
-      "up_mbps": $cur_bw, "down_mbps": $cur_bw,
-      "udp_timeout": "$timeout", "udp_fragment": true,
       "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
       "obfs": {"type": "salamander", "password": "$SALA_PASS"},
       "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
@@ -755,17 +756,21 @@ create_config() {
       "type": "vless",
       "tag": "vless-in",
       "listen": "::",
-      "listen_port": 443,
+      "listen_port": 8443,
       "users": [ { "uuid": "$V_UUID" } ],
       "tls": {
         "enabled": true, "server_name": "$TLS_DOMAIN",
         "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem",
-        "ech": { "enabled": $ech_enabled, "key_pair": [ $ech_json_part ] }
+        "ech": {
+          "enabled": ${PUB:+true}${PUB:-false},
+          "public_key": "$PUB",
+          "private_key": "$PRIV"
+        }
       },
-      "transport": { "type": "ws", "path": "$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol" }
+      "transport": { "type": "ws", "path": "/$V_PATH" }
     }
   ],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
+  "outbounds": [{"type": "direct", "tag": "direct-out"}]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
@@ -885,17 +890,14 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    # 提取 Hy2/VLESS 基础数据
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
-    local v_data=$(jq -r '.. | objects | select(.type == "vless") | "\(.users[0].uuid) \(.transport.path) \(.tls.server_name)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-    read -r V_UUID V_PATH V_SNI <<< "$v_data" || true
-    # 确定 SNI 和 指纹
+    local v_data=$(jq -r '.. | objects | select(.type == "vless") | "\(.users[0].uuid) \(.transport.path) \(.tls.server_name) \(.listen_port)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
+    read -r V_UUID V_PATH V_SNI V_PORT <<< "$v_data" || true
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$V_SNI")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    # 适配 ech-keypair 生成的对象结构
-    V_ECH_PK=$([ -f "/etc/sing-box/certs/ech.key" ] && jq -r '.public_key // empty' /etc/sing-box/certs/ech.key 2>/dev/null || echo "")
+    V_ECH_PK=$([ -f "/etc/sing-box/certs/ech_public.txt" ] && cat /etc/sing-box/certs/ech_public.txt || echo "")
 }
 
 display_links() {
@@ -903,31 +905,32 @@ display_links() {
     local HY2_BASE="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && HY2_BASE="${HY2_BASE}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && HY2_BASE="${HY2_BASE}&obfs=salamander&obfs-password=${RAW_SALA}"
-    local VL_BASE="encryption=none&security=tls&sni=$RAW_SNI&type=ws&path=${V_PATH}&host=$RAW_SNI&fp=chrome"
+    # 链接使用动态 V_PORT (8443)
+    local VL_BASE="encryption=none&security=tls&sni=$RAW_SNI&type=ws&path=/${V_PATH#/*/}&host=$RAW_SNI&fp=chrome"
     [ -n "${V_ECH_PK:-}" ] && VL_BASE="${VL_BASE}&pbk=${V_ECH_PK}"
     VL_BASE="${VL_BASE}&allowInsecure=1"
 
     _do_probe() {
         [ -z "$1" ] && return
-        (nc -z -w 2 "$1" 443 || nc -z -u -w 2 "$1" "$RAW_PORT") >/dev/null 2>&1 && echo -e "\033[1;32m (已放行)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
+        (nc -z -w 2 "$1" "$V_PORT" || nc -z -u -w 2 "$1" "$RAW_PORT") >/dev/null 2>&1 && echo -e "\033[1;32m (已放行)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
     }
     command -v nc >/dev/null && { _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait; v4_status=$(cat /tmp/sb_v4); v6_status=$(cat /tmp/sb_v6); }
 
-    echo -e "\n\033[1;32m[双协议节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"} | 443\033[0m\n"
+    echo -e "\n\033[1;32m[双协议节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"} | ${V_PORT:-"8443"}\033[0m\n"
     [ -n "${RAW_IP4:-}" ] && {
         local L4_HY2="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${HY2_BASE}#$(hostname)_Hy2_v4"
-        local L4_VLS="vless://$V_UUID@$RAW_IP4:443?${VL_BASE}#$(hostname)_VLS_v4"
+        local L4_VLS="vless://$V_UUID@$RAW_IP4:$V_PORT?${VL_BASE}#$(hostname)_VLS_v4"
         echo -e "\033[1;35m[IPv4 链接]\033[0m$v4_status\nHy2:  \033[0;36m$L4_HY2\033[0m\nVLS:  \033[0;36m$L4_VLS\033[0m\n"
         FULL_CLIP="${L4_HY2}\n${L4_VLS}"
     }
     [ -n "${RAW_IP6:-}" ] && {
         local L6_HY2="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${HY2_BASE}#$(hostname)_Hy2_v6"
-        local L6_VLS="vless://$V_UUID@[$RAW_IP6]:443?${VL_BASE}#$(hostname)_VLS_v6"
+        local L6_VLS="vless://$V_UUID@[$RAW_IP6]:$V_PORT?${VL_BASE}#$(hostname)_VLS_v6"
         echo -e "\033[1;36m[IPv6 链接]\033[0m$v6_status\nHy2:  \033[0;36m$L6_HY2\033[0m\nVLS:  \033[0;36m$L6_VLS\033[0m\n"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}${L6_HY2}\n${L6_VLS}"
     }
     echo -e "\033[1;34m==========================================\033[0m"
-    echo -e "\033[1;32m[技术特征]\033[0m VLESS 已启用 ECH 加密与 WebSocket Padding 填充"
+    echo -e "\033[1;32m[技术特征]\033[0m VLESS 已启用 ECH 加密与 WebSocket 传输"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
