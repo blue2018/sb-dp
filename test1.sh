@@ -718,24 +718,43 @@ create_config() {
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
+    [ -z "$V_PATH" ] && V_PATH="/$(openssl rand -hex 4)"
 
-    # 3. ECH 密钥生成与提取 (修正为 ech-keypair)
+    # 3. ECH 支持检测与配置（修复版）
     local ech_enabled="false"
-    local ech_json_part=""
-    if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech.key 2>/dev/null; then
-        # ech-keypair 生成的是单个对象，不需要取 key_pair 字段
-        local raw_kp=$(jq -c '.' /etc/sing-box/certs/ech.key 2>/dev/null)
-        if [ -n "$raw_kp" ] && [ "$raw_kp" != "null" ]; then
-            ech_enabled="true"
-            ech_json_part="$raw_kp"
+    local ech_key_line=""
+    
+    # 检测 sing-box 是否支持 ECH 命令
+    if /usr/bin/sing-box generate --help 2>&1 | grep -q "ech"; then
+        info "检测到 ECH 支持，正在生成密钥..."
+        
+        # 尝试生成 ECH 密钥对
+        if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech_raw.json 2>/dev/null && \
+           [ -s /etc/sing-box/certs/ech_raw.json ]; then
+            
+            # 提取私钥
+            local ech_priv=$(jq -r '.private_key // empty' /etc/sing-box/certs/ech_raw.json 2>/dev/null)
+            
+            if [ -n "$ech_priv" ] && [ "$ech_priv" != "null" ] && [ "$ech_priv" != "" ]; then
+                ech_enabled="true"
+                ech_key_line=",\"key\":[\"$ech_priv\"]"
+                succ "ECH 密钥生成成功"
+                # 保存公钥供客户端使用
+                jq -r '.public_key // empty' /etc/sing-box/certs/ech_raw.json > /etc/sing-box/certs/ech_public.txt 2>/dev/null
+            else
+                warn "ECH 密钥提取失败，降级为标准 TLS"
+            fi
+        else
+            warn "ECH 密钥生成失败，降级为标准 TLS"
         fi
+    else
+        info "当前版本不支持 ECH，使用标准 TLS 模式"
     fi
 
-    # 4. 写入配置 (移除不支持的 padding 字段)
+    # 4. 写入配置（根据 ECH 状态动态调整）
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "fatal", "timestamp": true },
+  "log": { "level": "warn", "timestamp": true },
   "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false},
   "inbounds": [
     {
@@ -756,19 +775,37 @@ create_config() {
       "tag": "vless-in",
       "listen": "::",
       "listen_port": 443,
-      "users": [ { "uuid": "$V_UUID" } ],
+      "users": [ { "uuid": "$V_UUID", "flow": "" } ],
       "tls": {
-        "enabled": true, "server_name": "$TLS_DOMAIN",
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem",
-        "ech": { "enabled": $ech_enabled, "key_pair": [ $ech_json_part ] }
+        "enabled": true,
+        "server_name": "$TLS_DOMAIN",
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+        "key_path": "/etc/sing-box/certs/privkey.pem",
+        "alpn": ["h2","http/1.1"]$(
+          if [ "$ech_enabled" = "true" ]; then
+            echo ",\"ech\":{\"enabled\":true${ech_key_line}}"
+          fi
+        )
       },
-      "transport": { "type": "ws", "path": "$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol" }
+      "transport": { 
+        "type": "ws", 
+        "path": "$V_PATH", 
+        "max_early_data": 2048, 
+        "early_data_header_name": "Sec-WebSocket-Protocol"
+      }
     }
   ],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
+    
+    # 5. 输出 ECH 状态
+    if [ "$ech_enabled" = "true" ]; then
+        info "VLESS 已启用 ECH 加密"
+    else
+        info "VLESS 使用标准 TLS 模式（ECH 不可用）"
+    fi
 }
 
 # ==========================================
@@ -894,8 +931,12 @@ get_env_data() {
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$V_SNI")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    # 适配 ech-keypair 生成的对象结构
-    V_ECH_PK=$([ -f "/etc/sing-box/certs/ech.key" ] && jq -r '.public_key // empty' /etc/sing-box/certs/ech.key 2>/dev/null || echo "")
+    # 提取 ECH 公钥（修复版）
+    if [ -f "/etc/sing-box/certs/ech_public.txt" ]; then
+        V_ECH_PK=$(cat /etc/sing-box/certs/ech_public.txt 2>/dev/null | tr -d '\n\r ')
+    else
+        V_ECH_PK=""
+    fi
 }
 
 display_links() {
@@ -903,8 +944,16 @@ display_links() {
     local HY2_BASE="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && HY2_BASE="${HY2_BASE}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && HY2_BASE="${HY2_BASE}&obfs=salamander&obfs-password=${RAW_SALA}"
-    local VL_BASE="encryption=none&security=tls&sni=$RAW_SNI&type=ws&path=${V_PATH}&host=$RAW_SNI&fp=chrome"
-    [ -n "${V_ECH_PK:-}" ] && VL_BASE="${VL_BASE}&pbk=${V_ECH_PK}"
+    
+    # VLESS 基础参数
+    local VL_BASE="encryption=none&security=tls&sni=$RAW_SNI&type=ws&path=${V_PATH}&host=$RAW_SNI&fp=chrome&alpn=h2,http/1.1"
+    
+    # 仅在 ECH 公钥存在时添加（修复版）
+    if [ -n "${V_ECH_PK:-}" ] && [ "$V_ECH_PK" != "" ]; then
+        VL_BASE="${VL_BASE}&ech=${V_ECH_PK}"
+        info "VLESS 链接已包含 ECH 公钥"
+    fi
+    
     VL_BASE="${VL_BASE}&allowInsecure=1"
 
     _do_probe() {
@@ -927,7 +976,14 @@ display_links() {
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}${L6_HY2}\n${L6_VLS}"
     }
     echo -e "\033[1;34m==========================================\033[0m"
-    echo -e "\033[1;32m[技术特征]\033[0m VLESS 已启用 ECH 加密与 WebSocket Padding 填充"
+    
+    # 根据 ECH 状态显示不同信息
+    if [ -n "${V_ECH_PK:-}" ] && [ "$V_ECH_PK" != "" ]; then
+        echo -e "\033[1;32m[技术特征]\033[0m VLESS 已启用 ECH 加密 + WebSocket 传输"
+    else
+        echo -e "\033[1;33m[技术特征]\033[0m VLESS 使用标准 TLS + WebSocket 传输（ECH 未启用）"
+    fi
+    
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
