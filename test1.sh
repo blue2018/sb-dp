@@ -720,92 +720,97 @@ create_config() {
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_PATH" ] && V_PATH="/$(openssl rand -hex 4)"
 
-    # 3. ECH 支持检测与配置（修复版）
-    local ech_enabled="false"
-    local ech_key_line=""
-    
-    # 检测 sing-box 是否支持 ECH 命令
-    if /usr/bin/sing-box generate --help 2>&1 | grep -q "ech"; then
-        info "检测到 ECH 支持，正在生成密钥..."
-        
-        # 尝试生成 ECH 密钥对
-        if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech_raw.json 2>/dev/null && \
-           [ -s /etc/sing-box/certs/ech_raw.json ]; then
-            
-            # 提取私钥
-            local ech_priv=$(jq -r '.private_key // empty' /etc/sing-box/certs/ech_raw.json 2>/dev/null)
-            
-            if [ -n "$ech_priv" ] && [ "$ech_priv" != "null" ] && [ "$ech_priv" != "" ]; then
-                ech_enabled="true"
-                ech_key_line=",\"key\":[\"$ech_priv\"]"
-                succ "ECH 密钥生成成功"
-                # 保存公钥供客户端使用
-                jq -r '.public_key // empty' /etc/sing-box/certs/ech_raw.json > /etc/sing-box/certs/ech_public.txt 2>/dev/null
-            else
-                warn "ECH 密钥提取失败，降级为标准 TLS"
-            fi
-        else
-            warn "ECH 密钥生成失败，降级为标准 TLS"
-        fi
-    else
-        info "当前版本不支持 ECH，使用标准 TLS 模式"
-    fi
-
-    # 4. 写入配置（根据 ECH 状态动态调整）
+    # 3. 写入配置
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "warn", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false},
+  "log": {
+    "level": "trace",
+    "timestamp": true,
+    "output": "/var/log/sing-box.log"
+  },
+  "dns": {
+    "servers": [
+      {
+        "tag": "google",
+        "address": "8.8.8.8",
+        "detour": "direct-out"
+      },
+      {
+        "tag": "cloudflare",
+        "address": "1.1.1.1",
+        "detour": "direct-out"
+      }
+    ],
+    "strategy": "$ds"
+  },
   "inbounds": [
     {
       "type": "hysteria2",
       "tag": "hy2-in",
       "listen": "::",
       "listen_port": $PORT_HY2,
-      "users": [ { "password": "$PSK" } ],
+      "users": [
+        {
+          "password": "$PSK"
+        }
+      ],
       "ignore_client_bandwidth": false,
-      "up_mbps": $cur_bw, "down_mbps": $cur_bw,
-      "udp_timeout": "$timeout", "udp_fragment": true,
-      "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
-      "obfs": {"type": "salamander", "password": "$SALA_PASS"},
-      "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+      "up_mbps": $cur_bw,
+      "down_mbps": $cur_bw,
+      "udp_timeout": "$timeout",
+      "tls": {
+        "enabled": true,
+        "alpn": ["h3"],
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+        "key_path": "/etc/sing-box/certs/privkey.pem"
+      },
+      "obfs": {
+        "type": "salamander",
+        "password": "$SALA_PASS"
+      },
+      "masquerade": "https://${TLS_DOMAIN}"
     },
     {
       "type": "vless",
       "tag": "vless-in",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": 443,
-      "users": [ { "uuid": "$V_UUID", "flow": "" } ],
+      "users": [
+        {
+          "uuid": "$V_UUID",
+          "flow": ""
+        }
+      ],
       "tls": {
         "enabled": true,
-        "server_name": "$TLS_DOMAIN",
+        "server_name": "${TLS_DOMAIN}",
+        "alpn": ["h2", "http/1.1"],
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem",
-        "alpn": ["h2","http/1.1"]$(
-          if [ "$ech_enabled" = "true" ]; then
-            echo ",\"ech\":{\"enabled\":true${ech_key_line}}"
-          fi
-        )
+        "min_version": "1.2",
+        "max_version": "1.3"
       },
-      "transport": { 
-        "type": "ws", 
-        "path": "$V_PATH", 
-        "max_early_data": 2048, 
-        "early_data_header_name": "Sec-WebSocket-Protocol"
+      "transport": {
+        "type": "ws",
+        "path": "$V_PATH",
+        "max_early_data": 2048,
+        "early_data_header_name": "Sec-WebSocket-Protocol",
+        "headers": {
+          "Host": "${TLS_DOMAIN}"
+        }
       }
     }
   ],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct-out"
+    }
+  ]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
-    
-    # 5. 输出 ECH 状态
-    if [ "$ech_enabled" = "true" ]; then
-        info "VLESS 已启用 ECH 加密"
-    else
-        info "VLESS 使用标准 TLS 模式（ECH 不可用）"
-    fi
+    info "配置已生成（VLESS TLS+WS 标准模式）"
 }
 
 # ==========================================
