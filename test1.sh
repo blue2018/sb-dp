@@ -720,66 +720,61 @@ create_config() {
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_PATH" ] && V_PATH="/$(openssl rand -hex 4)"
 
-    # 3. ECH 密钥生成（增强版）
+    # 3. ECH 密钥生成（修复版 - 使用 PEM 格式）
     local ech_config=""
     local ech_enabled="false"
     
-    # 尝试生成 ECH 配置
-    if /usr/bin/sing-box generate reality-keypair > /tmp/ech_test.json 2>/dev/null; then
-        # 如果 reality-keypair 成功，说明支持新版本命令
-        rm -f /tmp/ech_test.json
+    # 方法1: 使用 sing-box 原生命令
+    if /usr/bin/sing-box generate ech-keypair 2>/dev/null | head -1 | grep -q "BEGIN"; then
+        info "使用 sing-box 原生 ECH 生成..."
+        /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech_keypair.pem 2>/dev/null
         
-        # 尝试生成 ECH
-        if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech_raw.json 2>/dev/null && \
-           [ -s /etc/sing-box/certs/ech_raw.json ]; then
+        if [ -s /etc/sing-box/certs/ech_keypair.pem ] && grep -q "BEGIN" /etc/sing-box/certs/ech_keypair.pem; then
+            # 提取公钥（从 PEM 中）
+            local ech_public=$(grep -A 1 "PUBLIC KEY" /etc/sing-box/certs/ech_keypair.pem | tail -1 | tr -d '\n\r ')
             
-            # 提取密钥（兼容两种格式）
-            local ech_private=$(jq -r '.private_key // .key // empty' /etc/sing-box/certs/ech_raw.json 2>/dev/null)
-            local ech_public=$(jq -r '.public_key // .config // empty' /etc/sing-box/certs/ech_raw.json 2>/dev/null)
-            
-            if [ -n "$ech_private" ] && [ "$ech_private" != "null" ] && [ "$ech_private" != "" ]; then
+            if [ -n "$ech_public" ]; then
                 ech_enabled="true"
-                # 保存公钥供客户端使用
                 echo "$ech_public" > /etc/sing-box/certs/ech_public.txt
-                # 构建配置片段
+                # PEM 格式直接引用文件路径
                 ech_config=",
         \"ech\": {
           \"enabled\": true,
-          \"key\": [\"$ech_private\"]
+          \"pem\": \"/etc/sing-box/certs/ech_keypair.pem\"
         }"
-                succ "ECH 密钥生成成功"
+                succ "ECH (PEM) 生成成功"
             fi
         fi
     fi
     
-    # 如果自动生成失败，尝试手动生成（兜底方案）
-    if [ "$ech_enabled" = "false" ]; then
-        info "sing-box 不支持 ECH 自动生成，尝试手动生成..."
+    # 方法2: 手动生成 X25519 密钥并转换为 PEM
+    if [ "$ech_enabled" = "false" ] && command -v openssl >/dev/null 2>&1; then
+        info "手动生成 ECH 密钥对..."
         
-        # 使用 openssl 生成 X25519 密钥对（ECH 使用 X25519）
-        if command -v openssl >/dev/null 2>&1; then
-            # 生成私钥
-            local ech_priv_raw=$(openssl genpkey -algorithm X25519 2>/dev/null | openssl pkey -text -noout | grep 'priv:' -A 3 | tail -n 3 | tr -d ' \n:')
-            local ech_pub_raw=$(openssl genpkey -algorithm X25519 2>/dev/null | openssl pkey -pubout -text -noout | grep 'pub:' -A 3 | tail -n 3 | tr -d ' \n:')
-            
-            if [ -n "$ech_priv_raw" ] && [ ${#ech_priv_raw} -eq 64 ]; then
-                # 转换为 Base64 URL-safe 格式
-                local ech_priv_b64=$(echo "$ech_priv_raw" | xxd -r -p | base64 | tr '+/' '-_' | tr -d '=')
-                local ech_pub_b64=$(echo "$ech_pub_raw" | xxd -r -p | base64 | tr '+/' '-_' | tr -d '=')
+        # 生成 X25519 私钥（PEM 格式）
+        if openssl genpkey -algorithm X25519 -out /etc/sing-box/certs/ech_private.pem 2>/dev/null; then
+            # 提取公钥
+            if openssl pkey -in /etc/sing-box/certs/ech_private.pem -pubout -out /etc/sing-box/certs/ech_public.pem 2>/dev/null; then
+                # 提取公钥的 Base64 部分（去除 PEM 头尾）
+                local ech_pub_b64=$(grep -v "BEGIN\|END" /etc/sing-box/certs/ech_public.pem | tr -d '\n\r ')
                 
-                ech_enabled="true"
-                echo "$ech_pub_b64" > /etc/sing-box/certs/ech_public.txt
-                ech_config=",
+                if [ -n "$ech_pub_b64" ]; then
+                    ech_enabled="true"
+                    echo "$ech_pub_b64" > /etc/sing-box/certs/ech_public.txt
+                    
+                    # 使用 PEM 文件路径
+                    ech_config=",
         \"ech\": {
           \"enabled\": true,
-          \"key\": [\"$ech_priv_b64\"]
+          \"pem\": \"/etc/sing-box/certs/ech_private.pem\"
         }"
-                succ "ECH 手动生成成功"
+                    succ "ECH (手动PEM) 生成成功"
+                fi
             fi
         fi
     fi
     
-    # 如果所有方法都失败
+    # 如果所有方法都失败，禁用 ECH
     if [ "$ech_enabled" = "false" ]; then
         warn "ECH 生成失败，使用标准 TLS 模式"
         ech_config=""
@@ -873,6 +868,14 @@ create_config() {
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
+    
+    # 设置 PEM 文件权限
+    if [ -f /etc/sing-box/certs/ech_private.pem ]; then
+        chmod 600 /etc/sing-box/certs/ech_private.pem
+    fi
+    if [ -f /etc/sing-box/certs/ech_keypair.pem ]; then
+        chmod 600 /etc/sing-box/certs/ech_keypair.pem
+    fi
     
     # 输出状态
     if [ "$ech_enabled" = "true" ]; then
