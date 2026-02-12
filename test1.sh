@@ -716,66 +716,88 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local PORT_HY2="${1:-}"
-    local cur_bw="${VAR_HY2_BW:-200}"
-    mkdir -p /etc/sing-box/certs
-    [ ! -f /etc/sing-box/config.json ] && echo "{}" > /etc/sing-box/config.json
-    local ds="ipv4_only"; [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
+    local PORT_HY2="${1:-}"
+    local cur_bw="${VAR_HY2_BW:-200}"
+    mkdir -p /etc/sing-box/certs
+    [ ! -f /etc/sing-box/config.json ] && echo "{}" > /etc/sing-box/config.json
+    local ds="ipv4_only"; [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
+    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
+    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
 
-    # 1. 端口与密码确定
-    if [ -z "$PORT_HY2" ]; then
-        PORT_HY2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-        [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port)
-    fi
-    local PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
-    local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
+    # 1. 端口与密码确定
+    if [ -z "$PORT_HY2" ]; then
+        PORT_HY2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+        [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port)
+    fi
+    local PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
+    local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 2. VLESS 变量
-    V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
-    V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
+    # 2. VLESS 变量
+    local V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
+    local V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
+    local SNI_DOMAIN="${TLS_DOMAIN:-www.microsoft.com}"
 
-    # 3. 写入配置 (已移除 ECH 相关生成逻辑与字段)
-    cat > "/etc/sing-box/config.json" <<EOF
+    # 3. 写入配置 (彻底剥离 ECH，确保 JSON 结构严谨)
+    cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false},
-  "inbounds": [
-    {
-      "type": "hysteria2",
-      "tag": "hy2-in",
-      "listen": "::",
-      "listen_port": $PORT_HY2,
-      "users": [ { "password": "$PSK" } ],
-      "ignore_client_bandwidth": false,
-      "up_mbps": $cur_bw, "down_mbps": $cur_bw,
-      "udp_timeout": "$timeout", "udp_fragment": true,
-      "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
-      "obfs": {"type": "salamander", "password": "$SALA_PASS"},
-      "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
-    },
-    {
-      "type": "vless",
-      "tag": "vless-in",
-      "listen": "::",
-      "listen_port": 443,
-      "users": [ { "uuid": "$V_UUID" } ],
-      "tls": {
-        "enabled": true, "server_name": "$TLS_DOMAIN",
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"
-      },
-      "transport": { "type": "ws", "path": "$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol" }
-    }
-  ],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
+  "log": { "level": "fatal", "timestamp": true },
+  "dns": {
+    "servers": [
+      { "address": "8.8.4.4", "detour": "direct-out" },
+      { "address": "1.1.1.1", "detour": "direct-out" }
+    ],
+    "strategy": "$ds",
+    "independent_cache": false
+  },
+  "inbounds": [
+    {
+      "type": "hysteria2",
+      "tag": "hy2-in",
+      "listen": "::",
+      "listen_port": $PORT_HY2,
+      "users": [ { "password": "$PSK" } ],
+      "ignore_client_bandwidth": false,
+      "up_mbps": $cur_bw, "down_mbps": $cur_bw,
+      "udp_timeout": "$timeout", "udp_fragment": true,
+      "tls": {
+        "enabled": true,
+        "alpn": ["h3"],
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+        "key_path": "/etc/sing-box/certs/privkey.pem"
+      },
+      "obfs": { "type": "salamander", "password": "$SALA_PASS" },
+      "masquerade": "https://$SNI_DOMAIN"
+    },
+    {
+      "type": "vless",
+      "tag": "vless-in",
+      "listen": "::",
+      "listen_port": 443,
+      "users": [ { "uuid": "$V_UUID" } ],
+      "tls": {
+        "enabled": true,
+        "server_name": "$SNI_DOMAIN",
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+        "key_path": "/etc/sing-box/certs/privkey.pem"
+      },
+      "transport": {
+        "type": "ws",
+        "path": "$V_PATH",
+        "max_early_data": 2048,
+        "early_data_header_name": "Sec-WebSocket-Protocol"
+      }
+    }
+  ],
+  "outbounds": [
+    { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }
+  ]
 }
 EOF
-    chmod 600 "/etc/sing-box/config.json"
+    chmod 600 "/etc/sing-box/config.json"
 }
 
 # ==========================================
