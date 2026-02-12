@@ -123,7 +123,7 @@ generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
     
-    # --- 原有 TLS 证书生成逻辑 ---
+    # 1. 生成 ECC P-256 高性能证书
     if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
         info "生成 ECC P-256 高性能证书 (域名: $TLS_DOMAIN)..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
@@ -134,16 +134,25 @@ generate_cert() {
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
 
-    # --- [新增] ECH 密钥对生成逻辑 ---
-    # 利用 sing-box 自带工具生成 ECH 密钥 (比 openssl 手动构造更标准)
+    # 2. 生成 ECH 密钥对 (适配新旧版本 CLI)
     if [ ! -f "$CERT_DIR/ech.key" ]; then
         info "正在生成 ECH 专用加密密钥..."
-        /usr/bin/sing-box generate ech-keypair "$CERT_DIR/ech.key" "$CERT_DIR/ech.pub" >/dev/null 2>&1
+        # 尝试新版语法：输出重定向。新版公钥会打印在 stdout，带或不带前缀
+        /usr/bin/sing-box generate ech-keypair "$CERT_DIR/ech.key" > "$CERT_DIR/ech.pub" 2>/dev/null
+        
+        # 检查是否生成成功且有内容；若文件为空，说明是旧版双参数语法
+        if [ ! -s "$CERT_DIR/ech.pub" ]; then
+            /usr/bin/sing-box generate ech-keypair "$CERT_DIR/ech.key" "$CERT_DIR/ech.pub" >/dev/null 2>&1
+        else
+            # 针对新版重定向的内容进行清洗，只保留 Base64 密钥部分
+            sed -i 's/Public key: //' "$CERT_DIR/ech.pub"
+        fi
     fi
 
+    # 3. 权限与指纹生成
     if [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.key"
+        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.key" "$CERT_DIR/ech.pub"
         succ "ECC 证书与 ECH 密钥对就绪"
     else err "证书生成失败"; exit 1; fi
 }
