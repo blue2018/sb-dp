@@ -724,7 +724,7 @@ create_config() {
       "key_path": "/etc/sing-box/certs/privkey.pem",
       "ech": {
         "enabled": true,
-        "key_path": "/etc/sing-box/certs/ech.key"
+        "key": [ "$(cat /etc/sing-box/certs/ech.key | tr -d '\n')" ]
       }
     },
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
@@ -849,17 +849,18 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    # 提取 PSK, 端口, 证书路径
+    # 1. 提取 PSK, 端口, 证书路径
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data" || true
+    # 2. 提取 SNI (域名)
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
-    # 提取指纹
+    # 3. 提取证书 SHA256 指纹
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    # 利用 sing-box 转换公钥为 Base64 ECHConfigs 字符串
-    local PUB_KEY="/etc/sing-box/certs/ech.pub"
-    if [ -f "$PUB_KEY" ]; then
-        RAW_ECH=$(/usr/bin/sing-box generate ech-config --public-key "$PUB_KEY" --server-name "$RAW_SNI" 2>/dev/null | grep "ECHConfigs:" | awk '{print $2}')
+    # 4. 直接从文件读取已生成的 ECHConfigs Base64 字符串
+    local PUB_KEY_FILE="/etc/sing-box/certs/ech.pub"
+    if [ -f "$PUB_KEY_FILE" ]; then
+        RAW_ECH=$(cat "$PUB_KEY_FILE" | tr -d '\n\r ')
     fi
 }
 
