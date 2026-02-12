@@ -720,18 +720,19 @@ create_config() {
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
 
-    # 3. ECH 密钥生成与提取
+    # 3. ECH 密钥生成与提取 (修正为 ech-keypair)
     local ech_enabled="false"
     local ech_json_part=""
-    if /usr/bin/sing-box generate ech-key > /etc/sing-box/certs/ech.key 2>/dev/null; then
-        local raw_kp=$(jq -c '.key_pair' /etc/sing-box/certs/ech.key 2>/dev/null)
+    if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech.key 2>/dev/null; then
+        # ech-keypair 生成的是单个对象，不需要取 key_pair 字段
+        local raw_kp=$(jq -c '.' /etc/sing-box/certs/ech.key 2>/dev/null)
         if [ -n "$raw_kp" ] && [ "$raw_kp" != "null" ]; then
             ech_enabled="true"
-            ech_json_part=$(echo "$raw_kp" | sed 's/^\[//;s/\]$//')
+            ech_json_part="$raw_kp"
         fi
     fi
 
-    # 4. 写入配置
+    # 4. 写入配置 (移除不支持的 padding 字段)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -761,7 +762,7 @@ create_config() {
         "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem",
         "ech": { "enabled": $ech_enabled, "key_pair": [ $ech_json_part ] }
       },
-      "transport": { "type": "ws", "path": "$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol", "padding": true }
+      "transport": { "type": "ws", "path": "$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol" }
     }
   ],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
@@ -884,7 +885,7 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    # 提取 Hy2/VLESS 基础数据 (保持你原有的 read -r 风格)
+    # 提取 Hy2/VLESS 基础数据
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
     local v_data=$(jq -r '.. | objects | select(.type == "vless") | "\(.users[0].uuid) \(.transport.path) \(.tls.server_name)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
@@ -893,8 +894,8 @@ get_env_data() {
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$V_SNI")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-	# 【提取 ECH 公钥】供 display_links 使用
-    V_ECH_PK=$([ -f "/etc/sing-box/certs/ech.key" ] && jq -r '.key_pair[0].public_key // empty' /etc/sing-box/certs/ech.key 2>/dev/null || echo "")
+    # 适配 ech-keypair 生成的对象结构
+    V_ECH_PK=$([ -f "/etc/sing-box/certs/ech.key" ] && jq -r '.public_key // empty' /etc/sing-box/certs/ech.key 2>/dev/null || echo "")
 }
 
 display_links() {
