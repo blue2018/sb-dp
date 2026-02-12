@@ -722,10 +722,16 @@ create_config() {
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
 
-    # 4. ECH 密钥安全生成 (增加 grep 容错)
-    local ech_kp=""
+    # 4. ECH 密钥安全生成 (使用 jq 提取以确保 JSON 语法严谨)
+    local ech_enabled="false"
+    local ech_json_part=""
     if /usr/bin/sing-box generate ech-key > /etc/sing-box/certs/ech.key 2>/dev/null; then
-        ech_kp=$(grep "key" /etc/sing-box/certs/ech.key | cut -d: -f2 | xargs echo -n 2>/dev/null || echo "")
+        # 提取 key_pair 数组中的内容并去除外层方括号，确保嵌入后格式为 [ {对象} ]
+        local raw_kp=$(jq -c '.key_pair' /etc/sing-box/certs/ech.key 2>/dev/null)
+        if [ -n "$raw_kp" ] && [ "$raw_kp" != "null" ]; then
+            ech_enabled="true"
+            ech_json_part=$(echo "$raw_kp" | sed 's/^\[//;s/\]$//')
+        fi
     fi
 
     # 5. 写入 Sing-box 配置文件
@@ -760,7 +766,7 @@ create_config() {
         "server_name": "$TLS_DOMAIN",
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem",
-        "ech": { "enabled": true, "key_pair": [ ${ech_kp:-""} ] }
+        "ech": { "enabled": $ech_enabled, "key_pair": [ $ech_json_part ] }
       },
       "transport": { "type": "ws", "path": "$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol", "padding": true }
     }
