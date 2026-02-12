@@ -720,18 +720,29 @@ create_config() {
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
 
-    # 3. ECH 密钥生成与提取 (修正生成逻辑)
+    # --- 调试开始：ECH 生成阶段 ---
+    echo -e "\033[1;33m[DEBUG]\033[0m 正在尝试生成 ECH 密钥对..."
     local ech_enabled="false"
     local ech_json_part=""
-    # 尝试使用正确命令生成
-    local temp_ech=$(/usr/bin/sing-box generate ech-keypair 2>/dev/null)
-    if [ -n "$temp_ech" ]; then
-        echo "$temp_ech" > /etc/sing-box/certs/ech.key
-        ech_enabled="true"
-        ech_json_part=$(echo "$temp_ech" | jq -c '.')
+    # 捕获输出
+    local ech_raw=$(/usr/bin/sing-box generate ech-keypair 2>/dev/null)
+    
+    if [ -n "$ech_raw" ]; then
+        echo -e "\033[1;32m[DEBUG]\033[0m ECH 生成成功，内容长度: ${#ech_raw}"
+        echo "$ech_raw" > /etc/sing-box/certs/ech.key
+        if [ -s /etc/sing-box/certs/ech.key ]; then
+            echo -e "\033[1;32m[DEBUG]\033[0m ech.key 已成功写入文件系统"
+            ech_enabled="true"
+            ech_json_part=$(echo "$ech_raw" | jq -c '.')
+        else
+            echo -e "\033[1;31m[DEBUG]\033[0m 错误：ech.key 写入后变为了空文件！"
+        fi
+    else
+        echo -e "\033[1;31m[DEBUG]\033[0m 错误：/usr/bin/sing-box generate ech-keypair 没有产生任何输出"
     fi
+    # --- 调试结束 ---
 
-    # 4. 写入配置 (移除导致崩溃的 padding 字段)
+    # 4. 写入配置
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -884,17 +895,31 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    # 提取 Hy2/VLESS 基础数据 (保持原有风格)
+    
+    # 基础提取逻辑 (保持原样)
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
     local v_data=$(jq -r '.. | objects | select(.type == "vless") | "\(.users[0].uuid) \(.transport.path) \(.tls.server_name)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r V_UUID V_PATH V_SNI <<< "$v_data" || true
-    # 确定 SNI 和 指纹
+    
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$V_SNI")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    # 直接从对象根部提取 public_key
-    V_ECH_PK=$([ -f "/etc/sing-box/certs/ech.key" ] && jq -r '.public_key // empty' /etc/sing-box/certs/ech.key 2>/dev/null || echo "")
+
+    # --- 调试开始：ECH 提取阶段 ---
+    echo -e "\033[1;33m[DEBUG]\033[0m 正在从文件提取 V_ECH_PK..."
+    if [ -f "/etc/sing-box/certs/ech.key" ]; then
+        V_ECH_PK=$(jq -r '.public_key // empty' /etc/sing-box/certs/ech.key 2>/dev/null)
+        if [ -n "$V_ECH_PK" ]; then
+            echo -e "\033[1;32m[DEBUG]\033[0m 成功提取到公钥: ${V_ECH_PK:0:15}..."
+        else
+            echo -e "\033[1;31m[DEBUG]\033[0m 错误：ech.key 存在但 jq 提取 public_key 失败，内容为: $(cat /etc/sing-box/certs/ech.key)"
+        fi
+    else
+        echo -e "\033[1;31m[DEBUG]\033[0m 错误：找不到 /etc/sing-box/certs/ech.key 文件"
+        V_ECH_PK=""
+    fi
+    # --- 调试结束 ---
 }
 
 display_links() {
