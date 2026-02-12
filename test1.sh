@@ -715,31 +715,40 @@ create_config() {
     mkdir -p /etc/sing-box/certs
     [ ! -f /etc/sing-box/config.json ] && echo "{}" > /etc/sing-box/config.json
     local ds="ipv4_only"; [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
+    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
+    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
 
     # 1. 变量提取
     if [ -z "$PORT_HY2" ]; then
         PORT_HY2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-        [ -z "$PORT_HY2" ] && PORT_HY2=1356
+        [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port)
     fi
     local PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
+    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
     local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -hex 8)
+    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
-    # 2. VLESS 变量：修复双斜杠逻辑
+    # 2. VLESS 变量：精准处理路径，解决双斜杠
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16)
+    [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
     
-    # 提取路径并强制清理所有斜杠，然后只加一个
+    # 彻底清理路径中可能存在的重复斜杠
     local raw_p=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1 | tr -d '/')
     [ -z "$raw_p" ] && raw_p="stream-$(openssl rand -hex 4)"
     V_PATH="/$raw_p"
 
-    # 3. 写入配置 (移除 ECH，移除 h2，修复监听)
+    # 3. 写入配置 (找回被删的 dns 结构、padding、max_early_data 等)
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "info", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"}],"strategy":"$ds"},
+  "log": { "level": "fatal", "timestamp": true },
+  "dns": {
+    "servers": [
+      { "address": "8.8.4.4", "detour": "direct-out" },
+      { "address": "1.1.1.1", "detour": "direct-out" }
+    ],
+    "strategy": "$ds",
+    "independent_cache": false
+  },
   "inbounds": [
     {
       "type": "hysteria2",
@@ -747,13 +756,17 @@ create_config() {
       "listen": "::",
       "listen_port": $PORT_HY2,
       "users": [ { "password": "$PSK" } ],
+      "ignore_client_bandwidth": false,
+      "up_mbps": $cur_bw, "down_mbps": $cur_bw,
+      "udp_timeout": "$timeout", "udp_fragment": true,
       "tls": {
         "enabled": true, 
         "alpn": ["h3"], 
         "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
         "key_path": "/etc/sing-box/certs/privkey.pem"
       },
-      "obfs": {"type": "salamander", "password": "$SALA_PASS"}
+      "obfs": {"type": "salamander", "password": "$SALA_PASS"},
+      "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
     },
     {
       "type": "vless",
@@ -762,20 +775,22 @@ create_config() {
       "listen_port": 8443,
       "users": [ { "uuid": "$V_UUID" } ],
       "tls": {
-        "enabled": true,
+        "enabled": true, 
         "server_name": "${TLS_DOMAIN:-www.icloud.com}",
         "alpn": ["http/1.1"],
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
         "key_path": "/etc/sing-box/certs/privkey.pem"
       },
-      "transport": {
-        "type": "ws",
-        "path": "$V_PATH",
+      "transport": { 
+        "type": "ws", 
+        "path": "$V_PATH", 
+        "max_early_data": 2048, 
+        "early_data_header_name": "Sec-WebSocket-Protocol",
         "headers": { "Host": "${TLS_DOMAIN:-www.icloud.com}" }
       }
     }
   ],
-  "outbounds": [{"type": "direct", "tag": "direct-out"}]
+  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
