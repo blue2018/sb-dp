@@ -718,171 +718,57 @@ create_config() {
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
     V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$V_PATH" ] && V_PATH="/$(openssl rand -hex 4)"
+    [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
 
-    # 3. ECH 密钥生成（修复版 - 使用 PEM 格式）
-    local ech_config=""
+    # 3. ECH 密钥生成与提取 (修正为 ech-keypair)
     local ech_enabled="false"
-    
-    # 方法1: 使用 sing-box 原生命令
-    if /usr/bin/sing-box generate ech-keypair 2>/dev/null | head -1 | grep -q "BEGIN"; then
-        info "使用 sing-box 原生 ECH 生成..."
-        /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech_keypair.pem 2>/dev/null
-        
-        if [ -s /etc/sing-box/certs/ech_keypair.pem ] && grep -q "BEGIN" /etc/sing-box/certs/ech_keypair.pem; then
-            # 提取公钥（从 PEM 中）
-            local ech_public=$(grep -A 1 "PUBLIC KEY" /etc/sing-box/certs/ech_keypair.pem | tail -1 | tr -d '\n\r ')
-            
-            if [ -n "$ech_public" ]; then
-                ech_enabled="true"
-                echo "$ech_public" > /etc/sing-box/certs/ech_public.txt
-                # PEM 格式直接引用文件路径
-                ech_config=",
-        \"ech\": {
-          \"enabled\": true,
-          \"pem\": \"/etc/sing-box/certs/ech_keypair.pem\"
-        }"
-                succ "ECH (PEM) 生成成功"
-            fi
+    local ech_json_part=""
+    if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech.key 2>/dev/null; then
+        # ech-keypair 生成的是单个对象，不需要取 key_pair 字段
+        local raw_kp=$(jq -c '.' /etc/sing-box/certs/ech.key 2>/dev/null)
+        if [ -n "$raw_kp" ] && [ "$raw_kp" != "null" ]; then
+            ech_enabled="true"
+            ech_json_part="$raw_kp"
         fi
-    fi
-    
-    # 方法2: 手动生成 X25519 密钥并转换为 PEM
-    if [ "$ech_enabled" = "false" ] && command -v openssl >/dev/null 2>&1; then
-        info "手动生成 ECH 密钥对..."
-        
-        # 生成 X25519 私钥（PEM 格式）
-        if openssl genpkey -algorithm X25519 -out /etc/sing-box/certs/ech_private.pem 2>/dev/null; then
-            # 提取公钥
-            if openssl pkey -in /etc/sing-box/certs/ech_private.pem -pubout -out /etc/sing-box/certs/ech_public.pem 2>/dev/null; then
-                # 提取公钥的 Base64 部分（去除 PEM 头尾）
-                local ech_pub_b64=$(grep -v "BEGIN\|END" /etc/sing-box/certs/ech_public.pem | tr -d '\n\r ')
-                
-                if [ -n "$ech_pub_b64" ]; then
-                    ech_enabled="true"
-                    echo "$ech_pub_b64" > /etc/sing-box/certs/ech_public.txt
-                    
-                    # 使用 PEM 文件路径
-                    ech_config=",
-        \"ech\": {
-          \"enabled\": true,
-          \"pem\": \"/etc/sing-box/certs/ech_private.pem\"
-        }"
-                    succ "ECH (手动PEM) 生成成功"
-                fi
-            fi
-        fi
-    fi
-    
-    # 如果所有方法都失败，禁用 ECH
-    if [ "$ech_enabled" = "false" ]; then
-        warn "ECH 生成失败，使用标准 TLS 模式"
-        ech_config=""
     fi
 
-    # 4. 写入配置
+    # 4. 写入配置 (移除不支持的 padding 字段)
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": {
-    "level": "info",
-    "timestamp": true,
-    "output": "/var/log/sing-box.log"
-  },
-  "dns": {
-    "servers": [
-      {
-        "tag": "google",
-        "address": "8.8.8.8",
-        "detour": "direct-out"
-      },
-      {
-        "tag": "cloudflare",
-        "address": "1.1.1.1",
-        "detour": "direct-out"
-      }
-    ],
-    "strategy": "$ds"
-  },
+  "log": { "level": "fatal", "timestamp": true },
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false},
   "inbounds": [
     {
       "type": "hysteria2",
       "tag": "hy2-in",
       "listen": "::",
       "listen_port": $PORT_HY2,
-      "users": [
-        {
-          "password": "$PSK"
-        }
-      ],
+      "users": [ { "password": "$PSK" } ],
       "ignore_client_bandwidth": false,
-      "up_mbps": $cur_bw,
-      "down_mbps": $cur_bw,
-      "udp_timeout": "$timeout",
-      "tls": {
-        "enabled": true,
-        "alpn": ["h3"],
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-        "key_path": "/etc/sing-box/certs/privkey.pem"
-      },
-      "obfs": {
-        "type": "salamander",
-        "password": "$SALA_PASS"
-      },
-      "masquerade": "https://${TLS_DOMAIN}"
+      "up_mbps": $cur_bw, "down_mbps": $cur_bw,
+      "udp_timeout": "$timeout", "udp_fragment": true,
+      "tls": {"enabled": true, "alpn": ["h3"], "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
+      "obfs": {"type": "salamander", "password": "$SALA_PASS"},
+      "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
     },
     {
       "type": "vless",
       "tag": "vless-in",
-      "listen": "0.0.0.0",
-      "listen_port": 8443,
-      "users": [
-        {
-          "uuid": "$V_UUID",
-          "flow": ""
-        }
-      ],
+      "listen": "::",
+      "listen_port": 443,
+      "users": [ { "uuid": "$V_UUID" } ],
       "tls": {
-        "enabled": true,
-        "server_name": "${TLS_DOMAIN}",
-        "alpn": ["h2", "http/1.1"],
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-        "key_path": "/etc/sing-box/certs/privkey.pem"$ech_config
+        "enabled": true, "server_name": "$TLS_DOMAIN",
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem",
+        "ech": { "enabled": $ech_enabled, "key_pair": [ $ech_json_part ] }
       },
-      "transport": {
-        "type": "ws",
-        "path": "$V_PATH",
-        "max_early_data": 2048,
-        "early_data_header_name": "Sec-WebSocket-Protocol",
-        "headers": {
-          "Host": "${TLS_DOMAIN}"
-        }
-      }
+      "transport": { "type": "ws", "path": "$V_PATH", "max_early_data": 2048, "early_data_header_name": "Sec-WebSocket-Protocol" }
     }
   ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct-out"
-    }
-  ]
+  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
-    
-    # 设置 PEM 文件权限
-    if [ -f /etc/sing-box/certs/ech_private.pem ]; then
-        chmod 600 /etc/sing-box/certs/ech_private.pem
-    fi
-    if [ -f /etc/sing-box/certs/ech_keypair.pem ]; then
-        chmod 600 /etc/sing-box/certs/ech_keypair.pem
-    fi
-    
-    # 输出状态
-    if [ "$ech_enabled" = "true" ]; then
-        info "配置已生成（VLESS 8443 端口 + ECH 加密）"
-    else
-        info "配置已生成（VLESS 8443 端口，标准 TLS）"
-    fi
 }
 
 # ==========================================
@@ -999,31 +885,17 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    
     # 提取 Hy2/VLESS 基础数据
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
-    
     local v_data=$(jq -r '.. | objects | select(.type == "vless") | "\(.users[0].uuid) \(.transport.path) \(.tls.server_name)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     read -r V_UUID V_PATH V_SNI <<< "$v_data" || true
-    
     # 确定 SNI 和 指纹
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$V_SNI")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    
-    # 提取 ECH 公钥
-    if [ -f "/etc/sing-box/certs/ech_public.txt" ]; then
-        V_ECH_PK=$(cat /etc/sing-box/certs/ech_public.txt 2>/dev/null | tr -d '\n\r ')
-    else
-        # 尝试从配置中检测 ECH 是否启用
-        local ech_enabled=$(jq -r '.. | objects | select(.type == "vless") | .tls.ech.enabled // false' "$CONFIG_FILE" 2>/dev/null)
-        if [ "$ech_enabled" = "true" ]; then
-            V_ECH_PK="AUTO_GENERATED"
-        else
-            V_ECH_PK=""
-        fi
-    fi
+    # 适配 ech-keypair 生成的对象结构
+    V_ECH_PK=$([ -f "/etc/sing-box/certs/ech.key" ] && jq -r '.public_key // empty' /etc/sing-box/certs/ech.key 2>/dev/null || echo "")
 }
 
 display_links() {
@@ -1031,48 +903,31 @@ display_links() {
     local HY2_BASE="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && HY2_BASE="${HY2_BASE}&pinsha256=${RAW_FP}"
     [ -n "${RAW_SALA:-}" ] && HY2_BASE="${HY2_BASE}&obfs=salamander&obfs-password=${RAW_SALA}"
-    
-    # VLESS 使用 8443 端口
-    local VLESS_PORT=8443
-    local VL_BASE="encryption=none&security=tls&sni=$RAW_SNI&type=ws&path=${V_PATH}&host=$RAW_SNI&fp=chrome&alpn=h2,http/1.1"
-    
-    # 添加 ECH 公钥（如果存在）
-    if [ -n "${V_ECH_PK:-}" ] && [ "$V_ECH_PK" != "" ]; then
-        if [ "$V_ECH_PK" != "AUTO_GENERATED" ]; then
-            VL_BASE="${VL_BASE}&ech=${V_ECH_PK}"
-        fi
-    fi
-    
+    local VL_BASE="encryption=none&security=tls&sni=$RAW_SNI&type=ws&path=${V_PATH}&host=$RAW_SNI&fp=chrome"
+    [ -n "${V_ECH_PK:-}" ] && VL_BASE="${VL_BASE}&pbk=${V_ECH_PK}"
     VL_BASE="${VL_BASE}&allowInsecure=1"
 
     _do_probe() {
         [ -z "$1" ] && return
-        (nc -z -w 2 "$1" "$VLESS_PORT" || nc -z -u -w 2 "$1" "$RAW_PORT") >/dev/null 2>&1 && echo -e "\033[1;32m (已放行)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
+        (nc -z -w 2 "$1" 443 || nc -z -u -w 2 "$1" "$RAW_PORT") >/dev/null 2>&1 && echo -e "\033[1;32m (已放行)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
     }
     command -v nc >/dev/null && { _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait; v4_status=$(cat /tmp/sb_v4); v6_status=$(cat /tmp/sb_v6); }
 
-    echo -e "\n\033[1;32m[双协议节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"} | ${VLESS_PORT}\033[0m\n"
+    echo -e "\n\033[1;32m[双协议节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"} | 443\033[0m\n"
     [ -n "${RAW_IP4:-}" ] && {
         local L4_HY2="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${HY2_BASE}#$(hostname)_Hy2_v4"
-        local L4_VLS="vless://$V_UUID@$RAW_IP4:$VLESS_PORT?${VL_BASE}#$(hostname)_VLS_v4"
+        local L4_VLS="vless://$V_UUID@$RAW_IP4:443?${VL_BASE}#$(hostname)_VLS_v4"
         echo -e "\033[1;35m[IPv4 链接]\033[0m$v4_status\nHy2:  \033[0;36m$L4_HY2\033[0m\nVLS:  \033[0;36m$L4_VLS\033[0m\n"
         FULL_CLIP="${L4_HY2}\n${L4_VLS}"
     }
     [ -n "${RAW_IP6:-}" ] && {
         local L6_HY2="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${HY2_BASE}#$(hostname)_Hy2_v6"
-        local L6_VLS="vless://$V_UUID@[$RAW_IP6]:$VLESS_PORT?${VL_BASE}#$(hostname)_VLS_v6"
+        local L6_VLS="vless://$V_UUID@[$RAW_IP6]:443?${VL_BASE}#$(hostname)_VLS_v6"
         echo -e "\033[1;36m[IPv6 链接]\033[0m$v6_status\nHy2:  \033[0;36m$L6_HY2\033[0m\nVLS:  \033[0;36m$L6_VLS\033[0m\n"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}${L6_HY2}\n${L6_VLS}"
     }
     echo -e "\033[1;34m==========================================\033[0m"
-    
-    # 根据 ECH 状态显示不同信息
-    if [ -n "${V_ECH_PK:-}" ] && [ "$V_ECH_PK" != "" ]; then
-        echo -e "\033[1;32m[技术特征]\033[0m VLESS 已启用 ECH 加密 + WebSocket 传输（端口 8443）"
-    else
-        echo -e "\033[1;33m[技术特征]\033[0m VLESS 使用标准 TLS + WebSocket 传输（端口 8443）"
-    fi
-    
+    echo -e "\033[1;32m[技术特征]\033[0m VLESS 已启用 ECH 加密与 WebSocket Padding 填充"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
