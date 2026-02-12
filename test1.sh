@@ -712,7 +712,7 @@ create_config() {
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
 
-    # 1. 变量确定
+    # 1. 端口与密码确定 (保持你的原有逻辑)
     if [ -z "$PORT_HY2" ]; then
         PORT_HY2=$(jq -r '.inbounds[] | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
         [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port)
@@ -722,31 +722,19 @@ create_config() {
     local SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 16)
 
+    # 2. VLESS 变量 (保持你的原有变量名)
     V_UUID=$(jq -r '.. | objects | select(.type == "vless") | .users[0].uuid // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$V_UUID" ] && V_UUID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
-    
-    # 路径处理：确保以 / 开头且不重复
-    V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1 | sed 's/^\///')
-    [ -z "$V_PATH" ] && V_PATH="stream-$(openssl rand -hex 4)"
+    V_PATH=$(jq -r '.. | objects | select(.type == "vless") | .transport.path // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$V_PATH" ] && V_PATH="/stream-$(openssl rand -hex 4)"
 
-    # 2. ECH 处理 (修正：扁平化提取，不使用 key_pair)
-    local ech_enabled="false"
-    local ech_pub=""
-    local ech_priv=""
-    if /usr/bin/sing-box generate ech-keypair > /etc/sing-box/certs/ech.key 2>/dev/null; then
-        ech_pub=$(jq -r '.public_key' /etc/sing-box/certs/ech.key)
-        ech_priv=$(jq -r '.private_key' /etc/sing-box/certs/ech.key)
-        if [ -n "$ech_pub" ] && [ "$ech_pub" != "null" ]; then
-            ech_enabled="true"
-            # 保存公钥用于 display_links 提取
-            echo "$ech_pub" > /etc/sing-box/certs/ech_public.txt
-        fi
-    fi
+    # 3. 彻底移除 ECH 逻辑 (清理残留文件)
+    rm -f /etc/sing-box/certs/ech.key /etc/sing-box/certs/ech_public.txt
 
-    # 3. 写入配置 (VLESS 使用 8443 端口，移除 key_pair 数组结构)
+    # 4. 写入配置 (参考你的成功版本：0.0.0.0 监听, 8443 端口, 补全 ALPN 和 Host)
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "info", "timestamp": true, "output": "/var/log/sing-box.log" },
+  "log": { "level": "fatal", "timestamp": true },
   "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false},
   "inbounds": [
     {
@@ -772,22 +760,17 @@ create_config() {
       "tag": "vless-in",
       "listen": "0.0.0.0",
       "listen_port": 8443,
-      "users": [ { "uuid": "$V_UUID" } ],
+      "users": [ { "uuid": "$V_UUID", "flow": "" } ],
       "tls": {
         "enabled": true, 
         "server_name": "${TLS_DOMAIN:-www.microsoft.com}",
         "alpn": ["h2", "http/1.1"],
         "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
-        "key_path": "/etc/sing-box/certs/privkey.pem",
-        "ech": { 
-          "enabled": $ech_enabled,
-          "public_key": "$ech_pub",
-          "private_key": "$ech_priv"
-        }
+        "key_path": "/etc/sing-box/certs/privkey.pem"
       },
       "transport": { 
         "type": "ws", 
-        "path": "/$V_PATH", 
+        "path": "$V_PATH", 
         "max_early_data": 2048, 
         "early_data_header_name": "Sec-WebSocket-Protocol",
         "headers": { "Host": "${TLS_DOMAIN:-www.microsoft.com}" }
