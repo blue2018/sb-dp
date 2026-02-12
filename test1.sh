@@ -134,27 +134,38 @@ generate_cert() {
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
 
-    # 2. 生成 ECH 密钥对 (适配新旧版本 CLI)
+    # 2. 生成 ECH 密钥对 (适配新旧版本 CLI，取消静默以暴露错误)
     if [ ! -f "$CERT_DIR/ech.key" ]; then
         info "正在生成 ECH 专用加密密钥..."
-        # 尝试新版语法：输出重定向。新版公钥会打印在 stdout，带或不带前缀
-        /usr/bin/sing-box generate ech-keypair "$CERT_DIR/ech.key" > "$CERT_DIR/ech.pub" 2>/dev/null
+        # 尝试新版语法
+        /usr/bin/sing-box generate ech-keypair "$CERT_DIR/ech.key" > "$CERT_DIR/ech.pub" 2>/tmp/sb_ech_err
         
-        # 检查是否生成成功且有内容；若文件为空，说明是旧版双参数语法
-        if [ ! -s "$CERT_DIR/ech.pub" ]; then
-            /usr/bin/sing-box generate ech-keypair "$CERT_DIR/ech.key" "$CERT_DIR/ech.pub" >/dev/null 2>&1
-        else
-            # 针对新版重定向的内容进行清洗，只保留 Base64 密钥部分
-            sed -i 's/Public key: //' "$CERT_DIR/ech.pub"
+        # 如果生成失败或文件不存在/为空
+        if [ ! -f "$CERT_DIR/ech.key" ] || [ ! -s "$CERT_DIR/ech.key" ]; then
+            # 尝试旧版语法
+            /usr/bin/sing-box generate ech-keypair "$CERT_DIR/ech.key" "$CERT_DIR/ech.pub" >>/tmp/sb_ech_err 2>&1
         fi
+
+        # 最终检查：如果还是没生成成功
+        if [ ! -f "$CERT_DIR/ech.key" ]; then
+            err "ECH 密钥生成失败。错误详情："
+            cat /tmp/sb_ech_err
+            exit 1
+        fi
+        
+        # 清洗新版可能带有的前缀文本
+        [ -f "$CERT_DIR/ech.pub" ] && sed -i 's/Public key: //' "$CERT_DIR/ech.pub"
     fi
 
     # 3. 权限与指纹生成
     if [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.key" "$CERT_DIR/ech.pub"
+        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.key"
+        [ -f "$CERT_DIR/ech.pub" ] && chmod 600 "$CERT_DIR/ech.pub"
         succ "ECC 证书与 ECH 密钥对就绪"
-    else err "证书生成失败"; exit 1; fi
+    else 
+        err "证书生成失败"; exit 1
+    fi
 }
 
 # 获取公网IP
