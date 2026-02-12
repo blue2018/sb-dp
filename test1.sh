@@ -123,9 +123,6 @@ generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"; local TMP_ECH="/tmp/ech_out"
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
     
-    # 强制清理旧 ECH 密钥，确保域名匹配
-    rm -f "$CERT_DIR/ech.key" "$CERT_DIR/ech.pub"
-
     # 1. 生成 TLS 证书
     if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
         info "生成 ECC P-256 高性能证书 (域名: $TLS_DOMAIN)..."
@@ -139,18 +136,18 @@ generate_cert() {
 
     # 2. 生成 ECH 密钥 (核心修正：指定域名 + 保留 PEM 标头)
     info "正在为 $TLS_DOMAIN 生成 ECH 密钥对..."
+    # 关键：这里不能用 "dummy"，必须用 $TLS_DOMAIN
     /usr/bin/sing-box generate ech-keypair "$TLS_DOMAIN" > "$TMP_ECH" 2>&1
     
-    # 提取并保留 PEM 标头
+    # 保留完整 PEM 格式，满足 v1.12 内核要求
     sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
     sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
     rm -f "$TMP_ECH"
 
-    # 3. 最终校验与权限 (增加对 ech.key 的校验)
+    # 3. 最终校验与权限
     if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        chmod 644 "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.pub" # 公钥类允许读取
-        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/ech.key"   # 私钥类严格锁定
+        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.key" "$CERT_DIR/ech.pub"
         succ "ECC 证书与 ECH 密钥对就绪"
     else 
         err "证书或 ECH 密钥生成失败"; exit 1
@@ -678,6 +675,7 @@ install_singbox() {
 # ==========================================
 # 配置文件生成
 # ==========================================
+# 配置文件生成 (集成 ECH)
 create_config() {
     local PORT_HY2="${1:-}"
     local cur_bw="${VAR_HY2_BW:-200}"
@@ -725,7 +723,7 @@ create_config() {
         "key_path": "/etc/sing-box/certs/ech.key"
       }
     },
-    "masquerade": "${TLS_DOMAIN:-www.microsoft.com}:443"
+    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
@@ -847,85 +845,54 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    
-    # 初始化变量防止污染
-    RAW_ECH="" 
-
     # 1. 提取 PSK, 端口, 证书路径
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-    [ -z "$data" ] && return 1
-    read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data"
-    
-    # 2. 提取 SNI
+    read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data" || true
+    # 2. 提取 SNI (域名)
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
-    
-    # 3. 提取证书指纹
+    # 3. 提取证书 SHA256 指纹
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    
-    # 4. 读取 ECH 并进行极致 URL 编码
+    # 4. 读取 ECH 并进行 URL 编码
     if [ -f "/etc/sing-box/certs/ech.pub" ]; then
+        # 1. 先提取纯 Base64 字符串
         local raw=$(grep -v "ECH CONFIGS" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
-        # 使用更为稳健的转义方式
+        # 2. 对特殊字符进行百分号编码 (适配客户端解析)
         RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g' | sed 's/%%/%/g')
     fi
 }
 
 display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" v4_status="" v6_status=""
-    
-    # 1. 动态生成节点标签 (使用主机名区分)
-    local v4_tag="$(hostname)_Hy2_ECH_v4"
-    local v6_tag="$(hostname)_Hy2_ECH_v6"
-
-    # 2. 组装基础参数
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
     [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
     [ -n "${RAW_ECH:-}" ] && BASE_PARAM="${BASE_PARAM}&ech=${RAW_ECH}"
     
-    # 3. 定义连通性探测函数 (UDP 探测)
     _do_probe() {
         [ -z "$1" ] && return
-        # 使用 nc 探测 UDP 端口，带 0.3s 容错延迟
         (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
         echo -e "\033[1;32m (已连通)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
     }
     
-    # 4. 异步执行探测，提升显示速度
     if command -v nc >/dev/null 2>&1; then
-        _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & 
-        _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & 
-        wait
+        _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
         v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
-        rm -f /tmp/sb_v4 /tmp/sb_v6
     fi
-
-    # 5. 打印节点标题
     echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m\n"
     
-    # 6. 拼接并显示 IPv4 链接
-    if [ -n "${RAW_IP4:-}" ]; then
-        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${v4_tag}"
+    [ -n "${RAW_IP4:-}" ] && {
+        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_Hy2_ECH_v4"
         echo -e "\033[1;35m[IPv4节点链接]\033[0m$v4_status\n$LINK_V4\n"
         FULL_CLIP="$LINK_V4"
-    fi
-
-    # 7. 拼接并显示 IPv6 链接 (处理 IPv6 括号转义)
-    if [ -n "${RAW_IP6:-}" ]; then
-        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${v6_tag}"
+    }
+    [ -n "${RAW_IP6:-}" ] && {
+        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_Hy2_ECH_v6"
         echo -e "\033[1;36m[IPv6节点链接]\033[0m$v6_status\n$LINK_V6\n"
-        # 如果 v4 存在，则剪贴板内容换行拼接 v6
-        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\\n}$LINK_V6"
-    fi
-
-    # 8. 结尾修饰与剪贴板支持
+        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
+    }
     echo -e "\033[1;34m==========================================\033[0m"
-    echo -e "\033[1;32m[ECH 已激活]\033[0m 流量已加密混入 $RAW_SNI 的 TLS 握手池"
-    
-    # 自动尝试复制到剪贴板 (如果脚本中有定义 copy_to_clipboard 函数)
-    if [ -n "$FULL_CLIP" ] && command -v copy_to_clipboard >/dev/null 2>&1; then
-        copy_to_clipboard "$FULL_CLIP"
-    fi
+    echo -e "\033[1;32m[ECH 已激活]\033[0m 流量已混入大厂标准 TLS 1.3 握手池"
+    [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
 display_system_status() {
