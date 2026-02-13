@@ -7,7 +7,7 @@ set -euo pipefail
 SBOX_ARCH="";            OS_DISPLAY="";          SBOX_CORE="/etc/sing-box/core_script.sh"
 SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测"
 SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM="";      USER_PORT=""
-VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_SALA=""
+VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_ECH=""
 VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
 TLS_DOMAIN_POOL=("www.bing.com" "www.microsoft.com" "itunes.apple.com" "www.icloud.com" "www.7-zip.org" "www.jsdelivr.com")
@@ -118,51 +118,60 @@ prompt_for_port() {
     done
 }
 
-# 生成 ECC P-256 高性能证书
+# 生成 ECC P-256 高性能证书 + ECH 密钥对
 generate_cert() {
-    local CERT_DIR="/etc/sing-box/certs"
-    [ -f "$CERT_DIR/fullchain.pem" ] && return 0
-    info "生成 ECC P-256 高性能证书 (域名: $TLS_DOMAIN)..."
+    local CERT_DIR="/etc/sing-box/certs"; local TMP_ECH="/tmp/ech_out"
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-        -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-        -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" \
-        -addext "basicConstraints=critical,CA:FALSE" \
-        -addext "subjectAltName=DNS:$TLS_DOMAIN" \
-        -addext "extendedKeyUsage=serverAuth" &>/dev/null || \
-    openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -nodes \
-        -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
-        -days 3650 -subj "/CN=$TLS_DOMAIN" &>/dev/null
-    if [ -s "$CERT_DIR/fullchain.pem" ]; then
+    # 1. 生成 TLS 证书
+    if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
+        info "生成 ECC 证书 (域名: $TLS_DOMAIN)..."
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
+            -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" \
+            -addext "basicConstraints=critical,CA:FALSE" \
+            -addext "subjectAltName=DNS:$TLS_DOMAIN" \
+            -addext "extendedKeyUsage=serverAuth" &>/dev/null
+    fi
+    # 2. 生成 ECH 密钥 (保留 PEM 标头)
+    info "生成 $TLS_DOMAIN 的 ECH 密钥对..."
+    /usr/bin/sing-box generate ech-keypair "$TLS_DOMAIN" > "$TMP_ECH" 2>&1
+    sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
+    sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
+    rm -f "$TMP_ECH"
+    # 3. 校验并提取指纹
+    if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem"
-        succ "ECC 证书就绪"
-    else err "证书生成失败"; exit 1; fi
+        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/ech.key" && chmod 644 "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.pub"
+        succ "ECC 证书与 ECH 密钥对就绪"
+    else err "证书或 ECH 密钥生成失败"; exit 1; fi
 }
 
 # 获取公网IP
 get_network_info() {
     info "获取网络信息..."
-    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"
-    local t4="/tmp/.v4" t6="/tmp/.v6"
+    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-    _f() { 
-        local p=$1
-        { curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}'; } || \
-        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api.ipify.org" || \
-        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://ifconfig.me" || echo ""
+    # 1. 探测函数：多接口备选 + 自动清洗
+    _f() {
+        local p=$1; local out=$2
+        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ifconfig.co"; } | tr -d '[:space:]' > "$out" 2>/dev/null
     }
-    _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
-    # 数据清洗
-    [ -s "$t4" ] && RAW_IP4=$(tr -d '[:space:]' < "$t4" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || echo "")
-    [ -s "$t6" ] && RAW_IP6=$(tr -d '[:space:]' < "$t6" | grep -Ei '([a-f0-9:]+:+)+[a-f0-9]+' || echo "")
+    # 2. 异步执行与串行等待
+    _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!; wait $p4 2>/dev/null; wait $p6 2>/dev/null
+    # 3. 结果提取与数据清洗
+    [ -s "$t4" ] && RAW_IP4=$(grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' "$t4")
+    [ -s "$t6" ] && RAW_IP6=$(grep -iE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6")
     rm -f "$t4" "$t6"
-    # 状态判定：只有 RAW_IP6 真的包含冒号才判定 IPv6 可用
-    [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true" || IS_V6_OK="false"
-    [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "错误: 未能探测到任何有效的公网 IP，安装中断"; exit 1; }
-    # 输出信息
-    [ -n "$RAW_IP4" ] && succ "IPv4: $RAW_IP4 [✔]" || info "IPv4: 不可用 (单栈 IPv6 环境)"
-    [ "$IS_V6_OK" = "true" ] && succ "IPv6: $RAW_IP6 [✔]" || info "IPv6: 不可用 (单栈 IPv4 环境)"
+    # 4. 极简风格输出
+    [ -n "$RAW_IP4" ] && \
+        echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || \
+        echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
+    [[ "$RAW_IP6" == *:* ]] && { IS_V6_OK="true"; \
+        echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || \
+        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
+    { [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
 
 # 网络延迟探测模块
@@ -221,25 +230,24 @@ apply_initcwnd_optimization() {
     local silent="${1:-false}" info gw dev mtu mss opts
     command -v ip >/dev/null || return 0
     local current_route=$(ip route show default | head -n1)
-    # 幂等性检查：若已包含 initcwnd 15 则跳过
     echo "$current_route" | grep -q "initcwnd 15" && { [[ "$silent" == "false" ]] && info "InitCWND 已优化，跳过"; INITCWND_DONE="true"; return 0; }
-
-    # 提取核心路由参数
     gw=$(echo "$current_route" | grep -oE 'via [^ ]+' | awk '{print $2}')
     dev=$(echo "$current_route" | grep -oE 'dev [^ ]+' | awk '{print $2}')
     mtu=$(echo "$current_route" | grep -oE 'mtu [0-9]+' | awk '{print $2}' || echo 1500)
     mss=$((mtu - 40))
     opts="initcwnd 15 initrwnd 15 advmss $mss"
 
-    # 执行修改（逻辑依然采用你的高效尝试链）
-    if { [ -n "$gw" ] && [ -n "$dev" ] && ip route change default via "$gw" dev "$dev" $opts 2>/dev/null; } || \
-       { [ -n "$gw" ] && [ -n "$dev" ] && ip route replace default via "$gw" dev "$dev" $opts 2>/dev/null; } || \
-       { [ -n "$dev" ] && ip route replace default dev "$dev" $opts 2>/dev/null; } || \
-       ip route change default $opts 2>/dev/null; then
-        INITCWND_DONE="true"
-        [[ "$silent" == "false" ]] && succ "InitCWND 优化成功 (15/MSS $mss)"
+    if ip route change default $(echo "$current_route" | cut -d' ' -f2-) 2>/dev/null; then
+        if { [ -n "$gw" ] && [ -n "$dev" ] && ip route change default via "$gw" dev "$dev" $opts 2>/dev/null; } || \
+           { [ -n "$gw" ] && [ -n "$dev" ] && ip route replace default via "$gw" dev "$dev" $opts 2>/dev/null; } || \
+           { [ -n "$dev" ] && ip route replace default dev "$dev" $opts 2>/dev/null; } || \
+           ip route change default $opts 2>/dev/null; then
+            INITCWND_DONE="true"
+            [[ "$silent" == "false" ]] && succ "InitCWND 优化成功 (15/MSS $mss)"
+        fi
     else
-        [[ "$silent" == "false" ]] && warn "InitCWND 修改失败（内核或容器限制）"
+        INITCWND_DONE="false"
+        [[ "$silent" == "false" ]] && warn "InitCWND 修改受限，维持系统默认 (10)"
     fi
 }
 
@@ -514,13 +522,17 @@ optimize_system() {
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW} Mbps"
     info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
 	
-    # 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
+	# 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
     local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
     local avail=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "cubic")
-    if [[ "$avail" =~ "bbr3" ]]; then tcp_cca="bbr3"; succ "检测到 BBRv3，激活极致响应模式"
-    elif [[ "$avail" =~ "bbr2" ]]; then tcp_cca="bbr2"; succ "检测到 BBRv2，激活平衡加速模式"
-    elif [[ "$avail" =~ "bbr" ]]; then tcp_cca="bbr"; info "检测到 BBRv1，激活标准加速模式"
+    if [ ! -w "/proc/sys/net/ipv4/tcp_congestion_control" ]; then
+        tcp_cca=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "cubic")
+        warn "内核参数已锁定 (Read-Only)，维持系统默认算法: $tcp_cca"
+    elif [[ "$avail" =~ "bbr3" ]]; then tcp_cca="bbr3"; echo "bbr3" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null && succ "检测到 BBRv3，激活极致响应模式"
+    elif [[ "$avail" =~ "bbr2" ]]; then tcp_cca="bbr2"; echo "bbr2" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null && succ "检测到 BBRv2，激活平衡加速模式"
+    elif [[ "$avail" =~ "bbr" ]]; then tcp_cca="bbr"; echo "bbr" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null && info "检测到 BBRv1，激活标准加速模式"
     else warn "内核不支持 BBR，切换至高兼容 Cubic 模式"; fi
+    [ -w "/proc/sys/net/core/default_qdisc" ] && sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
     if sysctl net.core.default_qdisc 2>/dev/null | grep -q "fq"; then info "FQ 调度器已就绪"; else info "准备激活 FQ 调度器..."; fi
 	
     # 阶段四： 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
@@ -661,14 +673,15 @@ install_singbox() {
 # ==========================================
 # 配置文件生成
 # ==========================================
+# 配置文件生成 (集成 ECH)
 create_config() {
     local PORT_HY2="${1:-}"
-	local cur_bw="${VAR_HY2_BW:-200}"
+    local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
-    local ds="ipv4_only"; local PSK=""; local SALA_PASS=""
+    local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-	local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-	[ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
+    local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
+    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
     # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
@@ -681,11 +694,7 @@ create_config() {
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
 
-    # 3. Salamander 混淆密码确定逻辑
-    [ -f /etc/sing-box/config.json ] && SALA_PASS=$(jq -r '.. | objects | select(.type == "salamander") | .password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$SALA_PASS" ] && SALA_PASS=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 16)
-
-    # 4. 写入 Sing-box 配置文件
+    # 3. 写入 Sing-box 配置文件 (移除 Obfs，添加 ECH)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -701,8 +710,17 @@ create_config() {
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
     "udp_fragment": true,
-    "tls": {"enabled": true, "alpn": ["h3"], "min_version": "1.3", "certificate_path": "/etc/sing-box/certs/fullchain.pem", "key_path": "/etc/sing-box/certs/privkey.pem"},
-    "obfs": {"type": "salamander", "password": "$SALA_PASS"},
+    "tls": {
+      "enabled": true, 
+      "alpn": ["h3"], 
+      "min_version": "1.3", 
+      "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
+      "key_path": "/etc/sing-box/certs/privkey.pem",
+      "ech": {
+        "enabled": true,
+        "key_path": "/etc/sing-box/certs/ech.key"
+      }
+    },
     "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
   }],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
@@ -823,44 +841,45 @@ EOF
 # 信息展示模块
 # ==========================================
 get_env_data() {
-    local CONFIG_FILE="/etc/sing-box/config.json"
+    local CONFIG_FILE="/etc/sing-box/config.json"; RAW_ECH=""
     [ ! -f "$CONFIG_FILE" ] && return 1
-    local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.obfs.password) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-	read -r RAW_PSK RAW_PORT RAW_SALA CERT_PATH <<< "$data" || true
+    # 1. 提取核心数据 (PSK, 端口, 证书路径)
+    local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
+    [ -z "$data" ] && return 1
+    read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data"
+    # 2. 提取 SNI (域名) 与 证书指纹 (FP)
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
-    RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
+    RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
+    # 3. 读取 ECH 并进行极致稳健的 URL 编码 (解决 BusyBox 解析坑)
+    if [ -f "/etc/sing-box/certs/ech.pub" ]; then
+        local raw=$(grep -v "ECH CONFIGS" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
+        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g' | sed 's/\//%%2F/g' | sed 's/=/%%3D/g' | sed 's/%%/%/g')
+    fi
 }
 
 display_links() {
-    local LINK_V4="" LINK_V6="" FULL_CLIP="" v4_status="" v6_status=""
-    local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
-    [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
-    [ -n "${RAW_SALA:-}" ] && BASE_PARAM="${BASE_PARAM}&obfs=salamander&obfs-password=${RAW_SALA}"
-	
-    _do_probe() {
-        [ -z "$1" ] && return
-		(nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
-        echo -e "\033[1;32m (已连通)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
-    }
+    local LINK_V4="" LINK_V6="" FULL_CLIP="" status_info="" hostname_tag="$(hostname)"
+    local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
+    local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" s_text="\033[1;33moffline\033[0m" p_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
+    pgrep sing-box >/dev/null 2>&1 && { s_text="\033[1;33monline\033[0m"; s_icon="\033[1;32m[✔]\033[0m"; }
+    _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
     if command -v nc >/dev/null 2>&1; then
-        _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
-        v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
+        _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 & wait
+        [[ "$(cat /tmp/sb_v4_res 2>/dev/null)" == "OK" || "$(cat /tmp/sb_v6_res 2>/dev/null)" == "OK" ]] && p_icon="\033[1;32m[✔]\033[0m"
     fi
-    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m\n"
-	
-    [ -n "${RAW_IP4:-}" ] && {
-        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v4"
-        echo -e "\033[1;35m[IPv4节点链接]\033[0m$v4_status\n$LINK_V4\n"
-        FULL_CLIP="$LINK_V4"
-    }
-    [ -n "${RAW_IP6:-}" ] && {
-        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_v6"
-        echo -e "\033[1;36m[IPv6节点链接]\033[0m$v6_status\n$LINK_V6\n"
-        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
-    }
-    echo -e "\033[1;34m==========================================\033[0m"
-    [ -n "${RAW_FP:-}" ] && echo -e "\033[1;32m[安全提示]\033[0m 证书 SHA256 指纹已集成，支持强校验"
+
+    echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon | 服务: $s_text $s_icon"
+    if [ -n "${RAW_IP4:-}" ]; then
+        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v4"
+        echo -e "\n\033[1;35m[IPv4节点]\033[0m\n$LINK_V4"; FULL_CLIP="$LINK_V4"
+    fi
+    if [[ "${RAW_IP6:-}" == *:* ]]; then
+        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v6"
+        echo -e "\n\033[1;36m[IPv6节点]\033[0m\n$LINK_V6"; FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
+    fi
+    echo -e "\n\033[1;34m==========================================\033[0m"
+    echo -e "\033[1;32m[ECH 已激活]\033[0m 流量已混入 $RAW_SNI 的 TLS 1.3 握手池"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
@@ -894,7 +913,6 @@ display_system_status() {
 # ==========================================
 create_sb_tool() {
     mkdir -p /etc/sing-box
-    local FINAL_SALA=$(jq -r '.inbounds[0].obfs.password // empty' /etc/sing-box/config.json 2>/dev/null || echo "")
     local CORE_TMP=$(mktemp) || CORE_TMP="/tmp/core_script_$$.sh"
     # 写入固化变量
     cat > "$CORE_TMP" <<EOF
@@ -916,12 +934,11 @@ VAR_SYSTEMD_IOSCHED='$VAR_SYSTEMD_IOSCHED'
 OS_DISPLAY='$OS_DISPLAY'
 TLS_DOMAIN='$TLS_DOMAIN'
 RAW_SNI='${RAW_SNI:-$TLS_DOMAIN}'
-RAW_SALA='$FINAL_SALA'
+RAW_ECH='${RAW_ECH:-}'
 RAW_IP4='${RAW_IP4:-}'
 RAW_IP6='${RAW_IP6:-}'
 IS_V6_OK='${IS_V6_OK:-false}'
 EOF
-
     # 导出函数
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port
         get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard
@@ -990,17 +1007,14 @@ while true; do
         4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
         6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
-           if [ "${cf:-n}" = "y" ] || [ "${cf:-n}" = "Y" ]; then
-               info "正在执行深度卸载..."
-               systemctl stop sing-box zram-swap 2>/dev/null; rc-service sing-box stop 2>/dev/null
-               swapoff -a 2>/dev/null
-               [ -w /sys/block/zram0/reset ] && echo 1 > /sys/block/zram0/reset 2>/dev/null
-               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} \
-                      /etc/systemd/system/{sing-box,zram-swap}.service /etc/init.d/{sing-box,zram-swap} \
-                      /etc/sysctl.d/99-sing-box.conf /tmp/sb_* ~/.acme.sh /swapfile
+           if [[ "${cf,,}" == "y" ]]; then
+               info "正在执行深度卸载..."; systemctl disable --now sing-box zram-swap 2>/dev/null; rc-service sing-box stop 2>/dev/null; rc-update del sing-box default 2>/dev/null
+               swapoff -a 2>/dev/null; [ -w /sys/block/zram0/reset ] && echo 1 > /sys/block/zram0/reset 2>/dev/null
+               [ -n "${RAW_PORT:-}" ] && command -v iptables >/dev/null && { iptables -D INPUT -p udp --dport "$RAW_PORT" -j ACCEPT 2>/dev/null; ip6tables -D INPUT -p udp --dport "$RAW_PORT" -j ACCEPT 2>/dev/null; }
+               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{sing-box,zram-swap}.service /etc/init.d/{sing-box,zram-swap} /etc/sysctl.d/99-sing-box.conf /tmp/sb_* ~/.acme.sh /swapfile
                sed -i '/swapfile/d' /etc/fstab; crontab -l 2>/dev/null | grep -v "acme.sh" | crontab - 2>/dev/null
                printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
-               sysctl -p >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "深度卸载完成"; exit 0
+               sysctl --system >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "深度卸载完成：服务、防火墙及 ECH 密钥已清理"; exit 0
            else info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; fi ;;
         0) exit 0 ;;
     esac
@@ -1025,9 +1039,9 @@ optimize_system
 install_singbox "install"
 generate_cert
 create_config "$USER_PORT"
+get_env_data
 create_sb_tool
 setup_service
-get_env_data
 echo -e "\n\033[1;34m==========================================\033[0m"
 display_system_status
 echo -e "\033[1;34m------------------------------------------\033[0m"
