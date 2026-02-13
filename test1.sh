@@ -303,24 +303,18 @@ EOF
 # 动态 RTT 内存页钳位
 safe_rtt() {
     local dyn_buf="$1" rtt_val="$2" max_udp_pages="$3" udp_min="$4" udp_pre="$5" udp_max="$6" real_rtt_factors="$7" loss_compensation="$8"
-    local dyn_pages=$(( dyn_buf / 4096 ))
-    # 1. 计算探测 BDP：使用补偿后的画像值及丢包补偿系数
-    local probe_pages=$(( real_rtt_factors * 1024 * loss_compensation / 100 ))
-    # 2. 仲裁逻辑：探测值与 dyn_buf 保底值取最大者
+    local dyn_pages=$(( dyn_buf / 4096 )); local probe_pages=$(( real_rtt_factors * 1024 * loss_compensation / 100 ))
+    # 1. 基础仲裁
     rtt_scale_max=$(( probe_pages > dyn_pages ? probe_pages : dyn_pages ))
-    # 3. 延迟梯度补偿：根据实测 RTT 自动切换模式
+    # 2. 补偿逻辑 (增加小内存防溢出：100M- 小鸡 max_udp_pages 通常 < 16384)
     if [ "$rtt_val" -ge 150 ]; then
-        rtt_scale_max=$(( rtt_scale_max * 15 / 10 )); SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (QUIC远航)"
-    else
-        SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (QUIC竞速)"
-    fi
-    # 4. 生成三级梯度 (1.0 : 0.9 : 0.75) 与多级防护
+        local factor=15; [ "$max_udp_pages" -le 16384 ] && factor=12
+        rtt_scale_max=$(( rtt_scale_max * factor / 10 )); SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (QUIC远航)"
+    else SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (QUIC竞速)"; fi
+    # 3. 三级梯度生成 (0.75 : 0.9 : 1.0)
     rtt_scale_pressure=$(( rtt_scale_max * 90 / 100 )); rtt_scale_min=$(( rtt_scale_max * 75 / 100 ))
-	# 激进内存保护 (当超过该档位设定的最大页数时钳位)
-    if [ "$rtt_scale_max" -gt "$max_udp_pages" ]; then
-        rtt_scale_max=$max_udp_pages; rtt_scale_pressure=$(( max_udp_pages * 95 / 100 )); rtt_scale_min=$(( max_udp_pages * 80 / 100 ))
-    fi
-    # 5. 系统全局硬上限最终防护
+    # 4. 档位钳位与物理上限终极对齐 (确保不穿透物理防线)
+    [ "$rtt_scale_max" -gt "$max_udp_pages" ] && { rtt_scale_max=$max_udp_pages; rtt_scale_pressure=$(( max_udp_pages * 95 / 100 )); rtt_scale_min=$(( max_udp_pages * 80 / 100 )); }
     rtt_scale_max=$(( rtt_scale_max < udp_max ? rtt_scale_max : udp_max ))
     rtt_scale_pressure=$(( rtt_scale_pressure < udp_pre ? rtt_scale_pressure : udp_pre ))
     rtt_scale_min=$(( rtt_scale_min < udp_min ? rtt_scale_min : udp_min ))
