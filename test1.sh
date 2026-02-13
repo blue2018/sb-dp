@@ -867,21 +867,19 @@ display_links() {
     local s_icon="\033[1;31m[✖]\033[0m"
 
     # 2. 判定服务与 UDP 端口状态
-    if pgrep sing-box >/dev/null 2>&1; then
+   if pgrep sing-box >/dev/null 2>&1; then
         s_text="\033[1;33monline\033[0m"
         s_icon="\033[1;32m[✔]\033[0m"
 
-        # 核心：内核级 UDP 账本比对 (支持 IPv4 & IPv6)
-        # 将端口转为大写十六进制 (例如 25677 -> 644D)
         local hex_port=$(printf "%04X" "$RAW_PORT" | tr '[:lower:]' '[:upper:]')
         
-        # 检查内核 UDP 账本，确保端口已被进程占用
-        # 匹配格式为 ":端口号 " 后面带空格，确保唯一性
+        # 第一次尝试
         if grep -qE ":$hex_port[[:space:]]+" /proc/net/udp /proc/net/udp6 2>/dev/null; then
             p_icon="\033[1;32m[✔]\033[0m"
         else
-            # 备选方案：如果内核账本由于权限问题读取失败，使用 netstat 兜底
-            if netstat -auln 2>/dev/null | grep -q ":$RAW_PORT "; then
+            # 如果没找到，可能还在启动中，等 0.5 秒再给最后一次机会
+            sleep 0.5
+            if grep -qE ":$hex_port[[:space:]]+" /proc/net/udp /proc/net/udp6 2>/dev/null; then
                 p_icon="\033[1;32m[✔]\033[0m"
             fi
         fi
