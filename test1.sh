@@ -165,15 +165,13 @@ get_network_info() {
     [ -s "$t6" ] && RAW_IP6=$(grep -iE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6")
     rm -f "$t4" "$t6"
     # 4. 极简风格输出
-    echo -e ""
     [ -n "$RAW_IP4" ] && \
         echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || \
         echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
     [[ "$RAW_IP6" == *:* ]] && { IS_V6_OK="true"; \
         echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || \
         echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
-    echo -e ""
-    [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "未能探测到公网 IP，安装中断"; exit 1; }
+    { [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
 
 # 网络延迟探测模块
