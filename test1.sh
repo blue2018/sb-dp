@@ -860,48 +860,23 @@ display_links() {
     local hostname_tag="$(hostname)"
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
     local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m"
-    local s_text="\033[1;31moffline\033[0m"
+    local s_text="\033[1;33moffline\033[0m"
     local p_icon="\033[1;31m[✖]\033[0m"
     local s_icon="\033[1;31m[✖]\033[0m"
-    
-    # 检查服务状态
-    if pgrep -x sing-box >/dev/null 2>&1; then
-        s_text="\033[1;32monline\033[0m"
+    if pgrep sing-box >/dev/null 2>&1; then
+        s_text="\033[1;33monline\033[0m"
         s_icon="\033[1;32m[✔]\033[0m"
-    fi
-    
-    # 检查端口是否在防火墙中开放（匹配 apply_firewall 的逻辑）
-    if command -v ufw >/dev/null 2>&1; then
-        # ufw 检测
-        if ufw status 2>/dev/null | grep -q "^$RAW_PORT/udp.*ALLOW"; then
-            p_icon="\033[1;32m[✔]\033[0m"
-        fi
-    elif command -v firewall-cmd >/dev/null 2>&1; then
-        # firewalld 检测
-        if firewall-cmd --list-ports 2>/dev/null | grep -qw "$RAW_PORT/udp"; then
-            p_icon="\033[1;32m[✔]\033[0m"
-        fi
-    elif command -v iptables >/dev/null 2>&1; then
-        # iptables 检测（INPUT 链）
-        if iptables -nL INPUT 2>/dev/null | grep -E "ACCEPT.*udp.*dpt:$RAW_PORT" | grep -q .; then
-            p_icon="\033[1;32m[✔]\033[0m"
-        fi
-    else
-        # 无防火墙工具，检查服务是否监听端口
-        if command -v ss >/dev/null 2>&1; then
-            if ss -ulnH "sport = :$RAW_PORT" 2>/dev/null | grep -q ":$RAW_PORT"; then
-                p_icon="\033[1;32m[✔]\033[0m"
-            fi
-        elif [ -f /proc/net/udp ]; then
-            local hex_port=$(printf "%04X" "$RAW_PORT")
-            if grep -E ":[[:space:]]*${hex_port}[[:space:]]" /proc/net/udp /proc/net/udp6 2>/dev/null | grep -q .; then
-                p_icon="\033[1;32m[✔]\033[0m"
-            fi
-        fi
+        _check_port() {
+            local ip="$1"
+            [ -z "$ip" ] && return 1
+            (nc -z -u -w 1 "$ip" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$ip" "$RAW_PORT"; }) >/dev/null 2>&1
+        }
+
+        if _check_port "${RAW_IP4:-}" || _check_port "${RAW_IP6:-}"; then p_icon="\033[1;32m[✔]\033[0m"; fi
     fi
     status_info="端口: $p_text $p_icon  |  服务: $s_text $s_icon"
-	
     echo -e "\n\033[1;32m[节点信息]\033[0m >>> $status_info"
+
     if [ -n "${RAW_IP4:-}" ]; then
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v4"
         echo -e "\n\033[1;35m[IPv4节点]\033[0m\n$LINK_V4"
