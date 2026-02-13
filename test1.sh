@@ -357,37 +357,31 @@ EOF
 
 # 网卡核心负载加速（RPS/XPS/批处理密度）
 apply_nic_core_boost() {
-    local IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
+	local IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
     [ -z "$IFACE" ] && return 0
-    local real_c="$1" bgt="$2" usc="$3" mem_total="$4" driver=""
-    
-    # 1. 软中断预算与驱动识别
+    local real_c="$1" bgt="$2" usc="$3" mem_total="$4" target_qlen="$5" t_usc="$6" ring="$7" driver=""
+    # 1. 软中断预算 (由 optimize_system 动态传入)
     sysctl -w net.core.netdev_budget="$bgt" net.core.netdev_budget_usecs="$usc" >/dev/null 2>&1
     [ -L "/sys/class/net/$IFACE/device/driver" ] && driver=$(basename "$(readlink "/sys/class/net/$IFACE/device/driver")")
-    # 2. 队列深度钳位：100M- 小鸡严禁大队列，防止数据包积压吃掉物理内存
-    local target_qlen=5000; [ "$mem_total" -lt 100 ] && target_qlen=2000
-    [ "$driver" = "virtio_net" ] || [ "$driver" = "veth" ] && target_qlen=$((target_qlen/2))
-    
-    # 3. 硬件特性调优
+    # 2. 针对虚拟化环境的二度钳位
+    [[ "$driver" =~ "virtio" || "$driver" =~ "veth" ]] && target_qlen=$((target_qlen / 2))
+    # 3. 硬件层应用
     if [ -d "/sys/class/net/$IFACE" ]; then
-        ip link set dev "$IFACE" txqueuelen "$target_qlen" 2>/dev/null
+        (ip link set dev "$IFACE" txqueuelen "$target_qlen" 2>/dev/null &)
         if command -v ethtool >/dev/null 2>&1; then
-            # 开启 GRO/GSO (降CPU负载)，严禁开启 LRO (会导致转发丢包)
-            ethtool -K "$IFACE" gro on gso on tso on lro off 2>/dev/null
-            # 中断聚合优化：内存越小，延迟阈值要越高，以合并更多包减少中断频率
-            local tuned_usc=100; [ "$mem_total" -lt 100 ] && tuned_usc=250
-            ethtool -C "$IFACE" rx-usecs "$tuned_usc" tx-usecs "$tuned_usc" 2>/dev/null
-            # 环形缓冲区控制：100M- 小鸡维持默认或极小，防止 Buffer 溢出物理内存
-            local ring=1024; [ "$mem_total" -lt 100 ] && ring=512
-            ethtool -G "$IFACE" rx "$ring" tx "$ring" 2>/dev/null
+            # 基础卸载：开启 GRO/GSO (降CPU)，严禁 LRO (转发致命)
+            ethtool -K "$IFACE" gro on gso on tso on lro off 2>/dev/null || true
+            # 中断聚合：小内存增加延迟阈值，强制 CPU 合并处理数据包
+            ethtool -C "$IFACE" rx-usecs "$t_usc" tx-usecs "$t_usc" 2>/dev/null || true
+            # 环形缓冲区：小内存缩减 Buffer，防止网卡占用过多物理内存
+            ethtool -G "$IFACE" rx "$ring" tx "$ring" 2>/dev/null || true
         fi
     fi
-    
-    # 4. 多核分发优化 (RPS/XPS)：仅多核开启，单核开启无意义且浪费内核周期
+    # 4. 多核分发 (RPS/XPS) 自动匹配
     if [ "$real_c" -ge 2 ] && [ -d "/sys/class/net/$IFACE/queues" ]; then
         local MASK=$(printf '%x' $(( (1<<real_c)-1 )))
         for q in /sys/class/net/"$IFACE"/queues/{rx,tx}-*/{r,x}ps_cpus; do
-            [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null
+            [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
         done
     fi
     info "NIC 优化 → 网卡: $IFACE | 队列: $target_qlen | 聚合: ${tuned_usc:-def}us | 环形: ${ring:-def}"
@@ -420,7 +414,7 @@ optimize_system() {
     local rtt_res=($(probe_network_rtt)); local mem_total=$(probe_memory_total)
 	local rtt_avg="${rtt_res[0]:-150}" real_rtt_factors="${rtt_res[1]:-130}" loss_compensation="${rtt_res[2]:-100}"
     local real_c="$CPU_CORE" ct_max=16384 ct_udp_to=30 ct_stream_to=30
-    local dyn_buf g_procs g_wnd g_buf net_bgt net_usc tcp_rmem_max
+    local dyn_buf g_procs g_wnd g_buf net_bgt net_usc tcp_rmem_max target_qlen t_usc ring
     local max_udp_mb max_udp_pages udp_mem_global_min udp_mem_global_pressure udp_mem_global_max
     local swappiness_val="${SWAPPINESS_VAL:-10}" busy_poll_val="${BUSY_POLL_VAL:-0}"
     
@@ -434,6 +428,7 @@ optimize_system() {
         SBOX_MEM_HIGH="$((mem_total * 86 / 100))M"; SBOX_MEM_MAX="$((mem_total * 96 / 100))M"
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
         g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
+		target_qlen=10000; t_usc=100; ring=2048
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
         VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 55 / 100))
@@ -441,6 +436,7 @@ optimize_system() {
         SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 95 / 100))M"
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
         g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
+		target_qlen=8000;  t_usc=150; ring=1024
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
         VAR_HY2_BW="200"; max_udp_mb=$((mem_total * 50 / 100))
@@ -449,6 +445,7 @@ optimize_system() {
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         swappiness_val=10; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
+		target_qlen=5000;  t_usc=150; ring=1024
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
         VAR_HY2_BW="100"; max_udp_mb=$((mem_total * 45 / 100)) 
@@ -456,6 +453,7 @@ optimize_system() {
         SBOX_MEM_HIGH="$((mem_total * 75 / 100))M"; SBOX_MEM_MAX="$((mem_total * 85 / 100))M"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=2097152
         g_procs=1; swappiness_val=10; busy_poll_val=0; ct_max=16384; ct_stream_to=30
+		target_qlen=2000;  t_usc=250; ring=512
         SBOX_OPTIMIZE_LEVEL="64M 激进版"
     fi
 
@@ -505,7 +503,7 @@ optimize_system() {
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
 	apply_initcwnd_optimization "false"
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf" "$real_c" "$mem_total"
-    apply_nic_core_boost "$real_c" "$net_bgt" "$net_usc" "$mem_total"
+    apply_nic_core_boost "$real_c" "$net_bgt" "$net_usc" "$mem_total" "$target_qlen" "$t_usc" "$ring"
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW} Mbps"
     info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
 	
