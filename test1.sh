@@ -357,47 +357,39 @@ EOF
 
 # 网卡核心负载加速（RPS/XPS/批处理密度）
 apply_nic_core_boost() {
+    # 1. 寻找默认出口网卡
     local IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
     [ -z "$IFACE" ] && return 0
     local real_c="$1" bgt="$2" usc="$3" mem_total="$4" target_qlen="$5" t_usc="$6" ring="$7" driver=""
-    
-    # 1. 软中断预算 (由 optimize_system 动态传入)
-    sysctl -w net.core.netdev_budget="$bgt" net.core.netdev_budget_usecs="$usc" >/dev/null 2>&1
+    # 2. 内核软中断预算优化 (使用传入的 bgt 和 usc)
+    sysctl -w net.core.netdev_budget="$bgt" net.core.netdev_budget_usecs="$usc" >/dev/null 2>&1 || true
+    # 3. 驱动识别
     [ -L "/sys/class/net/$IFACE/device/driver" ] && driver=$(basename "$(readlink "/sys/class/net/$IFACE/device/driver")")
-    
-    # 2. 针对虚拟化环境的二度钳位
-    [[ "$driver" =~ "virtio" || "$driver" =~ "veth" ]] && target_qlen=$((target_qlen / 2))
-    
-    # 3. 硬件层应用 (核心防闪断逻辑)
+    # 4. 针对虚拟化环境的二度钳位 (在 optimize_system 设定的基础值上调整)
+    case "$driver" in
+        virtio_net|veth|"") target_qlen=$((target_qlen / 2)) ;;
+    esac
+    # 5. 链路层特征与硬件卸载优化
     if [ -d "/sys/class/net/$IFACE" ]; then
-        # 异步修改 txqueuelen，防止阻塞当前进程
-        (ip link set dev "$IFACE" txqueuelen "$target_qlen" 2>/dev/null &)
-        
+        ip link set dev "$IFACE" txqueuelen "$target_qlen" 2>/dev/null || true     
         if command -v ethtool >/dev/null 2>&1; then
-            # A. 安全操作：开启卸载特性 (通常不会导致断网)
             ethtool -K "$IFACE" gro on gso on tso on lro off 2>/dev/null || true
-            
-            # B. 潜在风险操作：使用 (nohup ... &) 彻底脱离父进程执行
-            # 这样即便网卡重置导致瞬时断网，脚本也不会因为 SSH 信号中断而停止执行
-            (
-                # 稍作延迟，确保脚本主流程已经跑完并打印了 info
-                sleep 1
-                # 调整中断聚合
-                ethtool -C "$IFACE" rx-usecs "$t_usc" tx-usecs "$t_usc" 2>/dev/null
-                # 调整环形缓冲区 (这是最容易导致中断的一行)
-                ethtool -G "$IFACE" rx "$ring" tx "$ring" 2>/dev/null
-            ) >/dev/null 2>&1 &
+            # 使用传入的 t_usc (中断延迟阈值)
+            ethtool -C "$IFACE" rx-usecs "$t_usc" tx-usecs "$t_usc" 2>/dev/null || true
+            # 使用传入的 ring (环形缓冲区大小)
+            ethtool -G "$IFACE" rx "$ring" tx "$ring" 2>/dev/null || true
         fi
     fi
-    
-    # 4. 多核分发 (RPS/XPS) 自动匹配
+    # 6. 多核分发优化 (RPS/XPS)
     if [ "$real_c" -ge 2 ] && [ -d "/sys/class/net/$IFACE/queues" ]; then
         local MASK=$(printf '%x' $(( (1<<real_c)-1 )))
-        for q in /sys/class/net/"$IFACE"/queues/{rx,tx}-*/{r,x}ps_cpus; do
+        for q in /sys/class/net/"$IFACE"/queues/rx-*/rps_cpus; do
+            [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
+        done
+        for q in /sys/class/net/"$IFACE"/queues/tx-*/xps_cpus; do
             [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
         done
     fi
-    
     info "NIC 优化 → 网卡: $IFACE | 队列: $target_qlen | 聚合: ${t_usc}us | 环形: $ring"
 }
 
