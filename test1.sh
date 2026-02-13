@@ -361,22 +361,21 @@ apply_nic_core_boost() {
     local IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
     [ -z "$IFACE" ] && return 0
     local real_c="$1" bgt="$2" usc="$3" mem_total="$4" target_qlen="$5" t_usc="$6" ring="$7" driver=""
-    # 2. 内核软中断预算优化 (使用传入的 bgt 和 usc)
+    # 2. 内核软中断预算优化
     sysctl -w net.core.netdev_budget="$bgt" net.core.netdev_budget_usecs="$usc" >/dev/null 2>&1 || true
-    # 3. 驱动识别
+    # 3. 驱动识别与发送队列 (TXQLEN) 动态调整
     [ -L "/sys/class/net/$IFACE/device/driver" ] && driver=$(basename "$(readlink "/sys/class/net/$IFACE/device/driver")")
-    # 4. 针对虚拟化环境的二度钳位 (在 optimize_system 设定的基础值上调整)
+    # 4. 针对虚拟化环境的二度钳位 (在传入的 target_qlen 基础上判断)
     case "$driver" in
         virtio_net|veth|"") target_qlen=$((target_qlen / 2)) ;;
+        *) : ;;
     esac
     # 5. 链路层特征与硬件卸载优化
     if [ -d "/sys/class/net/$IFACE" ]; then
         ip link set dev "$IFACE" txqueuelen "$target_qlen" 2>/dev/null || true     
         if command -v ethtool >/dev/null 2>&1; then
             ethtool -K "$IFACE" gro on gso on tso on lro off 2>/dev/null || true
-            # 使用传入的 t_usc (中断延迟阈值)
             ethtool -C "$IFACE" rx-usecs "$t_usc" tx-usecs "$t_usc" 2>/dev/null || true
-            # 使用传入的 ring (环形缓冲区大小)
             ethtool -G "$IFACE" rx "$ring" tx "$ring" 2>/dev/null || true
         fi
     fi
@@ -390,7 +389,7 @@ apply_nic_core_boost() {
             [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
         done
     fi
-    info "NIC 优化 → 网卡: $IFACE | 队列: $target_qlen | 聚合: ${t_usc}us | 环形: $ring"
+    info "NIC 优化 → 网卡: $IFACE | 队列: $target_qlen | 中断延迟: ${t_usc}us | 环形缓冲区: $ring"
 }
 
 #防火墙开放端口
