@@ -868,7 +868,7 @@ display_links() {
     _do_probe() {
         local target=$1; local mode=$2; local res=""
         [ -z "$target" ] && return
-        netstat -an | grep "LISTEN" | grep -q ":${RAW_PORT} " && res="\033[1;32m[服务活跃]\033[0m" || res="\033[1;31m[服务离线]\033[0m"
+        pgrep sing-box >/dev/null 2>&1 && res="\033[1;32m[服务活跃]\033[0m" || res="\033[1;31m[服务离线]\033[0m"
         nc -z -u -w 1 $([ "$mode" = "6" ] && echo "-6") "$target" "$RAW_PORT" >/dev/null 2>&1 && res="${res} \033[1;32m(端口开放)\033[0m" || res="${res} \033[1;33m(端口受阻)\033[0m"
         echo "$res"
     }
