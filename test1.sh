@@ -865,8 +865,10 @@ display_links() {
     if [ -n "$sb_pid" ]; then
         s_text="\033[1;33monline\033[0m"
         s_icon="\033[1;32m[✔]\033[0m"
-        if netstat -anp 2>/dev/null | grep ":$RAW_PORT" | grep -q "/sing-box"; then
-             p_icon="\033[1;32m[✔]\033[0m"
+        local hex_port=$(printf "%04X" "$RAW_PORT" 2>/dev/null)
+        if grep -q ":$hex_port" /proc/net/udp 2>/dev/null || \
+           grep -q ":$hex_port" /proc/net/udp6 2>/dev/null; then
+            p_icon="\033[1;32m[✔]\033[0m"
         fi
     fi
     status_info="端口: $p_text $p_icon  |  服务: $s_text $s_icon"
