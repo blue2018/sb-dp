@@ -523,13 +523,17 @@ optimize_system() {
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW} Mbps"
     info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
 	
-    # 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
+	# 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
     local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
     local avail=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "cubic")
-    if [[ "$avail" =~ "bbr3" ]]; then tcp_cca="bbr3"; succ "检测到 BBRv3，激活极致响应模式"
-    elif [[ "$avail" =~ "bbr2" ]]; then tcp_cca="bbr2"; succ "检测到 BBRv2，激活平衡加速模式"
-    elif [[ "$avail" =~ "bbr" ]]; then tcp_cca="bbr"; info "检测到 BBRv1，激活标准加速模式"
+    if [ ! -w "/proc/sys/net/ipv4/tcp_congestion_control" ]; then
+        tcp_cca=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "cubic")
+        warn "内核参数已锁定 (Read-Only)，维持系统默认算法: $tcp_cca"
+    elif [[ "$avail" =~ "bbr3" ]]; then tcp_cca="bbr3"; echo "bbr3" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null && succ "检测到 BBRv3，激活极致响应模式"
+    elif [[ "$avail" =~ "bbr2" ]]; then tcp_cca="bbr2"; echo "bbr2" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null && succ "检测到 BBRv2，激活平衡加速模式"
+    elif [[ "$avail" =~ "bbr" ]]; then tcp_cca="bbr"; echo "bbr" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null && info "检测到 BBRv1，激活标准加速模式"
     else warn "内核不支持 BBR，切换至高兼容 Cubic 模式"; fi
+    [ -w "/proc/sys/net/core/default_qdisc" ] && sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
     if sysctl net.core.default_qdisc 2>/dev/null | grep -q "fq"; then info "FQ 调度器已就绪"; else info "准备激活 FQ 调度器..."; fi
 	
     # 阶段四： 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
