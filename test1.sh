@@ -861,19 +861,13 @@ display_links() {
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
     local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m"; local s_text="\033[1;33moffline\033[0m"
     local p_icon="\033[1;31m[✖]\033[0m"; local s_icon="\033[1;31m[✖]\033[0m"
-
-	if pgrep sing-box >/dev/null 2>&1; then
+	local sb_pid=$(pgrep sing-box)
+    if [ -n "$sb_pid" ]; then
         s_text="\033[1;33monline\033[0m"
         s_icon="\033[1;32m[✔]\033[0m"
-        local count=0
-        while [ $count -lt 5 ]; do
-            if netstat -anp 2>/dev/null | grep -qE "[:.]${RAW_PORT} .*sing-box"; then
-                p_icon="\033[1;32m[✔]\033[0m"
-                break
-            fi
-            sleep 0.2
-            count=$((count + 1))
-        done
+        if netstat -anp 2>/dev/null | grep ":$RAW_PORT" | grep -q "/sing-box"; then
+             p_icon="\033[1;32m[✔]\033[0m"
+        fi
     fi
     status_info="端口: $p_text $p_icon  |  服务: $s_text $s_icon"
 	
