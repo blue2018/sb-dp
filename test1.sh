@@ -843,22 +843,20 @@ EOF
 # 信息展示模块
 # ==========================================
 get_env_data() {
-    local CONFIG_FILE="/etc/sing-box/config.json"
+    local CONFIG_FILE="/etc/sing-box/config.json"; RAW_ECH=""
     [ ! -f "$CONFIG_FILE" ] && return 1
-    # 1. 提取 PSK, 端口, 证书路径
+    # 1. 提取核心数据 (PSK, 端口, 证书路径)
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-    read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data" || true
-    # 2. 提取 SNI (域名)
+    [ -z "$data" ] && return 1
+    read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data"
+    # 2. 提取 SNI (域名) 与 证书指纹 (FP)
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
-    # 3. 提取证书 SHA256 指纹
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
-    RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    # 4. 读取 ECH 并进行 URL 编码
+    RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
+    # 3. 读取 ECH 并进行极致稳健的 URL 编码 (解决 BusyBox 解析坑)
     if [ -f "/etc/sing-box/certs/ech.pub" ]; then
-        # 1. 先提取纯 Base64 字符串
         local raw=$(grep -v "ECH CONFIGS" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
-        # 2. 对特殊字符进行百分号编码 (适配客户端解析)
-        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g' | sed 's/%%/%/g')
+        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g' | sed 's/\//%%2F/g' | sed 's/=/%%3D/g' | sed 's/%%/%/g')
     fi
 }
 
