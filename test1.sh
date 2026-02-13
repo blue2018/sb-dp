@@ -859,32 +859,17 @@ display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" status_info=""
     local hostname_tag="$(hostname)"
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
-    
-    # 1. 初始状态设定 (文字统一黄色)
     local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m"
     local s_text="\033[1;33moffline\033[0m"
     local p_icon="\033[1;31m[✖]\033[0m"
     local s_icon="\033[1;31m[✖]\033[0m"
-
-    # 2. 判定服务与 UDP 端口状态
-   if pgrep sing-box >/dev/null 2>&1; then
+    if pgrep sing-box >/dev/null 2>&1; then
         s_text="\033[1;33monline\033[0m"
         s_icon="\033[1;32m[✔]\033[0m"
-
-        local hex_port=$(printf "%04X" "$RAW_PORT" | tr '[:lower:]' '[:upper:]')
-        
-        # 第一次尝试
-        if grep -qE ":$hex_port[[:space:]]+" /proc/net/udp /proc/net/udp6 2>/dev/null; then
+        if (nc -z -u -w 1 127.0.0.1 "$RAW_PORT" || { sleep 0.3; nc -z -u -w 3 127.0.0.1 "$RAW_PORT"; }) >/dev/null 2>&1; then
             p_icon="\033[1;32m[✔]\033[0m"
-        else
-            # 如果没找到，可能还在启动中，等 0.5 秒再给最后一次机会
-            sleep 0.5
-            if grep -qE ":$hex_port[[:space:]]+" /proc/net/udp /proc/net/udp6 2>/dev/null; then
-                p_icon="\033[1;32m[✔]\033[0m"
-            fi
         fi
     fi
-
     status_info="端口: $p_text $p_icon  |  服务: $s_text $s_icon"
 	
     echo -e "\n\033[1;32m[节点信息]\033[0m >>> $status_info"
