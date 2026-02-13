@@ -859,28 +859,34 @@ display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" status_info=""
     local hostname_tag="$(hostname)"
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
+    
+    # 1. 初始状态设定 (文字统一黄色)
     local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m"
-	local s_text="\033[1;33moffline\033[0m"
+    local s_text="\033[1;33moffline\033[0m"
     local p_icon="\033[1;31m[✖]\033[0m"
-	local s_icon="\033[1;31m[✖]\033[0m"
-	if pgrep sing-box >/dev/null 2>&1; then
+    local s_icon="\033[1;31m[✖]\033[0m"
+
+    # 2. 判定服务与 UDP 端口状态
+    if pgrep sing-box >/dev/null 2>&1; then
         s_text="\033[1;33monline\033[0m"
         s_icon="\033[1;32m[✔]\033[0m"
 
-        # 1. 将端口转为绝对的大写十六进制 (例如 25677 -> 644D)
+        # 核心：内核级 UDP 账本比对 (支持 IPv4 & IPv6)
+        # 将端口转为大写十六进制 (例如 25677 -> 644D)
         local hex_port=$(printf "%04X" "$RAW_PORT" | tr '[:lower:]' '[:upper:]')
         
-        # 2. 精准匹配：":十六进制端口" 后面必须紧跟一个空格或制表符
-        # 这种匹配方式无视 IPv4/IPv6，只看 127.0.0.1 或 0.0.0.0 对应的端口列
-        if grep -qE ":$hex_port[[:space:]]+" /proc/net/udp* 2>/dev/null; then
+        # 检查内核 UDP 账本，确保端口已被进程占用
+        # 匹配格式为 ":端口号 " 后面带空格，确保唯一性
+        if grep -qE ":$hex_port[[:space:]]+" /proc/net/udp /proc/net/udp6 2>/dev/null; then
             p_icon="\033[1;32m[✔]\033[0m"
         else
-            # 如果内核账本没找到，最后给 netstat 一个机会（不带参数，只搜文本）
+            # 备选方案：如果内核账本由于权限问题读取失败，使用 netstat 兜底
             if netstat -auln 2>/dev/null | grep -q ":$RAW_PORT "; then
                 p_icon="\033[1;32m[✔]\033[0m"
             fi
         fi
     fi
+
     status_info="端口: $p_text $p_icon  |  服务: $s_text $s_icon"
 	
     echo -e "\n\033[1;32m[节点信息]\033[0m >>> $status_info"
