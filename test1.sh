@@ -662,7 +662,6 @@ install_singbox() {
 # ==========================================
 # 配置文件生成
 # ==========================================
-# 配置文件生成 (集成 ECH)
 create_config() {
     local PORT_HY2="${1:-}"
     local cur_bw="${VAR_HY2_BW:-200}"
@@ -729,7 +728,7 @@ setup_service() {
     local mem_total=$(probe_memory_total); local io_prio=4
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
     [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
-    [ "$mem_total" -lt 200 ] && io_prio=7 
+    [ "$mem_total" -lt 200 ] && io_prio=7
     local final_nice="$cur_nice"
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
     if ! renice "$cur_nice" $$ >/dev/null 2>&1; then
