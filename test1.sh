@@ -856,33 +856,24 @@ get_env_data() {
 }
 
 display_links() {
-    local LINK_V4="" LINK_V6="" FULL_CLIP="" v4_info="" v6_info=""
+    local LINK_V4="" LINK_V6="" FULL_CLIP="" status_info=""
     local hostname_tag="$(hostname)"; sleep 0.5
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
-    # 进程状态判定 + 内核监听补偿探测
-    _do_probe() {
-        local target=$1; local mode=$2; local res=""; local alive=false
-        [ -z "$target" ] && return
-        pgrep sing-box >/dev/null 2>&1 && { res="\033[1;32m服务活跃\033[0m"; alive=true; } || res="\033[1;31m服务离线\033[0m"
-        { nc -z -u -w 1 $([ "$mode" = "6" ] && echo "-6") "$target" "$RAW_PORT" >/dev/null 2>&1 || \
-          { [ "$alive" = true ] && netstat -an | grep "LISTEN" | grep -q ":${RAW_PORT} "; }; } && \
-          res="${res} | \033[1;32m端口开放\033[0m" || res="${res} | \033[1;33m端口受阻\033[0m"
-        echo "$res"
-    }
-    [ -n "${RAW_IP4:-}" ] && _do_probe "$RAW_IP4" "4" > /tmp/sb_v4 2>&1 &
-    [ -n "${RAW_IP6:-}" ] && _do_probe "$RAW_IP6" "6" > /tmp/sb_v6 2>&1 &
-    wait
-    [ -f /tmp/sb_v4 ] && { v4_info=$(cat /tmp/sb_v4); rm -f /tmp/sb_v4; }
-    [ -f /tmp/sb_v6 ] && { v6_info=$(cat /tmp/sb_v6); rm -f /tmp/sb_v6; }
-    echo -e "\n\033[1;32m[节点信息]\033[0m >>> 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m"
+    # 1. 核心自检：端口与进程状态 (由绿色/红色标注)
+    local p_icon="\033[1;31m[✖]\033[0m" s_info="\033[1;31moffline [✖]\033[0m"
+    pgrep sing-box >/dev/null 2>&1 && s_info="\033[1;32monline [✔]\033[0m"
+    netstat -an | grep "LISTEN" | grep -q ":${RAW_PORT} " && p_icon="\033[1;32m[✔]\033[0m"
+    status_info="端口: ${RAW_PORT:-"未知"} $p_icon  |  服务: $s_info"
+	
+    echo -e "\n\033[1;32m[节点信息]\033[0m >>> $status_info"
     if [ -n "${RAW_IP4:-}" ]; then
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v4"
-        echo -e "\n\033[1;35m[IPv4节点]\033[0m   $v4_info\n$LINK_V4"
+        echo -e "\n\033[1;35m[IPv4节点]\033[0m\n$LINK_V4"
         FULL_CLIP="$LINK_V4"
     fi
-    if [ -n "${RAW_IP6:-}" ]; then
+    if [[ "${RAW_IP6:-}" == *:* ]]; then
         LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v6"
-        echo -e "\n\033[1;36m[IPv6节点]\033[0m   $v6_info\n$LINK_V6"
+        echo -e "\n\033[1;36m[IPv6节点]\033[0m\n$LINK_V6"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
     fi
     echo -e "\n\033[1;34m==========================================\033[0m"
