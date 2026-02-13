@@ -860,35 +860,44 @@ display_links() {
     local hostname_tag="$(hostname)"
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
     local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m"
-    local s_text="\033[1;33moffline\033[0m"
+    local s_text="\033[1;31moffline\033[0m"
     local p_icon="\033[1;31m[✖]\033[0m"
     local s_icon="\033[1;31m[✖]\033[0m"
     
+    # 检查服务状态
     if pgrep -x sing-box >/dev/null 2>&1; then
         s_text="\033[1;32monline\033[0m"
         s_icon="\033[1;32m[✔]\033[0m"
     fi
     
-    # 检查防火墙端口开放状态
-    local port_open=false
-    if command -v iptables >/dev/null 2>&1; then
-        # 检查 iptables 规则
-        if iptables -L INPUT -n 2>/dev/null | grep -E "udp.*dpt:$RAW_PORT" | grep -q ACCEPT; then
-            port_open=true
+    # 检查端口是否在防火墙中开放（匹配 apply_firewall 的逻辑）
+    if command -v ufw >/dev/null 2>&1; then
+        # ufw 检测
+        if ufw status 2>/dev/null | grep -q "^$RAW_PORT/udp.*ALLOW"; then
+            p_icon="\033[1;32m[✔]\033[0m"
         fi
     elif command -v firewall-cmd >/dev/null 2>&1; then
-        # 检查 firewalld
+        # firewalld 检测
         if firewall-cmd --list-ports 2>/dev/null | grep -qw "$RAW_PORT/udp"; then
-            port_open=true
+            p_icon="\033[1;32m[✔]\033[0m"
         fi
-    elif command -v ufw >/dev/null 2>&1; then
-        # 检查 ufw
-        if ufw status 2>/dev/null | grep -E "$RAW_PORT.*ALLOW" | grep -q udp; then
-            port_open=true
+    elif command -v iptables >/dev/null 2>&1; then
+        # iptables 检测（INPUT 链）
+        if iptables -nL INPUT 2>/dev/null | grep -E "ACCEPT.*udp.*dpt:$RAW_PORT" | grep -q .; then
+            p_icon="\033[1;32m[✔]\033[0m"
         fi
     else
-        # 无防火墙或无法检测，假定开放
-        port_open=true
+        # 无防火墙工具，检查服务是否监听端口
+        if command -v ss >/dev/null 2>&1; then
+            if ss -ulnH "sport = :$RAW_PORT" 2>/dev/null | grep -q ":$RAW_PORT"; then
+                p_icon="\033[1;32m[✔]\033[0m"
+            fi
+        elif [ -f /proc/net/udp ]; then
+            local hex_port=$(printf "%04X" "$RAW_PORT")
+            if grep -E ":[[:space:]]*${hex_port}[[:space:]]" /proc/net/udp /proc/net/udp6 2>/dev/null | grep -q .; then
+                p_icon="\033[1;32m[✔]\033[0m"
+            fi
+        fi
     fi
     status_info="端口: $p_text $p_icon  |  服务: $s_text $s_icon"
 	
