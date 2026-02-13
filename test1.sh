@@ -861,13 +861,12 @@ display_links() {
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
     local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m"; local s_text="\033[1;33moffline\033[0m"
     local p_icon="\033[1;31m[✖]\033[0m"; local s_icon="\033[1;31m[✖]\033[0m"
-	local sb_pid=$(pgrep sing-box)
-    if [ -n "$sb_pid" ]; then
+	if pgrep sing-box >/dev/null 2>&1; then
         s_text="\033[1;33monline\033[0m"
         s_icon="\033[1;32m[✔]\033[0m"
         local hex_port=$(printf "%04X" "$RAW_PORT" 2>/dev/null)
-        if grep -q ":$hex_port" /proc/net/udp 2>/dev/null || \
-           grep -q ":$hex_port" /proc/net/udp6 2>/dev/null; then
+        if grep -q ":$hex_port[[:space:]]" /proc/net/udp 2>/dev/null || \
+           grep -q ":$hex_port[[:space:]]" /proc/net/udp6 2>/dev/null; then
             p_icon="\033[1;32m[✔]\033[0m"
         fi
     fi
