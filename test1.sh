@@ -151,12 +151,12 @@ get_network_info() {
     info "获取网络信息..."
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-    # 1. 探测函数：多接口备选 + 自动清洗
+    # 1. 探测函数：仅替换网址，结构完全不变
     _f() {
         local p=$1; local out=$2
-        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ifconfig.co"; } | tr -d '[:space:]' > "$out" 2>/dev/null
+        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ip.sb" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ifconfig.me" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ident.me"; } | tr -d '[:space:]' > "$out" 2>/dev/null
     }
     # 2. 异步执行与串行等待
     _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!; wait $p4 2>/dev/null; wait $p6 2>/dev/null
