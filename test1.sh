@@ -441,35 +441,35 @@ optimize_system() {
     setup_zrm_swap "$mem_total"
 	info "系统画像: CPU核心: ${real_c} 核 | 系统内存: ${mem_total} mb | 平均延迟: ${rtt_avg} ms | RTT补偿: ${real_rtt_factors} ms | 丢包补偿: ${loss_compensation}%"
 
-    # 阶段一： 四档位差异化配置
+    # 阶段一： 四档位差异化配置 (精密调优版)
     if [ "$mem_total" -ge 450 ]; then
-        VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 66 / 100))
-        SBOX_GOLIMIT="$((mem_total * 76 / 100))MiB"; SBOX_GOGC="200"
+        VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 60 / 100))
+        SBOX_GOLIMIT="$((mem_total * 76 / 100))MiB"; SBOX_GOGC="150"
         SBOX_MEM_HIGH="$((mem_total * 86 / 100))M"; SBOX_MEM_MAX="$((mem_total * 96 / 100))M"
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
         g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
-        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 63 / 100))
-        SBOX_GOLIMIT="$((mem_total * 75 / 100))MiB"; SBOX_GOGC="150"
+        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 55 / 100))
+        SBOX_GOLIMIT="$((mem_total * 75 / 100))MiB"; SBOX_GOGC="100"
         SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 95 / 100))M"
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
         g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
-        VAR_HY2_BW="200"; max_udp_mb=$((mem_total * 60 / 100))
-        SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="130"
+        VAR_HY2_BW="200"; max_udp_mb=$((mem_total * 50 / 100))
+        SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="80"
         SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
-        swappiness_val=60; busy_poll_val=0; ct_max=16384; ct_stream_to=30
+        swappiness_val=10; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
-        VAR_HY2_BW="130"; max_udp_mb=$((mem_total * 56 / 100))
-        SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="100"
-        SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
+        VAR_HY2_BW="100"; max_udp_mb=$((mem_total * 45 / 100)) 
+        SBOX_GOLIMIT="$((mem_total * 65 / 100))MiB"; SBOX_GOGC="50"
+        SBOX_MEM_HIGH="$((mem_total * 75 / 100))M"; SBOX_MEM_MAX="$((mem_total * 85 / 100))M"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=2097152
-        g_procs=1; swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
+        g_procs=1; swappiness_val=10; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         SBOX_OPTIMIZE_LEVEL="64M 激进版"
     fi
 
@@ -479,40 +479,41 @@ optimize_system() {
     # 2. 设置跳板变量 dyn_buf (综合物理能力与带宽需求)
     dyn_buf=$(( (mem_total << 20) >> 3 ))
     [ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min
-    # 100M+ 机器给 32MB 爆发力保底；100M- 机器给 16MB 生存保底
-    [ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
-    [ "$dyn_buf" -lt 16777216 ] && dyn_buf=16777216
+    # 针对 100M- 机器严格锁定上限，防止内存被缓冲区填满导致波浪式掉速
+    if [ "$mem_total" -lt 100 ]; then
+        [ "$dyn_buf" -gt 8388608 ] && dyn_buf=8388608   # 强制上限 8MB，维持高周转
+        [ "$dyn_buf" -lt 4194304 ] && dyn_buf=4194304   # 保底 4MB
+    else
+        [ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
+        [ "$dyn_buf" -lt 16777216 ] && dyn_buf=16777216
+    fi
     [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864
-	
     # 3. 所有内核网络参数基于 dyn_buf 伸缩
     VAR_UDP_RMEM="$dyn_buf"; VAR_UDP_WMEM="$dyn_buf"
     VAR_DEF_MEM=$(( dyn_buf / 4 ))
     VAR_BACKLOG=$(( VAR_HY2_BW * 50 ))   # 队列从30提到50，抗突发丢包
     [ "$VAR_BACKLOG" -lt 8192 ] && VAR_BACKLOG=8192
-
     # 4. 联动导出：Sing-box 应用层参数
-    g_wnd=$(( VAR_HY2_BW * loss_compensation / 100 / 8 ))      # 激进窗口，应对 80ms+ 延迟（原为 /10）
-    [ "$g_wnd" -lt 15 ] && g_wnd=15  # 调高起步窗口（原为 12）
-    g_buf=$(( dyn_buf / 6 ))         # 应用层 buffer 设为跳板的 1/6（原为 /8）
-
-    # 5. 确定系统全局 UDP 限制 (作为 safe_rtt 的参照系)
-	udp_mem_global_min=$(( dyn_buf >> 12 ))
-	udp_mem_global_pressure=$(( (dyn_buf << 1) >> 12 ))  # 2倍压力线
-	udp_mem_global_max=$(( ((mem_total << 20) * 75 / 100) >> 12 ))   # 物理红线 75%
-	max_udp_pages=$(( max_udp_mb << 8 ))
-
-    # 6. 根据带宽目标设定基础预算：每 100M 带宽分配约 1000 的预算
-    local base_budget=$(( VAR_HY2_BW * 15 / 10 * 10 ))  # 基础权重增加50%
+    g_wnd=$(( VAR_HY2_BW * loss_compensation / 100 / 8 ))      
+    [ "$g_wnd" -lt 15 ] && g_wnd=15  
+    g_buf=$(( dyn_buf / 6 ))         
+    # 5. 确定系统全局 UDP 限制
+    udp_mem_global_min=$(( dyn_buf >> 12 ))
+    udp_mem_global_pressure=$(( (dyn_buf << 1) >> 12 ))  # 2倍压力线
+    udp_mem_global_max=$(( ((mem_total << 20) * 75 / 100) >> 12 ))   # 物理红线 75%
+    max_udp_pages=$(( max_udp_mb << 8 ))
+    # 6. 确定网卡调度预算
+    local base_budget=$(( VAR_HY2_BW * 15 / 10 * 10 ))  
     [ "$base_budget" -lt 2000 ] && base_budget=2000
     [ "$base_budget" -gt 6000 ] && base_budget=6000
-    # 多核：单次少吃多餐，靠多核并行 / 单核：必须一次多处理点，减少中断切换的开销
     [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || { net_bgt=$(( base_budget << 1 )); net_usc=6000; }
-
     # 7. 内存保命机制：动态预留内核紧急水位 (vm.min_free_kbytes)
-    local min_free_val=$(( mem_total * 1024 * 4 / 100 ))  # 100M内存预留约4%
-    [ "$min_free_val" -lt 4608 ] && min_free_val=4608     # 最小不低于 3MB  
+    local min_free_val=$(( mem_total * 1024 * 5 / 100 ))  # 提升到 5%
+    # 针对 100M- 机器预留更多缓冲带（约 8-10MB），防止系统卡死
+    [ "$mem_total" -lt 100 ] && min_free_val=$(( min_free_val * 2 ))
+    [ "$min_free_val" -lt 8192 ] && [ "$mem_total" -lt 100 ] && min_free_val=8192 
+    [ "$min_free_val" -lt 4608 ] && min_free_val=4608      
     if [ "$mem_total" -gt 100 ]; then [ "$min_free_val" -gt 65536 ] && min_free_val=65536; fi
-	
 	# 9. 路况仲裁
     safe_rtt "$dyn_buf" "$rtt_avg" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max" "$real_rtt_factors" "$loss_compensation"
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
@@ -551,7 +552,7 @@ vm.overcommit_memory = 1                   # 允许内存超额分配
 vm.panic_on_oom = 0                        # 内存溢出时不崩溃系统
 $(grep -q "^/dev/zram0 " /proc/swaps 2>/dev/null && cat <<ZRAM_TUNING
 vm.page-cluster = 0                        # ZRAM环境下禁用预读 (提升随机读写)
-vm.vfs_cache_pressure = 500                # 积极回收文件缓存 (为网络腾内存)
+vm.vfs_cache_pressure = 1000                # 积极回收文件缓存 (为网络腾内存)
 ZRAM_TUNING
 )
 
@@ -585,7 +586,7 @@ net.ipv4.tcp_notsent_lowat = 16384         # 限制发送队列 (防延迟抖动
 net.ipv4.tcp_mtu_probing = 1               # MTU自动探测 (防UDP黑洞)
 net.ipv4.ip_no_pmtu_disc = 0               # 启用路径MTU探测 (寻找最优包大小)
 net.ipv4.tcp_frto = 2                      # 丢包环境重传判断优化
-net.ipv4.tcp_slow_start_after_idle = $([ "$rtt_avg" -ge 150 ] && echo "1" || echo "0") # 闲置后慢启动开关
+net.ipv4.tcp_slow_start_after_idle = 0     # 闲置后慢启动开关
 net.ipv4.tcp_limit_output_bytes = $([ "$mem_total" -ge 200 ] && echo "262144" || echo "131072") # 限制TCP连接占用发送队列
 net.ipv4.udp_gro_enabled = 1               # UDP 分段聚合 (降CPU负载)
 net.ipv4.udp_early_demux = 1               # UDP 早期路由优化
@@ -606,12 +607,11 @@ net.ipv4.tcp_max_orphans = $((mem_total * 1024)) # 最大孤儿连接数限制
 
 $([ "$mem_total" -lt 100 ] && cat <<LOWMEM
 # --- 针对 96M 小鸡的极低内存保护策略 ---
-net.ipv4.tcp_sack = 0                      # 禁用SACK (省内存)
-net.ipv4.tcp_dsack = 0                     # 禁用D-SACK
-net.ipv4.tcp_fack = 0                      # 禁用前向确认
-net.ipv4.tcp_timestamps = 0                # 禁用时间戳 (省包头开销)
-net.ipv4.tcp_moderate_rcvbuf = 0           # 锁定手动缓冲区 (防内核抢占)
-net.ipv4.tcp_max_syn_backlog = 2048        # 缩减握手队列
+net.ipv4.tcp_sack = 1                      # 禁用SACK (省内存)
+net.ipv4.tcp_dsack = 1                     # 禁用D-SACK
+net.ipv4.tcp_timestamps = 1                # 禁用时间戳 (省包头开销)
+net.ipv4.tcp_moderate_rcvbuf = 1           # 锁定手动缓冲区 (防内核抢占)
+net.ipv4.tcp_max_syn_backlog = 512         # 缩减握手队列
 LOWMEM
 )
 SYSCTL
