@@ -866,8 +866,13 @@ display_links() {
     if pgrep sing-box >/dev/null 2>&1; then
         s_text="\033[1;33monline\033[0m"
         s_icon="\033[1;32m[✔]\033[0m"
-        if (nc -z -u -w 1 127.0.0.1 "$RAW_PORT" || { sleep 0.3; nc -z -u -w 3 127.0.0.1 "$RAW_PORT"; }) >/dev/null 2>&1; then
+        local hex_port=$(printf "%04X" "$RAW_PORT" | tr '[:lower:]' '[:upper:]')
+        if grep -qE ":$hex_port[[:space:]]+" /proc/net/udp* 2>/dev/null; then
             p_icon="\033[1;32m[✔]\033[0m"
+        else
+            if netstat -auln 2>/dev/null | grep -q ":$RAW_PORT "; then
+                p_icon="\033[1;32m[✔]\033[0m"
+            fi
         fi
     fi
     status_info="端口: $p_text $p_icon  |  服务: $s_text $s_icon"
