@@ -323,27 +323,22 @@ safe_rtt() {
 # sing-box 用户态运行时调度人格（Go/QUIC/缓冲区自适应）
 apply_userspace_adaptive_profile() {
     local g_procs="$1" wnd="$2" buf="$3" real_c="$4" mem_total="$5"
-    # === 1. P 处理器调度 (针对单核小鸡的特殊优化) ===
-    # 如果是单核，强行给 2 个 P 能够让网络 IO 和内存回收并行，不至于卡死
-    [ "$real_c" -eq 1 ] && export GOMAXPROCS=2 || export GOMAXPROCS="$g_procs"
-    # === 2. 内存回收策略分级 (76M+- 差异化处理) ===
-    [ "$mem_total" -lt 76 ] && \
-    { export GODEBUG="madvdontneed=1,scavenge_target=1"; info "Runtime → 激进回收模式 (76m-)"; } || \
-    { export GODEBUG="madvdontneed=1,asyncpreemptoff=1"; info "Runtime → 性能优先模式 (76m+)"; }
-    export GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}" GOGC="${SBOX_GOGC:-100}"
-    export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" VAR_HY2_BW="${VAR_HY2_BW:-200}"
-    export SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"
-    # 针对 100M- 小鸡执行最后一道严谨校准 (Sanity Check)
+    # 内存回收策略：100M- 采用极度激进模式，确保内存页立即归还内核
     if [ "$mem_total" -lt 100 ]; then
-        local soft_line=$(( mem_total - 26 )) # 预留 28M 红线
-        [ "$soft_line" -lt 34 ] && soft_line=34 # 绝对启动底线
-        # 如果当前全局变量值超过红线，则强制钳位
-        [ "$(echo "$GOMEMLIMIT" | tr -dc '0-9')" -gt "$soft_line" ] && \
-        export GOMEMLIMIT="${soft_line}MiB" GOGC="100"
+        export GOMAXPROCS=1
+        export GODEBUG="madvdontneed=1,scavenge_target=1"
+        local sl=$(( mem_total * 65 / 100 )); [ "$sl" -lt 32 ] && sl=32
+        GOMEMLIMIT="${sl}MiB"; GOGC="50"
+        info "Runtime → 激进回收模式 (100M- 适配版)"
+    else
+        export GOMAXPROCS="$g_procs"
+        export GODEBUG="madvdontneed=1,asyncpreemptoff=1"
+        GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}"; GOGC="${SBOX_GOGC:-100}"
+        info "Runtime → 性能优先模式"
     fi
-    # === 3. 持久化配置 (修复潜在变量引用问题) ===
-    mkdir -p /etc/sing-box
-    cat > /etc/sing-box/env <<EOF
+	
+    export GOMEMLIMIT GOGC SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" VAR_HY2_BW="${VAR_HY2_BW:-200}" SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"
+    mkdir -p /etc/sing-box; cat > /etc/sing-box/env <<EOF
 GOMAXPROCS=$GOMAXPROCS
 GOGC=$GOGC
 GOMEMLIMIT=$GOMEMLIMIT
@@ -354,7 +349,8 @@ SINGBOX_UDP_SENDBUF=$buf
 VAR_HY2_BW=$VAR_HY2_BW
 EOF
     chmod 644 /etc/sing-box/env
-    # === 4. CPU 亲和力优化 (绑定当前脚本到所有可用核心) ===
+    
+    # 4. CPU 亲和力 (仅多核且存在 taskset 时优化)
     [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1 && taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1
     info "Runtime → GOMAXPROCS: $GOMAXPROCS 核 | 内存限额: $GOMEMLIMIT | GOGC: $GOGC | Buffer: $((buf/1024)) KB"
 }
