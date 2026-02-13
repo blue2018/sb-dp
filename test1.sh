@@ -863,17 +863,44 @@ display_links() {
     local s_text="\033[1;33moffline\033[0m"
     local p_icon="\033[1;31m[✖]\033[0m"
     local s_icon="\033[1;31m[✖]\033[0m"
+    
+    # 1. 服务状态检查
     if pgrep sing-box >/dev/null 2>&1; then
         s_text="\033[1;33monline\033[0m"
         s_icon="\033[1;32m[✔]\033[0m"
-        local hex_port=$(printf "%04X" "$RAW_PORT" | tr '[:lower:]' '[:upper:]')
-        if grep -qE ":$hex_port[[:space:]]+" /proc/net/udp* 2>/dev/null; then
-            p_icon="\033[1;32m[✔]\033[0m"
-        else
-            if netstat -auln 2>/dev/null | grep -q ":$RAW_PORT "; then
-                p_icon="\033[1;32m[✔]\033[0m"
+    fi
+    
+    # 2. 端口状态检查（独立于服务状态）
+    local port_open=false
+    
+    # 方法1: 使用 ss 命令（最可靠）
+    if command -v ss >/dev/null 2>&1; then
+        if ss -ulnH sport = :"$RAW_PORT" 2>/dev/null | grep -q ":$RAW_PORT"; then
+            port_open=true
+        fi
+    # 方法2: 使用 netstat（次选）
+    elif command -v netstat >/dev/null 2>&1; then
+        if netstat -uln 2>/dev/null | awk '$4 ~ /:'$RAW_PORT'$/ || $4 ~ /\.'$RAW_PORT'$/' | grep -q .; then
+            port_open=true
+        fi
+    # 方法3: 读取 /proc/net/udp（兜底方案，需要更严格的匹配）
+    else
+        local hex_port=$(printf "%04X" "$RAW_PORT")
+        # 检查 IPv4
+        if grep -qE ":[[:space:]]*${hex_port}[[:space:]]" /proc/net/udp 2>/dev/null; then
+            port_open=true
+        fi
+        # 检查 IPv6
+        if [ "$port_open" = false ] && [ -f /proc/net/udp6 ]; then
+            if grep -qE ":[[:space:]]*${hex_port}[[:space:]]" /proc/net/udp6 2>/dev/null; then
+                port_open=true
             fi
         fi
+    fi
+    
+    # 设置端口图标
+    if [ "$port_open" = true ]; then
+        p_icon="\033[1;32m[✔]\033[0m"
     fi
     status_info="端口: $p_text $p_icon  |  服务: $s_text $s_icon"
 	
