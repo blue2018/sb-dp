@@ -864,43 +864,31 @@ display_links() {
     local p_icon="\033[1;31m[✖]\033[0m"
     local s_icon="\033[1;31m[✖]\033[0m"
     
-    # 1. 服务状态检查
-    if pgrep sing-box >/dev/null 2>&1; then
-        s_text="\033[1;33monline\033[0m"
+    if pgrep -x sing-box >/dev/null 2>&1; then
+        s_text="\033[1;32monline\033[0m"
         s_icon="\033[1;32m[✔]\033[0m"
     fi
     
-    # 2. 端口状态检查（独立于服务状态）
+    # 检查防火墙端口开放状态
     local port_open=false
-    
-    # 方法1: 使用 ss 命令（最可靠）
-    if command -v ss >/dev/null 2>&1; then
-        if ss -ulnH sport = :"$RAW_PORT" 2>/dev/null | grep -q ":$RAW_PORT"; then
+    if command -v iptables >/dev/null 2>&1; then
+        # 检查 iptables 规则
+        if iptables -L INPUT -n 2>/dev/null | grep -E "udp.*dpt:$RAW_PORT" | grep -q ACCEPT; then
             port_open=true
         fi
-    # 方法2: 使用 netstat（次选）
-    elif command -v netstat >/dev/null 2>&1; then
-        if netstat -uln 2>/dev/null | awk '$4 ~ /:'$RAW_PORT'$/ || $4 ~ /\.'$RAW_PORT'$/' | grep -q .; then
+    elif command -v firewall-cmd >/dev/null 2>&1; then
+        # 检查 firewalld
+        if firewall-cmd --list-ports 2>/dev/null | grep -qw "$RAW_PORT/udp"; then
             port_open=true
         fi
-    # 方法3: 读取 /proc/net/udp（兜底方案，需要更严格的匹配）
+    elif command -v ufw >/dev/null 2>&1; then
+        # 检查 ufw
+        if ufw status 2>/dev/null | grep -E "$RAW_PORT.*ALLOW" | grep -q udp; then
+            port_open=true
+        fi
     else
-        local hex_port=$(printf "%04X" "$RAW_PORT")
-        # 检查 IPv4
-        if grep -qE ":[[:space:]]*${hex_port}[[:space:]]" /proc/net/udp 2>/dev/null; then
-            port_open=true
-        fi
-        # 检查 IPv6
-        if [ "$port_open" = false ] && [ -f /proc/net/udp6 ]; then
-            if grep -qE ":[[:space:]]*${hex_port}[[:space:]]" /proc/net/udp6 2>/dev/null; then
-                port_open=true
-            fi
-        fi
-    fi
-    
-    # 设置端口图标
-    if [ "$port_open" = true ]; then
-        p_icon="\033[1;32m[✔]\033[0m"
+        # 无防火墙或无法检测，假定开放
+        port_open=true
     fi
     status_info="端口: $p_text $p_icon  |  服务: $s_text $s_icon"
 	
