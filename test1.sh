@@ -349,7 +349,7 @@ SINGBOX_UDP_SENDBUF=$buf
 VAR_HY2_BW=$VAR_HY2_BW
 EOF
     chmod 644 /etc/sing-box/env
-    
+	
     # 4. CPU 亲和力 (仅多核且存在 taskset 时优化)
     [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1 && taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1
     info "Runtime → GOMAXPROCS: $GOMAXPROCS 核 | 内存限额: $GOMEMLIMIT | GOGC: $GOGC | Buffer: $((buf/1024)) KB"
@@ -357,44 +357,40 @@ EOF
 
 # 网卡核心负载加速（RPS/XPS/批处理密度）
 apply_nic_core_boost() {
-    # 1. 寻找默认出口网卡
     local IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
     [ -z "$IFACE" ] && return 0
-    local real_c="$1" bgt="$2" usc="$3"	
-	# 2. 内核软中断预算优化
-    sysctl -w net.core.netdev_budget="$bgt" net.core.netdev_budget_usecs="$usc" >/dev/null 2>&1 || true
-    # 3. 驱动识别与发送队列 (TXQLEN) 动态调整
-    local driver=""
+    local real_c="$1" bgt="$2" usc="$3" mem_total="$4" driver=""
+    
+    # 1. 软中断预算与驱动识别
+    sysctl -w net.core.netdev_budget="$bgt" net.core.netdev_budget_usecs="$usc" >/dev/null 2>&1
     [ -L "/sys/class/net/$IFACE/device/driver" ] && driver=$(basename "$(readlink "/sys/class/net/$IFACE/device/driver")")
-    local target_qlen=10000
-    case "$driver" in
-        virtio_net|veth|"") target_qlen=5000 ;;  # 虚拟化环境降低队列深度，减少内存抖动
-        *) target_qlen=10000 ;;
-    esac
-	# 4. 链路层特征与硬件卸载优化
-	if [ -d "/sys/class/net/$IFACE" ]; then
-        ip link set dev "$IFACE" txqueuelen "$target_qlen" 2>/dev/null || true     
+    # 2. 队列深度钳位：100M- 小鸡严禁大队列，防止数据包积压吃掉物理内存
+    local target_qlen=5000; [ "$mem_total" -lt 100 ] && target_qlen=2000
+    [ "$driver" = "virtio_net" ] || [ "$driver" = "veth" ] && target_qlen=$((target_qlen/2))
+    
+    # 3. 硬件特性调优
+    if [ -d "/sys/class/net/$IFACE" ]; then
+        ip link set dev "$IFACE" txqueuelen "$target_qlen" 2>/dev/null
         if command -v ethtool >/dev/null 2>&1; then
-            ethtool -K "$IFACE" gro on gso on tso on lro off 2>/dev/null || true
-            local tuned_usc=100
-            [ "$real_c" -ge 2 ] && tuned_usc=150   # 大幅提升中断延迟阈值 (20 -> 100+)，牺牲 0.1ms 延迟，但能救活 CPU，对吞吐量至关重要
-            ethtool -C "$IFACE" rx-usecs "$tuned_usc" tx-usecs "$tuned_usc" 2>/dev/null || true
-            ethtool -G "$IFACE" rx 2048 tx 2048 2>/dev/null || true
+            # 开启 GRO/GSO (降CPU负载)，严禁开启 LRO (会导致转发丢包)
+            ethtool -K "$IFACE" gro on gso on tso on lro off 2>/dev/null
+            # 中断聚合优化：内存越小，延迟阈值要越高，以合并更多包减少中断频率
+            local tuned_usc=100; [ "$mem_total" -lt 100 ] && tuned_usc=250
+            ethtool -C "$IFACE" rx-usecs "$tuned_usc" tx-usecs "$tuned_usc" 2>/dev/null
+            # 环形缓冲区控制：100M- 小鸡维持默认或极小，防止 Buffer 溢出物理内存
+            local ring=1024; [ "$mem_total" -lt 100 ] && ring=512
+            ethtool -G "$IFACE" rx "$ring" tx "$ring" 2>/dev/null
         fi
     fi
-    # 5. 多核分发优化 (RPS/XPS)：解决单核处理瓶颈
+    
+    # 4. 多核分发优化 (RPS/XPS)：仅多核开启，单核开启无意义且浪费内核周期
     if [ "$real_c" -ge 2 ] && [ -d "/sys/class/net/$IFACE/queues" ]; then
         local MASK=$(printf '%x' $(( (1<<real_c)-1 )))
-		# 接收端分发 (RPS)
-        for q in /sys/class/net/"$IFACE"/queues/rx-*/rps_cpus; do
-            [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
-        done
-		# 发送端分发 (XPS)
-        for q in /sys/class/net/"$IFACE"/queues/tx-*/xps_cpus; do
-            [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
+        for q in /sys/class/net/"$IFACE"/queues/{rx,tx}-*/{r,x}ps_cpus; do
+            [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null
         done
     fi
-	info "NIC 优化 → 网卡: $IFACE | QLen: $target_qlen | 中断延迟: ${tuned_usc:-default} us"
+    info "NIC 优化 → 网卡: $IFACE | 队列: $target_qlen | 聚合: ${tuned_usc:-def}us | 环形: ${ring:-def}"
 }
 
 #防火墙开放端口
@@ -509,7 +505,7 @@ optimize_system() {
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
 	apply_initcwnd_optimization "false"
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf" "$real_c" "$mem_total"
-    apply_nic_core_boost "$real_c" "$net_bgt" "$net_usc"
+    apply_nic_core_boost "$real_c" "$net_bgt" "$net_usc" "$mem_total"
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW} Mbps"
     info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
 	
