@@ -859,12 +859,14 @@ display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" v4_info="" v6_info=""
     local hostname_tag="$(hostname)"
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
-    # 进程状态 + 外网探测
+    # 进程状态判定 + 内核监听补偿探测
     _do_probe() {
-        local target=$1; local mode=$2; local res=""
+        local target=$1; local mode=$2; local res=""; local alive=false
         [ -z "$target" ] && return
-        pgrep sing-box >/dev/null 2>&1 && res="\033[1;32m[服务活跃]\033[0m" || res="\033[1;31m[服务离线]\033[0m"
-        nc -z -u -w 1 $([ "$mode" = "6" ] && echo "-6") "$target" "$RAW_PORT" >/dev/null 2>&1 && res="${res} \033[1;32m(端口开放)\033[0m" || res="${res} \033[1;33m(端口受阻)\033[0m"
+        pgrep sing-box >/dev/null 2>&1 && { res="\033[1;32m服务活跃\033[0m"; alive=true; } || res="\033[1;31m服务离线\033[0m"
+        { nc -z -u -w 1 $([ "$mode" = "6" ] && echo "-6") "$target" "$RAW_PORT" >/dev/null 2>&1 || \
+          { [ "$alive" = true ] && netstat -an | grep "LISTEN" | grep -q ":${RAW_PORT} "; }; } && \
+          res="${res} | \033[1;32m端口开放\033[0m" || res="${res} | \033[1;33m端口受阻\033[0m"
         echo "$res"
     }
     [ -n "${RAW_IP4:-}" ] && _do_probe "$RAW_IP4" "4" > /tmp/sb_v4 2>&1 &
@@ -872,20 +874,19 @@ display_links() {
     wait
     [ -f /tmp/sb_v4 ] && { v4_info=$(cat /tmp/sb_v4); rm -f /tmp/sb_v4; }
     [ -f /tmp/sb_v6 ] && { v6_info=$(cat /tmp/sb_v6); rm -f /tmp/sb_v6; }
-
     echo -e "\n\033[1;32m[节点信息]\033[0m >>> 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m"
     if [ -n "${RAW_IP4:-}" ]; then
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v4"
-        echo -e "\n\033[1;35m[IPv4节点]\033[0m $v4_info\n$LINK_V4"
+        echo -e "\n\033[1;35m[IPv4节点]\033[0m   $v4_info\n$LINK_V4"
         FULL_CLIP="$LINK_V4"
     fi
     if [ -n "${RAW_IP6:-}" ]; then
         LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v6"
-        echo -e "\n\033[1;36m[IPv6节点]\033[0m $v6_info\n$LINK_V6"
+        echo -e "\n\033[1;36m[IPv6节点]\033[0m   $v6_info\n$LINK_V6"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
     fi
     echo -e "\n\033[1;34m==========================================\033[0m"
-	echo -e "\033[1;32m[ECH 已激活]\033[0m 流量已混入 $RAW_SNI 的 TLS 1.3 握手池"
+    echo -e "\033[1;32m[ECH 已激活]\033[0m 流量已混入 $RAW_SNI 的 TLS 1.3 握手池"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
