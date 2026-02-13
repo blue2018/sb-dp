@@ -859,11 +859,16 @@ display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" status_info=""
     local hostname_tag="$(hostname)"; sleep 0.5
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
-    # 1. 核心自检：端口与进程状态 (由绿色/红色标注)
-    local p_icon="\033[1;31m[✖]\033[0m" s_info="\033[1;31moffline [✖]\033[0m"
-    pgrep sing-box >/dev/null 2>&1 && s_info="\033[1;32monline [✔]\033[0m"
-    netstat -an | grep "LISTEN" | grep -q ":${RAW_PORT} " && p_icon="\033[1;32m[✔]\033[0m"
-    status_info="端口: ${RAW_PORT:-"未知"} $p_icon  |  服务: $s_info"
+    local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m"; local s_text="\033[1;33moffline\033[0m"
+    local p_icon="\033[1;31m[✖]\033[0m"; local s_icon="\033[1;31m[✖]\033[0m"
+    if pgrep sing-box >/dev/null 2>&1; then
+        s_text="\033[1;33monline\033[0m"
+        s_icon="\033[1;32m[✔]\033[0m"
+    fi
+    if netstat -tuln | grep -qE "[: ]${RAW_PORT} "; then
+        p_icon="\033[1;32m[✔]\033[0m"
+    fi
+    status_info="端口: $p_text $p_icon  |  服务: $s_text $s_icon"
 	
     echo -e "\n\033[1;32m[节点信息]\033[0m >>> $status_info"
     if [ -n "${RAW_IP4:-}" ]; then
