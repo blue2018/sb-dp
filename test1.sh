@@ -151,7 +151,7 @@ get_network_info() {
     info "获取网络信息..."
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-    # 1. 探测函数
+    # 1. 探测函数：保持你的简洁流，增加更稳的 ifconfig.me
     _f() {
         local p=$1; local out=$2
         { curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api64.ipify.org" || \
@@ -161,9 +161,9 @@ get_network_info() {
     }
     # 2. 异步执行与串行等待
     _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!; wait $p4 2>/dev/null; wait $p6 2>/dev/null
-    # 3. 结果提取与正则严选
-    [ -s "$t4" ] && RAW_IP4=$(grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' "$t4" | head -n 1)
-    [ -s "$t6" ] && RAW_IP6=$(grep -iE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
+    # 3. 结果提取：使用 -oE 解决匹配不严的问题，确保变量赋值成功
+    [ -s "$t4" ] && RAW_IP4=$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
+    [ -s "$t6" ] && RAW_IP6=$(grep -oE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
     rm -f "$t4" "$t6"
     # 4. 极简风格输出
     [ -n "$RAW_IP4" ] && \
