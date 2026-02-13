@@ -866,7 +866,7 @@ display_links() {
         [[ "$(cat /tmp/sb_v4_res 2>/dev/null)" == "OK" || "$(cat /tmp/sb_v6_res 2>/dev/null)" == "OK" ]] && p_icon="\033[1;32m[✔]\033[0m"
     fi
 
-    echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon  |  服务: $s_text $s_icon"
+    echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon | 服务: $s_text $s_icon"
     if [ -n "${RAW_IP4:-}" ]; then
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v4"
         echo -e "\n\033[1;35m[IPv4节点]\033[0m\n$LINK_V4"; FULL_CLIP="$LINK_V4"
