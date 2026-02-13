@@ -122,10 +122,9 @@ prompt_for_port() {
 generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"; local TMP_ECH="/tmp/ech_out"
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-    
     # 1. 生成 TLS 证书
     if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
-        info "生成 ECC P-256 高性能证书 (域名: $TLS_DOMAIN)..."
+        info "生成 ECC 证书 (域名: $TLS_DOMAIN)..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
             -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" \
@@ -133,25 +132,18 @@ generate_cert() {
             -addext "subjectAltName=DNS:$TLS_DOMAIN" \
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
-
-    # 2. 生成 ECH 密钥 (核心修正：指定域名 + 保留 PEM 标头)
-    info "正在为 $TLS_DOMAIN 生成 ECH 密钥对..."
-    # 关键：这里不能用 "dummy"，必须用 $TLS_DOMAIN
+    # 2. 生成 ECH 密钥 (保留 PEM 标头)
+    info "生成 $TLS_DOMAIN 的 ECH 密钥对..."
     /usr/bin/sing-box generate ech-keypair "$TLS_DOMAIN" > "$TMP_ECH" 2>&1
-    
-    # 保留完整 PEM 格式，满足 v1.12 内核要求
     sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
     sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
     rm -f "$TMP_ECH"
-
-    # 3. 最终校验与权限
+    # 3. 校验并提取指纹
     if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.key" "$CERT_DIR/ech.pub"
+        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/ech.key" && chmod 644 "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.pub"
         succ "ECC 证书与 ECH 密钥对就绪"
-    else 
-        err "证书或 ECH 密钥生成失败"; exit 1
-    fi
+    else err "证书或 ECH 密钥生成失败"; exit 1; fi
 }
 
 # 获取公网IP
