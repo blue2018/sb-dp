@@ -150,8 +150,8 @@ generate_cert() {
 get_network_info() {
     info "获取网络信息..."
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
-    rm -f "$t4" "$t6"
-    # 1. 探测函数：保持你的简洁流，增加更稳的 ifconfig.me
+    touch "$t4" "$t6" # 预先创建，防止某些环境权限延迟
+    # 1. 探测函数：增加强制静默，优化超时
     _f() {
         local p=$1; local out=$2
         { curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api64.ipify.org" || \
@@ -159,11 +159,13 @@ get_network_info() {
           curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://ip.sb" || \
           curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://icanhazip.com"; } 2>/dev/null | tr -d '[:space:]' > "$out"
     }
-    # 2. 异步执行与串行等待
-    _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!; wait $p4 2>/dev/null; wait $p6 2>/dev/null
-    # 3. 结果提取：使用 -oE 解决匹配不严的问题，确保变量赋值成功
-    [ -s "$t4" ] && RAW_IP4=$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
-    [ -s "$t6" ] && RAW_IP6=$(grep -oE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
+    # 2. 异步执行与串行等待：增加一个极短的 sleep 确保 I/O 落地
+    _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!
+    wait $p4 2>/dev/null; wait $p6 2>/dev/null
+    sleep 0.5 # 强制 I/O 缓冲刷入磁盘，解决某些精简系统读取过快的问题
+    # 3. 结果提取：改用 cat 读取，确保 grep -oE 拿到值
+    [ -s "$t4" ] && RAW_IP4=$(cat "$t4" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1)
+    [ -s "$t6" ] && RAW_IP6=$(cat "$t6" | grep -oE '([a-f0-9:]+:+)+[a-f0-9]+' | head -n 1)
     rm -f "$t4" "$t6"
     # 4. 极简风格输出
     [ -n "$RAW_IP4" ] && \
