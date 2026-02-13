@@ -857,7 +857,7 @@ get_env_data() {
 
 display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" v4_info="" v6_info=""
-    local hostname_tag="$(hostname)"
+    local hostname_tag="$(hostname)"; sleep 0.5
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
     # 进程状态判定 + 内核监听补偿探测
     _do_probe() {
