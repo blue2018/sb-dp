@@ -700,7 +700,7 @@ create_config() {
     "udp_fragment": true,
     "tls": {
       "enabled": true, 
-      "alpn": ["h3"], 
+      "alpn": ["h3", "h2"], 
       "min_version": "1.3", 
       "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
       "key_path": "/etc/sing-box/certs/privkey.pem",
