@@ -357,26 +357,39 @@ EOF
 
 # 网卡核心负载加速（RPS/XPS/批处理密度）
 apply_nic_core_boost() {
-	local IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
+    local IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
     [ -z "$IFACE" ] && return 0
     local real_c="$1" bgt="$2" usc="$3" mem_total="$4" target_qlen="$5" t_usc="$6" ring="$7" driver=""
+    
     # 1. 软中断预算 (由 optimize_system 动态传入)
     sysctl -w net.core.netdev_budget="$bgt" net.core.netdev_budget_usecs="$usc" >/dev/null 2>&1
     [ -L "/sys/class/net/$IFACE/device/driver" ] && driver=$(basename "$(readlink "/sys/class/net/$IFACE/device/driver")")
+    
     # 2. 针对虚拟化环境的二度钳位
     [[ "$driver" =~ "virtio" || "$driver" =~ "veth" ]] && target_qlen=$((target_qlen / 2))
-    # 3. 硬件层应用
+    
+    # 3. 硬件层应用 (核心防闪断逻辑)
     if [ -d "/sys/class/net/$IFACE" ]; then
+        # 异步修改 txqueuelen，防止阻塞当前进程
         (ip link set dev "$IFACE" txqueuelen "$target_qlen" 2>/dev/null &)
+        
         if command -v ethtool >/dev/null 2>&1; then
-            # 基础卸载：开启 GRO/GSO (降CPU)，严禁 LRO (转发致命)
+            # A. 安全操作：开启卸载特性 (通常不会导致断网)
             ethtool -K "$IFACE" gro on gso on tso on lro off 2>/dev/null || true
-            # 中断聚合：小内存增加延迟阈值，强制 CPU 合并处理数据包
-            ethtool -C "$IFACE" rx-usecs "$t_usc" tx-usecs "$t_usc" 2>/dev/null || true
-            # 环形缓冲区：小内存缩减 Buffer，防止网卡占用过多物理内存
-            ethtool -G "$IFACE" rx "$ring" tx "$ring" 2>/dev/null || true
+            
+            # B. 潜在风险操作：使用 (nohup ... &) 彻底脱离父进程执行
+            # 这样即便网卡重置导致瞬时断网，脚本也不会因为 SSH 信号中断而停止执行
+            (
+                # 稍作延迟，确保脚本主流程已经跑完并打印了 info
+                sleep 1
+                # 调整中断聚合
+                ethtool -C "$IFACE" rx-usecs "$t_usc" tx-usecs "$t_usc" 2>/dev/null
+                # 调整环形缓冲区 (这是最容易导致中断的一行)
+                ethtool -G "$IFACE" rx "$ring" tx "$ring" 2>/dev/null
+            ) >/dev/null 2>&1 &
         fi
     fi
+    
     # 4. 多核分发 (RPS/XPS) 自动匹配
     if [ "$real_c" -ge 2 ] && [ -d "/sys/class/net/$IFACE/queues" ]; then
         local MASK=$(printf '%x' $(( (1<<real_c)-1 )))
@@ -384,7 +397,8 @@ apply_nic_core_boost() {
             [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
         done
     fi
-    info "NIC 优化 → 网卡: $IFACE | 队列: $target_qlen | 聚合: ${tuned_usc:-def}us | 环形: ${ring:-def}"
+    
+    info "NIC 优化 → 网卡: $IFACE | 队列: $target_qlen | 聚合: ${t_usc}us | 环形: $ring"
 }
 
 #防火墙开放端口
