@@ -149,31 +149,31 @@ generate_cert() {
 # 获取公网IP
 get_network_info() {
     info "获取网络信息..."
-    RAW_IP4=""; RAW_IP4_LOCAL=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
+    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
 
-    # 1. 探测函数：增加强制 -4 约束，并加入 Cloudflare 这种在东南亚极快的接口
+    # 1. 探测函数：强制 IPv4/IPv6 隔离，避免协议栈互等，加入 CF 极速接口
     _f() {
         local p=$1; local out=$2
-        # 特别加入 https://1.1.1.1/cdn-cgi/trace (Cloudflare 内部接口，越南访问极快)
-        { curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://1.1.1.1/cdn-cgi/trace" | grep -oE 'ip=[0-9.]+' | cut -d= -f2 || \
-          curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://api.ipify.org" || \
-          curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://ifconfig.me"; } 2>/dev/null | tr -d '[:space:]' > "$out"
+        # 使用 Cloudflare 接口绕过 DNS 劫持，在东南亚极稳
+        { curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" | grep -oE 'ip=[0-9.]+' | cut -d= -f2 || \
+          curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api.ipify.org" || \
+          curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://ifconfig.me"; } 2>/dev/null | tr -d '[:space:]' > "$out"
     }
 
-    # 2. 异步执行：在越南环境，异步是防止脚本“假死”的关键
+    # 2. 异步并行：如果 IPv6 不通，4秒后也会被强制掐断，不影响 IPv4 进度
     _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!; wait $p4 2>/dev/null; wait $p6 2>/dev/null
 
-    # 3. 结果提取：使用 BusyBox 最稳的正则
+    # 3. 结果提取：适配 BusyBox 的 -Eo 提取
     [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
     [ -s "$t6" ] && RAW_IP6=$(grep -Ei '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
     
-    # 如果外部探测失败，强制抓取本地网卡地址作为兜底，防止 exit 1
-    [ -z "$RAW_IP4" ] && RAW_IP4=$(ip addr | grep -iE 'inet .*global' | grep -vE '127.0.0.1|172.|10.' | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1)
+    # 强制清洗：剔除内网 IPv6 (fd91 开头的内网地址)
+    [[ "$RAW_IP6" == fd* ]] && RAW_IP6=""
 
     rm -f "$t4" "$t6"
 
-    # 4. 极简风格输出
+    # 4. 极简风格输出 (保持原样)
     [ -n "$RAW_IP4" ] && \
         echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || \
         echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
@@ -184,8 +184,6 @@ get_network_info() {
 
     { [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
-
-
 
 # 网络延迟探测模块
 probe_network_rtt() {
