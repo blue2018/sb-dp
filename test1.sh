@@ -151,37 +151,29 @@ get_network_info() {
     info "获取网络信息..."
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-
-    # 1. 探测函数：强制 IPv4/IPv6 隔离，避免协议栈互等，加入 CF 极速接口
+    # 1. 探测函数：多接口备选 + 自动清洗
     _f() {
         local p=$1; local out=$2
-        # 使用 Cloudflare 接口绕过 DNS 劫持，在东南亚极稳
         { curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" | grep -oE 'ip=[0-9.]+' | cut -d= -f2 || \
-          curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api.ipify.org" || \
-          curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://ifconfig.me"; } 2>/dev/null | tr -d '[:space:]' > "$out"
+		  curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ident.me" || \
+		  curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" || \
+		  curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ip.sb" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ifconfig.co"; } | tr -d '[:space:]' > "$out" 2>/dev/null
     }
-
-    # 2. 异步并行：如果 IPv6 不通，4秒后也会被强制掐断，不影响 IPv4 进度
+    # 2. 异步执行与串行等待
     _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!; wait $p4 2>/dev/null; wait $p6 2>/dev/null
-
-    # 3. 结果提取：适配 BusyBox 的 -Eo 提取
-    [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
-    [ -s "$t6" ] && RAW_IP6=$(grep -Ei '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
-    
-    # 强制清洗：剔除内网 IPv6 (fd91 开头的内网地址)
-    [[ "$RAW_IP6" == fd* ]] && RAW_IP6=""
-
+    # 3. 结果提取与数据清洗
+    [ -s "$t4" ] && RAW_IP4=$(grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' "$t4")
+    [ -s "$t6" ] && RAW_IP6=$(grep -iE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6")
     rm -f "$t4" "$t6"
-
-    # 4. 极简风格输出 (保持原样)
+    # 4. 极简风格输出
     [ -n "$RAW_IP4" ] && \
         echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || \
         echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
-
     [[ "$RAW_IP6" == *:* ]] && { IS_V6_OK="true"; \
         echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || \
         echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
-
     { [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
 
