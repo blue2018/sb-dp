@@ -152,10 +152,12 @@ get_network_info() {
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6=""
     rm -f "$t4" "$t6"
     # 1. 探测函数：1.1.1.1 归位首选，通过 IP 直接握手实现最快响应
-    _f() { local p=$1; local out=$2
+    _f() {
+        local p=$1; local out=$2
         { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" | sed -n 's/^ip=//p' || \
           curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com"; } | tr -d '[:space:]' > "$out" 2>/dev/null; }
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com"; } | tr -d '[:space:]' > "$out" 2>/dev/null
+    }
     # 2. 暴力并发探测：不设门槛，让 v4 和 v6 在后台赛跑
     _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!
     # 3. 回收进程并精准清洗结果
