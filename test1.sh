@@ -149,43 +149,42 @@ generate_cert() {
 # 获取公网IP(高效稳定探测)
 get_network_info() {
     info "获取网络信息..."
-    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
-    rm -f "$t4" "$t6"
+    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t="/tmp/.ipv6"
+    rm -f "$t"
 
-    # 1. IPv4 探测 (串行，绝对优先，保住底线)
-    RAW_IP4=$(curl -4ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' | tr -d '[:space:]')
-    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
-
-    # 2. IPv6 探测 (终极隔离逻辑)
-    # 关键点：我们不在主进程判断，直接在后台启动一个只活 2 秒的 curl
-    # 越南鸡：它会在后台断网，但主脚本已经瞬间跳到了第 3 步，不会被卡死
-    (
-        curl -6ksSfL --connect-timeout 1 --max-time 2 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' > "$t6" 2>/dev/null
-    ) & 
-    local p6=$!
-
-    # 3. 关键：意大利鸡需要这 1 秒等待，越南鸡需要这 1 秒逃离现场
-    # 我们只给 1.2 秒时间。如果 1.2 秒没出结果，说明这鸡没救了
-    local count=0
-    while [ ! -s "$t6" ] && [ $count -lt 12 ]; do
-        sleep 0.1
-        ((count++))
-    done
-
-    # 4. 尝试提取 v6 (不成功也无所谓)
-    [ -s "$t6" ] && RAW_IP6=$(tr -d '[:space:]' < "$t6" 2>/dev/null)
-
-    # 5. 样式化显示
-    if [[ "${RAW_IP6:-}" == *:* ]]; then
-        IS_V6_OK="true"
-        echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
+    # 1. 绝对优先：IPv4 探测并立即打印
+    # 这一步在任何机器上都是安全的，先确保 IPv4 变量入库
+    RAW_IP4=$(curl -4ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" 2>/dev/null | tr -d '[:space:]')
+    
+    if [ -n "$RAW_IP4" ]; then
+        echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
     else
-        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
+        echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
     fi
 
-    # 6. 善后：不管后台死活，清理临时文件，直接返回
-    # 不使用 kill，让后台 curl 自己根据 --max-time 2 灰飞烟灭
-    rm -f "$t4" "$t6"
+    # 2. 物理隔离探测 IPv6：
+    # 既然越南鸡一碰 v6 就断网，我们就把探测输出重定向到一个根本不影响脚本运行的地方
+    # 并且，我们只给 1 秒钟。1 秒钟意大利鸡够了，越南鸡就算断网，脚本也已经跳到下一步了
+    (
+        curl -6ksSfL --connect-timeout 1 --max-time 2 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' > "$t" 2>/dev/null
+    ) & sleep 1.2 # 给后台进程 1.2 秒时间
+
+    # 3. 结果回收
+    if [ -s "$t" ]; then
+        RAW_IP6=$(tr -d '[:space:]' < "$t" 2>/dev/null)
+        if [[ "$RAW_IP6" == *:* ]]; then
+            IS_V6_OK="true"
+            echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
+        fi
+    else
+        # 越南鸡会走到这里。即便此时网络已经断了，echo 也已经把这行字打进了缓冲区
+        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m未就绪/跳过\033[0m"
+    fi
+
+    rm -f "$t"
+    
+    # 4. 安全退出：只要有 v4 就算成功，让脚本继续往下走（配置端口等）
+    [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "未能探测到公网 IP"; exit 1; }
     return 0
 }
 
