@@ -149,30 +149,44 @@ generate_cert() {
 # 获取公网IP(高效稳定探测)
 get_network_info() {
     info "获取网络信息..."
-    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"
+    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
+    rm -f "$t4" "$t6"
 
-    # 1. 探测 IPv4 (必须先拿到并显示)
+    # 1. IPv4 探测 (串行，绝对优先，保住底线)
     RAW_IP4=$(curl -4ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' | tr -d '[:space:]')
     [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
 
-    # 2. 核心“避雷针”：直接读取系统网卡文件，不调用任何网络命令
-    # 越南鸡之所以崩，是因为 ip -6 会扫描堆栈。我们直接读文件看有没有公网前缀 (20或30开头)
-    # 如果文件里没有公网前缀，脚本会直接跳过 IPv6 逻辑，越南鸡就绝对安全了
-    if [ -f /proc/net/if_inet6 ] && grep -qE '^(20|30)' /proc/net/if_inet6; then
-        # 只有在意大利鸡这种真有公网 V6 的机器上，才执行 curl
-        RAW_IP6=$(curl -6ksSfL --connect-timeout 2 --max-time 4 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' | tr -d '[:space:]')
-    fi
+    # 2. IPv6 探测 (终极隔离逻辑)
+    # 关键点：我们不在主进程判断，直接在后台启动一个只活 2 秒的 curl
+    # 越南鸡：它会在后台断网，但主脚本已经瞬间跳到了第 3 步，不会被卡死
+    (
+        curl -6ksSfL --connect-timeout 1 --max-time 2 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' > "$t6" 2>/dev/null
+    ) & 
+    local p6=$!
 
-    # 3. 结果显示
+    # 3. 关键：意大利鸡需要这 1 秒等待，越南鸡需要这 1 秒逃离现场
+    # 我们只给 1.2 秒时间。如果 1.2 秒没出结果，说明这鸡没救了
+    local count=0
+    while [ ! -s "$t6" ] && [ $count -lt 12 ]; do
+        sleep 0.1
+        ((count++))
+    done
+
+    # 4. 尝试提取 v6 (不成功也无所谓)
+    [ -s "$t6" ] && RAW_IP6=$(tr -d '[:space:]' < "$t6" 2>/dev/null)
+
+    # 5. 样式化显示
     if [[ "${RAW_IP6:-}" == *:* ]]; then
         IS_V6_OK="true"
         echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
     else
-        # 越南鸡会走到这一行并安全结束，因为它跳过了上面的 curl
         echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
     fi
 
-    [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "未能探测到公网 IP"; exit 1; } || return 0
+    # 6. 善后：不管后台死活，清理临时文件，直接返回
+    # 不使用 kill，让后台 curl 自己根据 --max-time 2 灰飞烟灭
+    rm -f "$t4" "$t6"
+    return 0
 }
 
 # 网络延迟探测模块
