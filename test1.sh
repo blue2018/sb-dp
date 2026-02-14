@@ -149,36 +149,29 @@ generate_cert() {
 # 获取公网IP(高效稳定探测)
 get_network_info() {
     info "获取网络信息..."
-    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6=""
+    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-
-    # 1. 探测函数：保持高效稳定的接口顺序
+    # 1. 探测函数：多接口备选 + 自动清洗
     _f() {
         local p=$1; local out=$2
-        { curl $p -ksSfL --connect-timeout 5 --max-time 8 "https://api64.ipify.org" || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 8 "https://1.1.1.1/cdn-cgi/trace" | sed -n 's/^ip=//p' || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 8 "https://icanhazip.com"; } | tr -d '[:space:]' > "$out" 2>/dev/null
+        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ifconfig.co"; } | tr -d '[:space:]' > "$out" 2>/dev/null
     }
-
-    # 2. 直接启动双栈探测：不再判断网卡，交给系统路由表处理
-    # 越南小鸡：v6 路径会因超时自动失败，不影响 v4 提取
-    # 意大利小鸡：双路并行，通哪个写哪个
-    _f -4 "$t4" & p4=$!
-    _f -6 "$t6" & p6=$!
-
-    # 3. 进程回收与数据精准清洗 (等待最多 8-10 秒)
-    [ -n "$p4" ] && wait $p4 2>/dev/null; [ -n "$p6" ] && wait $p6 2>/dev/null
-    
-    [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
-    [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
+    # 2. 异步执行与串行等待
+    _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!; wait $p4 2>/dev/null; wait $p6 2>/dev/null
+    # 3. 结果提取与数据清洗
+    [ -s "$t4" ] && RAW_IP4=$(grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' "$t4")
+    [ -s "$t6" ] && RAW_IP6=$(grep -iE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6")
     rm -f "$t4" "$t6"
-
-    # 4. 极简输出
-    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
-    [[ "${RAW_IP6:-}" == *:* ]] && { IS_V6_OK="true"; echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
-
-    # 5. 安全校验
-    { [ -z "$RAW_IP4" ] && [ -z "${RAW_IP6:-}" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
+    # 4. 极简风格输出
+    [ -n "$RAW_IP4" ] && \
+        echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || \
+        echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
+    [[ "$RAW_IP6" == *:* ]] && { IS_V6_OK="true"; \
+        echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || \
+        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
+    { [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
 
 # 网络延迟探测模块
