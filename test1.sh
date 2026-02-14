@@ -149,43 +149,34 @@ generate_cert() {
 # 获取公网IP(高效稳定探测)
 get_network_info() {
     info "获取网络信息..."
-    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t="/tmp/.ipv6"
-    rm -f "$t"
-
-    # 1. 绝对优先：IPv4 探测并立即打印
-    # 这一步在任何机器上都是安全的，先确保 IPv4 变量入库
-    RAW_IP4=$(curl -4ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" 2>/dev/null | tr -d '[:space:]')
+    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6=""
+    rm -f "$t4" "$t6"
+    # 1. 探测函数：保持你要求的紧凑格式
+    _f() { local p=$1; local out=$2
+        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" 2>/dev/null || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" 2>/dev/null; } | tr -d '[:space:]' > "$out" 2>/dev/null; }
     
-    if [ -n "$RAW_IP4" ]; then
-        echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
-    else
-        echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
+    # 2. 智能探测启动
+    _f -4 "$t4" & p4=$!
+    
+    # 【关键改进】：不仅看 global，还要排除掉导致越南鸡崩溃的假地址 (fe80/fd/fc)
+    # 只要网卡中存在不是这些开头的 inet6，才认为是真 IPv6
+    if ip -6 addr show | grep -w "global" | grep -vE ' (fe80|fd|fc|::1)' | grep -qv 'temporary'; then
+        _f -6 "$t6" & p6=$!
     fi
 
-    # 2. 物理隔离探测 IPv6：
-    # 既然越南鸡一碰 v6 就断网，我们就把探测输出重定向到一个根本不影响脚本运行的地方
-    # 并且，我们只给 1 秒钟。1 秒钟意大利鸡够了，越南鸡就算断网，脚本也已经跳到下一步了
-    (
-        curl -6ksSfL --connect-timeout 1 --max-time 2 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' > "$t" 2>/dev/null
-    ) & sleep 1.2 # 给后台进程 1.2 秒时间
+    # 3. 回收进程并清洗结果
+    [ -n "$p4" ] && wait $p4 2>/dev/null; [ -n "$p6" ] && wait $p6 2>/dev/null
+    [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
+    [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
+    rm -f "$t4" "$t6"
 
-    # 3. 结果回收
-    if [ -s "$t" ]; then
-        RAW_IP6=$(tr -d '[:space:]' < "$t" 2>/dev/null)
-        if [[ "$RAW_IP6" == *:* ]]; then
-            IS_V6_OK="true"
-            echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
-        fi
-    else
-        # 越南鸡会走到这里。即便此时网络已经断了，echo 也已经把这行字打进了缓冲区
-        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m未就绪/跳过\033[0m"
-    fi
+    # 4. 极简样式化输出
+    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
+    [[ "${RAW_IP6:-}" == *:* ]] && { IS_V6_OK="true"; echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
 
-    rm -f "$t"
-    
-    # 4. 安全退出：只要有 v4 就算成功，让脚本继续往下走（配置端口等）
-    [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "未能探测到公网 IP"; exit 1; }
-    return 0
+    { [ -z "$RAW_IP4" ] && [ -z "${RAW_IP6:-}" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
 
 # 网络延迟探测模块
