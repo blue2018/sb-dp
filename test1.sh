@@ -192,7 +192,6 @@ probe_network_rtt() {
         rtt_val="150"; echo -e "\033[1;33m[WARN]\033[0m 探测受阻，应用全球预估值: 150ms" >&2
     fi
     set -e
-    # 画像联动赋值
     real_rtt_factors=$(( rtt_val + 100 ))   # 延迟补偿：实测值 + 100ms (平衡握手开销)
 	# 丢包补偿：每 1% 丢包增加 5% 缓冲区冗余，最高 200%
     loss_compensation=$(( 100 + loss_val * 5 )); [ "$loss_compensation" -gt 200 ] && loss_compensation=200
