@@ -185,41 +185,36 @@ get_network_info() {
 # 网络延迟探测模块
 get_network_info() {
     info "获取网络信息..."
-    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6="" e6="/tmp/.e6"
-    rm -f "$t4" "$t6" "$e6"
+    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6=""
+    rm -f "$t4" "$t6"
 
     _f() {
         local p=$1; local out=$2
         { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" || \
           curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" | sed -n 's/^ip=//p' || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com"; } | tr -d '[:space:]' > "$out" 2>"${out}_err"
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com"; } | tr -d '[:space:]' > "$out" 2>/dev/null
     }
 
+    # 1. IPv4 始终探测
     _f -4 "$t4" & p4=$!
-    # 意大利小鸡诊断：看看这里是否真的进入了分支
-    if ip -6 addr show | grep 'inet6 ' | grep -vE ' (fe80|fd|fc|::1)' | grep -qv 'temporary'; then
+
+    # 2. 改进的 IPv6 探测逻辑：
+    # 只要网卡（排除 lo 回环）有 IPv6 地址，就大胆发起异步探测
+    if ip -6 addr show | grep -q "inet6 " && ip -6 addr show | grep "inet6 " | grep -qv "lo$"; then
         _f -6 "$t6" & p6=$!
-    else
-        echo "DEBUG: 系统未检测到有效的公网 IPv6 地址段" > "$e6"
     fi
 
+    # 3. 进程回收与数据精准清洗
     [ -n "$p4" ] && wait $p4 2>/dev/null; [ -n "$p6" ] && wait $p6 2>/dev/null
     [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
     [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
+    rm -f "$t4" "$t6"
 
-    # 结果展示
+    # 4. 极简结果输出
     [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
-    
-    if [[ "${RAW_IP6:-}" == *:* ]]; then
-        IS_V6_OK="true"; echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
-    else
-        # --- 核心诊断：为什么不可用？ ---
-        echo -en "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m "
-        [ -s "$e6" ] && cat "$e6" || { [ -s "${t6}_err" ] && echo -n "(原因: $(cat "${t6}_err" | tr '\n' ' '))"; }
-        echo ""
-    fi
+    [[ "${RAW_IP6:-}" == *:* ]] && { IS_V6_OK="true"; echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
 
-    rm -f "$t4" "$t6" "${t4}_err" "${t6}_err" "$e6"
+    # 5. 安全校验
     { [ -z "$RAW_IP4" ] && [ -z "${RAW_IP6:-}" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
 
