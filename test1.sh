@@ -151,21 +151,21 @@ get_network_info() {
     info "获取网络信息..."
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-    # 1. 探测函数：只换网址，确保使用 1.1.1.1 这个在越南秒开的接口
+    # 1. 探测函数：使用 HTTP 协议避免 HTTPS 握手卡死，并增加直接 IP 访问
     _f() {
         local p=$1; local out=$2
-        # 保持你的 tr -d 逻辑，只替换能跑通的网址
-        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" | grep -i 'ip=' | sed 's/ip=//g' || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api.ipify.org" || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ifconfig.me"; } | tr -d '[:space:]' > "$out" 2>/dev/null
+        # 优先请求 1.1.1.1 的 HTTP 接口，这是你刚才测通的路径
+        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "http://1.1.1.1/cdn-cgi/trace" | grep -i 'ip=' | sed 's/ip=//g' || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "http://api.ipify.org" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "http://ifconfig.me"; } | tr -d '[:space:]' > "$out" 2>/dev/null
     }
-    # 2. 异步执行与串行等待 (完全不动)
+    # 2. 异步执行与串行等待
     _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!; wait $p4 2>/dev/null; wait $p6 2>/dev/null
-    # 3. 结果提取与数据清洗 (去掉 ^$ 锚点，防止因隐藏字符匹配失败)
-    [ -s "$t4" ] && RAW_IP4=$(grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4")
-    [ -s "$t6" ] && RAW_IP6=$(grep -iE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6")
+    # 3. 结果提取：移除严格的 ^$ 锚点
+    [ -s "$t4" ] && RAW_IP4=$(grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
+    [ -s "$t6" ] && RAW_IP6=$(grep -iE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
     rm -f "$t4" "$t6"
-    # 4. 极简风格输出 (完全不动)
+    # 4. 极简风格输出
     [ -n "$RAW_IP4" ] && \
         echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || \
         echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
