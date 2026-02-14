@@ -152,20 +152,20 @@ get_network_info() {
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
 
-    # 1. 探测函数：全静默，不使用变量拼接，减少 shell 负担
-    _f4() { curl -4ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' || curl -4ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" 2>/dev/null; }
-    _f6() { curl -6ksSfL --connect-timeout 5 --max-time 5 "https://api64.ipify.org" 2>/dev/null || curl -6ksSfL --connect-timeout 5 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p'; }
+    # 1. 探测函数：彻底剥离域名，全用 IP 直连
+    _f4() { curl -4ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' || curl -4ksSfL --connect-timeout 5 --max-time 10 "https://1.0.0.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p'; }
+    _f6() { curl -6ksSfL --connect-timeout 5 --max-time 5 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p'; }
 
-    # 2. 串行执行：先死死抓牢 IPv4
+    # 2. 先测 IPv4
     RAW_IP4=$(_f4 | tr -d '[:space:]')
     
-    # 3. 只有当 IPv4 成功拿到后，才“小心翼翼”地尝试 IPv6
-    # 针对越南鸡：如果 curl -6 还是崩溃，我们直接给它加一个开关，或者利用 ping6 探测
+    # 3. 极速 IPv6 判定：跳过域名，跳过 ip addr，直接探测是否有 v6 出口路由
+    # 只要这行命令不报错（存在默认路由），才尝试 curl IP
     if [ -n "$RAW_IP4" ]; then
         echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
         
-        # 最后的尝试：利用 ping6 预判，如果连 ping6 都报错，直接跳过 v6
-        if ping6 -c 1 -w 1 google.com >/dev/null 2>&1; then
+        # 仅当系统路由表明确指向 IPv6 公网时才探测，且探测目标也是 IP 地址
+        if ip -6 route get 2606:4700:4700::1111 >/dev/null 2>&1; then
             RAW_IP6=$(_f6 | tr -d '[:space:]')
         fi
     fi
@@ -175,7 +175,7 @@ get_network_info() {
         IS_V6_OK="true"
         echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
     else
-        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用 (已跳过风险探测)\033[0m"
+        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
     fi
 
     [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "未能探测到公网 IP"; exit 1; } || return 0
