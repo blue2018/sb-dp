@@ -156,18 +156,17 @@ get_network_info() {
         { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' || \
           curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" 2>/dev/null; } | tr -d '[:space:]' > "$out" 2>/dev/null; }
 
-    # 1. IPv4 始终探测（先启动）
+    # 1. IPv4 始终探测
     _f -4 "$t4" & p4=$!
 
-    # 2. 【核心保命改进】：完全不使用 ip 命令，改用读取 proc 文件
-    # 越南鸡的 /proc/net/ipv6_route 里通常只有本地路由，没有默认路由 (00000000000000000000000000000000 00)
-    # 我们检查是否存在指向公网的默认路由条目
-    if [ -f /proc/net/ipv6_route ] && grep -q "00000000000000000000000000000000 00" /proc/net/ipv6_route && grep -qv "00000000000000000000000000000000 00 .* lo$" /proc/net/ipv6_route; then
-        # 只有在看起来真的有戏时，才启动探测
+    # 2. 【终极保险丝】：只允许 2 或 3 开头的全球单播地址启动探测
+    # 越南鸡的 fd91 是私有地址，会被这一行死死挡住，绝对不会触发 curl -6
+    # 意大利鸡的 2a05 是标准公网地址，可以完美通过
+    if ip -6 addr show | grep -qE 'inet6 [23]'; then
         _f -6 "$t6" & p6=$!
     fi
 
-    # 3. 回收进程并清洗结果
+    # 3. 回收
     [ -n "$p4" ] && wait $p4 2>/dev/null; [ -n "$p6" ] && wait $p6 2>/dev/null
     [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
     [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
