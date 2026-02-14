@@ -149,34 +149,37 @@ generate_cert() {
 # 获取公网IP(高效稳定探测)
 get_network_info() {
     info "获取网络信息..."
-    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
+    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6=""
     rm -f "$t4" "$t6"
 
-    # 1. 探测函数：彻底剥离域名，全用 IP 直连
-    _f4() { curl -4ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' || curl -4ksSfL --connect-timeout 5 --max-time 10 "https://1.0.0.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p'; }
-    _f6() { curl -6ksSfL --connect-timeout 5 --max-time 5 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p'; }
+    # 1. 定义超快探测函数 (IPv6 仅给 3 秒)
+    _f4() { curl -4ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' > "$t4"; }
+    _f6() { curl -6ksSfL --connect-timeout 2 --max-time 4 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' > "$t6"; }
 
-    # 2. 先测 IPv4
-    RAW_IP4=$(_f4 | tr -d '[:space:]')
+    # 2. 真正的一行双发异步 (越南鸡不会在这里卡住，因为是后台运行)
+    _f4 & p4=$!; _f6 & p6=$!
+
+    # 3. 策略性回收：IPv4 必须等，IPv6 随缘
+    wait $p4 2>/dev/null
+    RAW_IP4=$(tr -d '[:space:]' < "$t4" 2>/dev/null)
     
-    # 3. 极速 IPv6 判定：跳过域名，跳过 ip addr，直接探测是否有 v6 出口路由
-    # 只要这行命令不报错（存在默认路由），才尝试 curl IP
-    if [ -n "$RAW_IP4" ]; then
-        echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
-        
-        # 仅当系统路由表明确指向 IPv6 公网时才探测，且探测目标也是 IP 地址
-        if ip -6 route get 2606:4700:4700::1111 >/dev/null 2>&1; then
-            RAW_IP6=$(_f6 | tr -d '[:space:]')
-        fi
-    fi
+    # 4. 关键：只给 IPv6 极短的等待时间，不通就直接杀掉进程
+    # 这里在越南鸡上会瞬间跳过，因为 wait -n 或类似逻辑在后台失效时会很快返回
+    sleep 0.5 
+    [ -s "$t6" ] && RAW_IP6=$(tr -d '[:space:]' < "$t6" 2>/dev/null)
 
-    # 4. 结果处理
+    # 5. 清理与显示
+    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
     if [[ "${RAW_IP6:-}" == *:* ]]; then
         IS_V6_OK="true"
         echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
     else
         echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
     fi
+
+    # 后台清理残留进程，防止越南鸡中断
+    kill $p6 2>/dev/null
+    rm -f "$t4" "$t6"
 
     [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
