@@ -152,22 +152,23 @@ get_network_info() {
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6=""
     rm -f "$t4" "$t6"
 
-    # 1. 探测函数：保持单行合并风格
+    # 1. 探测函数：1.1.1.1 归位首选，通过 IP 直接握手实现最快响应
     _f() { local p=$1; local out=$2
         { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" 2>/dev/null || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" 2>/dev/null; } | tr -d '[:space:]' > "$out" 2>/dev/null; }
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" 2>/dev/null; } | tr -d '[:space:]' > "$out" 2>/dev/null; }
 
-    # 2. 智能探测启动
+    # 2. 暴力并发探测
+    # IPv4 始终执行
     _f -4 "$t4" & p4=$!
 
-    # 【核心过滤修改】：放宽限制，只排除绝对会引起中断的 fe80 和回环
-    # 只要 inet6 地址不包含 fe80 和 ::1，就允许尝试探测
-    if ip -6 addr show | grep 'inet6 ' | grep -vE ' (fe80|::1)' | grep -qv 'temporary'; then
+    # 【关键改动】：不再依赖 grep inet6 地址，而是检测是否存在默认路由 (default)
+    # 越南鸡只有本地路由，没有 default，所以会完美跳过，不中断
+    # 意大利鸡有 NAT64 出口，必有 default 路由，所以会正常执行探测
+    if ip -6 route show | grep -qE "default|::/0"; then
         _f -6 "$t6" & p6=$!
     fi
 
-    # 3. 回收进程并清洗
+    # 3. 回收进程并精准清洗结果
     [ -n "$p4" ] && wait $p4 2>/dev/null; [ -n "$p6" ] && wait $p6 2>/dev/null
     [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
     [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
@@ -175,7 +176,13 @@ get_network_info() {
 
     # 4. 极简样式化输出
     [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
-    [[ "${RAW_IP6:-}" == *:* ]] && { IS_V6_OK="true"; echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
+    
+    if [[ "${RAW_IP6:-}" == *:* ]]; then
+        IS_V6_OK="true"
+        echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
+    else
+        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
+    fi
 
     { [ -z "$RAW_IP4" ] && [ -z "${RAW_IP6:-}" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
