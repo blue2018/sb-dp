@@ -149,18 +149,18 @@ generate_cert() {
 # 获取公网IP(高效稳定探测)
 get_network_info() {
     info "获取网络信息..."
-    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
-    rm -f "$t4" "$t6"
+    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"
 
-    # 1. 探测 IPv4 (IP直连，最快)
+    # 1. 探测 IPv4 (必须先拿到并显示)
     RAW_IP4=$(curl -4ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' | tr -d '[:space:]')
     [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
 
-    # 2. 核心“保险丝”：只有明确看到全球单播地址 (2或3开头) 才允许尝试探测
-    # 这是保护越南小鸡不断网的最后屏障
-    if ip -6 addr show | grep 'inet6 ' | grep -vE 'temporary' | grep -qE 'inet6 [23]'; then
-        # 针对意大利鸡的逻辑：既然确定有公网 IP 潜力，才发起 1 秒极速探测
-        RAW_IP6=$(curl -6ksSfL --connect-timeout 1 --max-time 2 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' | tr -d '[:space:]')
+    # 2. 核心“避雷针”：直接读取系统网卡文件，不调用任何网络命令
+    # 越南鸡之所以崩，是因为 ip -6 会扫描堆栈。我们直接读文件看有没有公网前缀 (20或30开头)
+    # 如果文件里没有公网前缀，脚本会直接跳过 IPv6 逻辑，越南鸡就绝对安全了
+    if [ -f /proc/net/if_inet6 ] && grep -qE '^(20|30)' /proc/net/if_inet6; then
+        # 只有在意大利鸡这种真有公网 V6 的机器上，才执行 curl
+        RAW_IP6=$(curl -6ksSfL --connect-timeout 2 --max-time 4 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' | tr -d '[:space:]')
     fi
 
     # 3. 结果显示
@@ -168,10 +168,10 @@ get_network_info() {
         IS_V6_OK="true"
         echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
     else
+        # 越南鸡会走到这一行并安全结束，因为它跳过了上面的 curl
         echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
     fi
 
-    rm -f "$t4" "$t6"
     [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
 
