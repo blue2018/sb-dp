@@ -160,7 +160,7 @@ get_network_info() {
     }
     # 2. 智能并发逻辑：IPv4 始终执行；IPv6 仅在检测到公网前缀 (2/3 开头) 时执行，避开 fd/fe 内网坑
     _f -4 "$t4" & p4=$!
-    ip -6 addr show | grep -E 'inet6 [23]' | grep -qv 'temporary' && { _f -6 "$t6" & p6=$!; }
+	ip -6 addr show | grep 'inet6 ' | grep -vE ' (fe80|fd|fc|::1)' | grep -qv 'temporary' && { _f -6 "$t6" & p6=$!; }
     # 3. 进程回收与数据清洗：使用正则精准抠取 IP，防止接口返回非 IP 字符
     [ -n "$p4" ] && wait $p4 2>/dev/null; [ -n "$p6" ] && wait $p6 2>/dev/null
     [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
