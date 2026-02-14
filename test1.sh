@@ -149,31 +149,33 @@ generate_cert() {
 # 获取公网IP(高效稳定探测)
 get_network_info() {
     info "获取网络信息..."
-    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6=""
+    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
 
+    # 1. 探测函数：1.1.1.1 优先，全静默处理
     _f() { local p=$1; local out=$2
         { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' || \
           curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" 2>/dev/null || \
           curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" 2>/dev/null; } | tr -d '[:space:]' > "$out" 2>/dev/null; }
 
-    # 1. IPv4 始终探测
-    _f -4 "$t4" & p4=$!
+    # 2. 先测 IPv4，拿回结果（保护越南鸡的基础执行）
+    _f -4 "$t4"
+    [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
 
-    # 2. 核心过滤器：不再看 IP 格式，直接看路由表
-    # 只有当系统中存在 IPv6 默认路由时，才允许启动 curl -6
-    # 越南小鸡通常没有 ::/0 的路由，所以会在这里被安全拦截，彻底解决中断问题
-    if ip -6 route show | grep -q "default\|::/0"; then
-        _f -6 "$t6" & p6=$!
+    # 3. 极严苛探测 IPv6（只有明确看到 2/3 开头的全球公网地址才尝试）
+    # 如果意大利鸡探测不到，我们干脆给它做一个特定网卡的 fallback
+    if ip -6 addr show | grep -E 'inet6 [23]' | grep -qv 'temporary'; then
+        _f -6 "$t6"
+    elif ip -6 addr show | grep -q 'inet6 ' | grep -vE ' (fe80|::1)' | grep -q 'global'; then
+        # 针对意大利鸡这类特殊标签的二次机会
+        _f -6 "$t6"
     fi
 
-    # 3. 回收进程与清洗
-    [ -n "$p4" ] && wait $p4 2>/dev/null; [ -n "$p6" ] && wait $p6 2>/dev/null
-    [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
+    # 4. 提取 v6 结果
     [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
     rm -f "$t4" "$t6"
 
-    # 4. 样式化输出
+    # 5. 输出
     [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
     [[ "${RAW_IP6:-}" == *:* ]] && { IS_V6_OK="true"; echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
 
