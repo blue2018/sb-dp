@@ -152,34 +152,33 @@ get_network_info() {
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
 
-    # 1. 探测函数：1.1.1.1 优先，全静默处理
-    _f() { local p=$1; local out=$2
-        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" 2>/dev/null || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" 2>/dev/null; } | tr -d '[:space:]' > "$out" 2>/dev/null; }
+    # 1. 探测函数：全静默，不使用变量拼接，减少 shell 负担
+    _f4() { curl -4ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' || curl -4ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" 2>/dev/null; }
+    _f6() { curl -6ksSfL --connect-timeout 5 --max-time 5 "https://api64.ipify.org" 2>/dev/null || curl -6ksSfL --connect-timeout 5 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p'; }
 
-    # 2. 先测 IPv4，拿回结果（保护越南鸡的基础执行）
-    _f -4 "$t4"
-    [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
-
-    # 3. 极严苛探测 IPv6（只有明确看到 2/3 开头的全球公网地址才尝试）
-    # 如果意大利鸡探测不到，我们干脆给它做一个特定网卡的 fallback
-    if ip -6 addr show | grep -E 'inet6 [23]' | grep -qv 'temporary'; then
-        _f -6 "$t6"
-    elif ip -6 addr show | grep -q 'inet6 ' | grep -vE ' (fe80|::1)' | grep -q 'global'; then
-        # 针对意大利鸡这类特殊标签的二次机会
-        _f -6 "$t6"
+    # 2. 串行执行：先死死抓牢 IPv4
+    RAW_IP4=$(_f4 | tr -d '[:space:]')
+    
+    # 3. 只有当 IPv4 成功拿到后，才“小心翼翼”地尝试 IPv6
+    # 针对越南鸡：如果 curl -6 还是崩溃，我们直接给它加一个开关，或者利用 ping6 探测
+    if [ -n "$RAW_IP4" ]; then
+        echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
+        
+        # 最后的尝试：利用 ping6 预判，如果连 ping6 都报错，直接跳过 v6
+        if ping6 -c 1 -w 1 google.com >/dev/null 2>&1; then
+            RAW_IP6=$(_f6 | tr -d '[:space:]')
+        fi
     fi
 
-    # 4. 提取 v6 结果
-    [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
-    rm -f "$t4" "$t6"
+    # 4. 结果处理
+    if [[ "${RAW_IP6:-}" == *:* ]]; then
+        IS_V6_OK="true"
+        echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
+    else
+        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用 (已跳过风险探测)\033[0m"
+    fi
 
-    # 5. 输出
-    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
-    [[ "${RAW_IP6:-}" == *:* ]] && { IS_V6_OK="true"; echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
-
-    { [ -z "$RAW_IP4" ] && [ -z "${RAW_IP6:-}" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
+    [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
 
 # 网络延迟探测模块
