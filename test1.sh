@@ -148,55 +148,54 @@ generate_cert() {
 
 # 获取公网IP
 get_network_info() {
-    info "获取网络信息 (调试模式)..."
+    info "获取网络信息 (安全调试模式)..."
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
 
-    # --- 调试：检查环境污染 ---
+    # --- 使用安全语法访问变量，避免 unbound variable 报错 ---
     echo "[DEBUG] 执行用户: $(whoami)"
-    echo "[DEBUG] 代理状态: http_proxy=$http_proxy | https_proxy=$https_proxy"
-    echo "[DEBUG] DNS 现状: $(grep nameserver /etc/resolv.conf | awk '{print $2}' | xargs)"
+    echo "[DEBUG] 代理状态: http_proxy=${http_proxy:-none} | https_proxy=${https_proxy:-none}"
+    echo "[DEBUG] DNS 现状: $(grep nameserver /etc/resolv.conf | awk '{print $2}' | xargs || echo "unknown")"
     # -----------------------
 
     _f() {
         local p=$1; local out=$2
-        echo "[DEBUG] 线程 $p 启动，正在请求接口..."
-        
-        # 记录每一步的详细报错，不重定向到 /dev/null
-        { 
-          echo "--- $p 接口 1 尝试 ---" >&2
+        # 给子进程也加一个保护，确保 curl 不会因为变量问题挂掉
+        {
           curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" || \
-          { echo "--- $p 接口 2 尝试 ---" >&2; curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com"; } || \
-          { echo "--- $p 接口 3 尝试 ---" >&2; curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ifconfig.co"; }
-        } | tr -d '[:space:]' > "$out"
-        
-        local exit_code=$?
-        echo "[DEBUG] 线程 $p 结束，退出码: $exit_code，得到内容: $(cat "$out")"
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ifconfig.co"
+        } | tr -d '[:space:]' > "$out" 2>/dev/null
     }
 
-    # 执行并捕获
+    # 执行
     _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!
     
-    echo "[DEBUG] 后台 PID: v4=$p4, v6=$p6，等待响应..."
-    wait $p4; wait $p6
+    echo "[DEBUG] 后台 PID: v4=${p4:-err}, v6=${p6:-err}，等待响应..."
+    wait $p4 2>/dev/null; wait $p6 2>/dev/null
 
     # 结果提取
-    [ -s "$t4" ] && RAW_IP4=$(grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
-    [ -s "$t6" ] && RAW_IP6=$(grep -iE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
+    [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
+    [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
     
-    echo "[DEBUG] 最终提取结果: v4=[$RAW_IP4] v6=[$RAW_IP6]"
+    echo "[DEBUG] 最终提取结果: v4=[${RAW_IP4:-}] v6=[${RAW_IP6:-}]"
     rm -f "$t4" "$t6"
 
     # 输出显示
-    [ -n "$RAW_IP4" ] && \
-        echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || \
+    if [ -n "$RAW_IP4" ]; then
+        echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
+    else
         echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
+    fi
 
-    [[ "$RAW_IP6" == *:* ]] && { IS_V6_OK="true"; \
-        echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || \
+    if [[ "${RAW_IP6:-}" == *:* ]]; then
+        IS_V6_OK="true"
+        echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
+    else
         echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
+    fi
 
-    { [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ]; } && { err "未能探测到公网 IP，请根据 DEBUG 信息排查"; exit 1; } || return 0
+    { [ -z "$RAW_IP4" ] && [ -z "${RAW_IP6:-}" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
 
 # 网络延迟探测模块
