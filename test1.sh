@@ -151,23 +151,23 @@ get_network_info() {
     info "获取网络信息..."
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6=""
     rm -f "$t4" "$t6"
-    # 1. 探测函数：精选全球最稳三大接口，Trace 优先，配合备选方案
+    # 1. 探测函数：优先使用兼容双栈的纯 IP 接口，Cloudflare Trace 作为强力后备
     _f() {
         local p=$1; local out=$2
-        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" | sed -n 's/^ip=//p' || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" || \
+        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" | sed -n 's/^ip=//p' || \
           curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com"; } | tr -d '[:space:]' > "$out" 2>/dev/null
     }
-    # 2. 智能并发逻辑：IPv4 始终执行；IPv6 采用排除法 (剔除内网/回环/链路地址) 确保仅在有真公网 v6 时触发
+    # 2. 智能并发执行：IPv4 必测，IPv6 仅在存在非私有地址时探测
     _f -4 "$t4" & p4=$!
     ip -6 addr show | grep 'inet6 ' | grep -vE ' (fe80|fd|fc|::1)' | grep -qv 'temporary' && { _f -6 "$t6" & p6=$!; }
-    # 3. 进程回收与清洗：精准提取，防止变量污染
+    # 3. 进程回收与数据精准清洗
     [ -n "$p4" ] && wait $p4 2>/dev/null; [ -n "$p6" ] && wait $p6 2>/dev/null
     [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
     [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
     rm -f "$t4" "$t6"
     # 4. 极简结果输出
-    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
+    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
     [[ "${RAW_IP6:-}" == *:* ]] && { IS_V6_OK="true"; echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
     { [ -z "$RAW_IP4" ] && [ -z "${RAW_IP6:-}" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
