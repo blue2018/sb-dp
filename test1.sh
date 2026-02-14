@@ -149,40 +149,26 @@ generate_cert() {
 # 获取公网IP(高效稳定探测)
 get_network_info() {
     info "获取网络信息..."
-    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6=""
+    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"
+    local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-
-    _f() { local p=$1; local out=$2
-        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" 2>/dev/null; } | tr -d '[:space:]' > "$out" 2>/dev/null; }
-
-    # 1. IPv4 始终探测
-    _f -4 "$t4" & p4=$!
-
-    # 2. 【终极保险丝】：只允许 2 或 3 开头的全球单播地址启动探测
-    # 越南鸡的 fd91 是私有地址，会被这一行死死挡住，绝对不会触发 curl -6
-    # 意大利鸡的 2a05 是标准公网地址，可以完美通过
-    if ip -6 addr show | grep -qE 'inet6 [23]'; then
-        _f -6 "$t6" & p6=$!
-    fi
-
-    # 3. 回收
-    [ -n "$p4" ] && wait $p4 2>/dev/null; [ -n "$p6" ] && wait $p6 2>/dev/null
-    [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
-    [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
+    _f() { 
+        local p=$1
+        { curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}'; } || \
+        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api.ipify.org" || \
+        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://ifconfig.me" || echo ""
+    }
+    _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
+    # 数据清洗
+    [ -s "$t4" ] && RAW_IP4=$(tr -d '[:space:]' < "$t4" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || echo "")
+    [ -s "$t6" ] && RAW_IP6=$(tr -d '[:space:]' < "$t6" | grep -Ei '([a-f0-9:]+:+)+[a-f0-9]+' || echo "")
     rm -f "$t4" "$t6"
-
-    # 4. 输出
-    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
-    
-    if [[ "${RAW_IP6:-}" == *:* ]]; then
-        IS_V6_OK="true"
-        echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
-    else
-        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
-    fi
-
-    return 0
+    # 状态判定：只有 RAW_IP6 真的包含冒号才判定 IPv6 可用
+    [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true" || IS_V6_OK="false"
+    [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "错误: 未能探测到任何有效的公网 IP，安装中断"; exit 1; }
+    # 输出信息
+    [ -n "$RAW_IP4" ] && succ "IPv4: $RAW_IP4 [✔]" || info "IPv4: 不可用 (单栈 IPv6 环境)"
+    [ "$IS_V6_OK" = "true" ] && succ "IPv6: $RAW_IP6 [✔]" || info "IPv6: 不可用 (单栈 IPv4 环境)"
 }
 
 # 网络延迟探测模块
@@ -839,20 +825,22 @@ EOF
 # 信息展示模块
 # ==========================================
 get_env_data() {
-    local CONFIG_FILE="/etc/sing-box/config.json"; RAW_ECH=""
+    local CONFIG_FILE="/etc/sing-box/config.json"
     [ ! -f "$CONFIG_FILE" ] && return 1
-    # 1. 提取核心数据 (PSK, 端口, 证书路径)
+    # 1. 提取 PSK, 端口, 证书路径
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-    [ -z "$data" ] && return 1
-    read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data"
-    # 2. 提取 SNI (域名) 与 证书指纹 (FP)
+    read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data" || true
+    # 2. 提取 SNI (域名)
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
+    # 3. 提取证书 SHA256 指纹
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
-    RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
-    # 3. 读取 ECH 并进行极致稳健的 URL 编码 (解决 BusyBox 解析坑)
+    RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
+    # 4. 读取 ECH 并进行 URL 编码
     if [ -f "/etc/sing-box/certs/ech.pub" ]; then
+        # 1. 先提取纯 Base64 字符串
         local raw=$(grep -v "ECH CONFIGS" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
-        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g' | sed 's/\//%%2F/g' | sed 's/=/%%3D/g' | sed 's/%%/%/g')
+        # 2. 对特殊字符进行百分号编码 (适配客户端解析)
+        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g' | sed 's/%%/%/g')
     fi
 }
 
