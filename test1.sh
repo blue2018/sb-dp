@@ -148,40 +148,63 @@ generate_cert() {
 
 # 获取公网IP
 get_network_info() {
-    info "获取网络信息 (安全调试模式)..."
+    info "获取网络信息 (深度调试模式)..."
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
 
-    # --- 使用安全语法访问变量，避免 unbound variable 报错 ---
+    # --- 1. 环境与变量审计 ---
     echo "[DEBUG] 执行用户: $(whoami)"
     echo "[DEBUG] 代理状态: http_proxy=${http_proxy:-none} | https_proxy=${https_proxy:-none}"
     echo "[DEBUG] DNS 现状: $(grep nameserver /etc/resolv.conf | awk '{print $2}' | xargs || echo "unknown")"
-    # -----------------------
+    
+    # 检测本地 IPv6 地址类型 (用于逻辑判断)
+    local local_v6_list=$(ip -6 addr show | grep 'inet6' | awk '{print $2}')
+    echo "[DEBUG] 本地 IPv6 列表: ${local_v6_list:-none}"
 
+    # --- 2. 探测逻辑 ---
     _f() {
-        local p=$1; local out=$2
-        # 给子进程也加一个保护，确保 curl 不会因为变量问题挂掉
+        local p=$1; local out=$2; local label=$3
+        echo "[DEBUG] $label 探测启动..."
+        
+        # 实时打印 curl 的尝试过程，不隐藏错误
         {
           curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" || \
           curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" || \
           curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ifconfig.co"
-        } | tr -d '[:space:]' > "$out" 2>/dev/null
+        } | tr -d '[:space:]' > "$out" 2>"/tmp/curl_err_${label}"
+        
+        local res=$?
+        if [ $res -ne 0 ]; then
+            echo "[DEBUG] $label 探测失败，退出码: $res" >&2
+            echo "[DEBUG] $label 错误日志: $(cat "/tmp/curl_err_${label}")" >&2
+        fi
+        rm -f "/tmp/curl_err_${label}"
     }
 
-    # 执行
-    _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!
-    
-    echo "[DEBUG] 后台 PID: v4=${p4:-err}, v6=${p6:-err}，等待响应..."
-    wait $p4 2>/dev/null; wait $p6 2>/dev/null
+    # IPv4 始终探测
+    _f -4 "$t4" "IPv4" & p4=$!
 
-    # 结果提取
+    # IPv6 智能探测逻辑：仅当存在公网 IPv6 (2xxx 或 3xxx 开头) 时才发起请求
+    local p6=""
+    if echo "$local_v6_list" | grep -qE '^(2|3)'; then
+        echo "[DEBUG] 检测到公网 IPv6 路由，启动 IPv6 探测..."
+        _f -6 "$t6" "IPv6" & p6=$!
+    else
+        echo "[DEBUG] 未检测到公网 IPv6 地址 (fd/fe 开头或为空)，跳过 IPv6 探测防止卡死。"
+    fi
+
+    echo "[DEBUG] 等待进程响应 (PID v4:${p4:-none} v6:${p6:-none})..."
+    [ -n "$p4" ] && wait $p4 2>/dev/null
+    [ -n "$p6" ] && wait $p6 2>/dev/null
+
+    # --- 3. 数据清洗与提取 ---
     [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
     [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
     
-    echo "[DEBUG] 最终提取结果: v4=[${RAW_IP4:-}] v6=[${RAW_IP6:-}]"
+    echo "[DEBUG] 提取结果: v4=[${RAW_IP4:-}] v6=[${RAW_IP6:-}]"
     rm -f "$t4" "$t6"
 
-    # 输出显示
+    # --- 4. 格式化输出 ---
     if [ -n "$RAW_IP4" ]; then
         echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
     else
@@ -192,7 +215,12 @@ get_network_info() {
         IS_V6_OK="true"
         echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
     else
-        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
+        # 区分是“跳过”还是“探测失败”
+        if echo "$local_v6_list" | grep -qE '^(2|3)'; then
+            echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m探测失败 (公网路由不通)\033[0m"
+        else
+            echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用 (无公网地址)\033[0m"
+        fi
     fi
 
     { [ -z "$RAW_IP4" ] && [ -z "${RAW_IP6:-}" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
