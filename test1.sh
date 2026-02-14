@@ -173,32 +173,44 @@ get_network_info() {
 }
 
 # 网络延迟探测模块
-probe_network_rtt() {
-    local rtt_val; local loss_val="5"; local real_rtt_factors="130"; local loss_compensation="100"; set +e
-    echo -e "\033[1;34m[INFO]\033[0m 正在探测网络画像 (RTT/丢包)..." >&2
-	# 1. 扩充探测池：覆盖国内骨干、全球顶级 CDN 及 DNS 节点
-    local targets=("223.5.5.5" "119.29.29.29" "114.114.114.114" "1.1.1.1" "8.8.8.8" "8.26.56.26" "208.67.222.222")
-    local ping_res=""
-	# 2. 遍历探测：获取首个有效响应，平衡探测速度与覆盖广度
-    for target in "${targets[@]}"; do
-        local res=$(ping -c 5 -W 1 "$target" 2>/dev/null)
-        if echo "$res" | grep -q "received"; then ping_res="$res"; break; fi
-    done
-	# 3. 提取平均 RTT 并解析丢包率 (兼容多系统格式)
-    if [ -n "$ping_res" ]; then
-        rtt_val=$(echo "$ping_res" | awk -F'/' 'END{print int($5)}')
-        loss_val=$(echo "$ping_res" | grep -oE '[0-9]+% packet loss' | grep -oE '[0-9]+' || echo "5")
-        echo -e "\033[1;32m[OK]\033[0m 实测 RTT: ${rtt_val}ms | 丢包: ${loss_val}%" >&2
+get_network_info() {
+    info "获取网络信息..."
+    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6="" e6="/tmp/.e6"
+    rm -f "$t4" "$t6" "$e6"
+
+    _f() {
+        local p=$1; local out=$2
+        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" | sed -n 's/^ip=//p' || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com"; } | tr -d '[:space:]' > "$out" 2>"${out}_err"
+    }
+
+    _f -4 "$t4" & p4=$!
+    # 意大利小鸡诊断：看看这里是否真的进入了分支
+    if ip -6 addr show | grep 'inet6 ' | grep -vE ' (fe80|fd|fc|::1)' | grep -qv 'temporary'; then
+        _f -6 "$t6" & p6=$!
     else
-        rtt_val="150"; echo -e "\033[1;33m[WARN]\033[0m 探测受阻，应用全球预估值: 150ms" >&2
+        echo "DEBUG: 系统未检测到有效的公网 IPv6 地址段" > "$e6"
     fi
-    set -e
-    # 画像联动赋值
-    real_rtt_factors=$(( rtt_val + 100 ))   # 延迟补偿：实测值 + 100ms (平衡握手开销)
-	# 丢包补偿：每 1% 丢包增加 5% 缓冲区冗余，最高 200%
-    loss_compensation=$(( 100 + loss_val * 5 )); [ "$loss_compensation" -gt 200 ] && loss_compensation=200
-	# 输出原始 RTT 供脚本其它函数引用
-    echo "$rtt_val" "$real_rtt_factors" "$loss_compensation"
+
+    [ -n "$p4" ] && wait $p4 2>/dev/null; [ -n "$p6" ] && wait $p6 2>/dev/null
+    [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
+    [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
+
+    # 结果展示
+    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
+    
+    if [[ "${RAW_IP6:-}" == *:* ]]; then
+        IS_V6_OK="true"; echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"
+    else
+        # --- 核心诊断：为什么不可用？ ---
+        echo -en "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m "
+        [ -s "$e6" ] && cat "$e6" || { [ -s "${t6}_err" ] && echo -n "(原因: $(cat "${t6}_err" | tr '\n' ' '))"; }
+        echo ""
+    fi
+
+    rm -f "$t4" "$t6" "${t4}_err" "${t6}_err" "$e6"
+    { [ -z "$RAW_IP4" ] && [ -z "${RAW_IP6:-}" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
 
 # 内存资源探测模块
