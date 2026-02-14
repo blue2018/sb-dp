@@ -149,30 +149,32 @@ generate_cert() {
 # 获取公网IP
 get_network_info() {
     info "获取网络信息..."
-    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
-    rm -f "$t4" "$t6"
-    # 1. 探测函数：使用 HTTP 协议避免 HTTPS 握手卡死，并增加直接 IP 访问
+    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"
+    local t4="/tmp/.v4"
+    
+    # 1. 探测函数：强制 -4 避开 v6 陷阱，直接打 IP 避开 DNS 污染
+    # http://1.1.1.1/cdn-cgi/trace 是目前亚洲区最稳、最快的探测点
     _f() {
-        local p=$1; local out=$2
-        # 优先请求 1.1.1.1 的 HTTP 接口，这是你刚才测通的路径
-        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "http://1.1.1.1/cdn-cgi/trace" | grep -i 'ip=' | sed 's/ip=//g' || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "http://api.ipify.org" || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "http://ifconfig.me"; } | tr -d '[:space:]' > "$out" 2>/dev/null
+        { curl -4ksSfL --connect-timeout 3 --max-time 5 "http://1.1.1.1/cdn-cgi/trace" | sed -n 's/^ip=//p' || \
+          curl -4ksSfL --connect-timeout 3 --max-time 5 "http://104.26.12.205"; } | tr -d '[:space:]' > "$t4" 2>/dev/null
     }
-    # 2. 异步执行与串行等待
-    _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!; wait $p4 2>/dev/null; wait $p6 2>/dev/null
-    # 3. 结果提取：移除严格的 ^$ 锚点
-    [ -s "$t4" ] && RAW_IP4=$(grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
-    [ -s "$t6" ] && RAW_IP6=$(grep -iE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
-    rm -f "$t4" "$t6"
-    # 4. 极简风格输出
-    [ -n "$RAW_IP4" ] && \
-        echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || \
-        echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
-    [[ "$RAW_IP6" == *:* ]] && { IS_V6_OK="true"; \
-        echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || \
-        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
-    { [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
+
+    # 2. 串行执行：在极精简环境下，串行比异步 wait 更稳定，且 1.1.1.1 响应极快
+    _f
+
+    # 3. 提取与清洗
+    [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
+    rm -f "$t4"
+
+    # 4. 极简输出
+    if [ -n "$RAW_IP4" ]; then
+        echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
+        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用 (跳过内网探测)\033[0m"
+        return 0
+    else
+        err "未能探测到公网 IP"
+        exit 1
+    fi
 }
 
 # 网络延迟探测模块
