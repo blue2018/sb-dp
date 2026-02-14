@@ -152,23 +152,28 @@ get_network_info() {
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6=""
     rm -f "$t4" "$t6"
 
-    # 1. 定义超快探测函数 (IPv6 仅给 3 秒)
+    # 1. 探测函数：v6 的 connect-timeout 是救命的关键
     _f4() { curl -4ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' > "$t4"; }
     _f6() { curl -6ksSfL --connect-timeout 2 --max-time 4 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' > "$t6"; }
 
-    # 2. 真正的一行双发异步 (越南鸡不会在这里卡住，因为是后台运行)
+    # 2. 异步并行（不阻塞，解决卡顿）
     _f4 & p4=$!; _f6 & p6=$!
 
-    # 3. 策略性回收：IPv4 必须等，IPv6 随缘
+    # 3. 优先级策略：必须等 v4，v6 最多等 2 秒
     wait $p4 2>/dev/null
     RAW_IP4=$(tr -d '[:space:]' < "$t4" 2>/dev/null)
     
-    # 4. 关键：只给 IPv6 极短的等待时间，不通就直接杀掉进程
-    # 这里在越南鸡上会瞬间跳过，因为 wait -n 或类似逻辑在后台失效时会很快返回
-    sleep 0.5 
+    # 4. 给 v6 一个极其短暂的窗口期（0.8秒足够真双栈读文件了）
+    # 如果没出来，也不去 kill 它，让 curl 自己的 --max-time 4 去收场
+    local timeout=0
+    while [ ! -s "$t6" ] && [ $timeout -lt 8 ]; do
+        sleep 0.1
+        ((timeout++))
+    done
+
     [ -s "$t6" ] && RAW_IP6=$(tr -d '[:space:]' < "$t6" 2>/dev/null)
 
-    # 5. 清理与显示
+    # 5. 输出结果
     [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
     if [[ "${RAW_IP6:-}" == *:* ]]; then
         IS_V6_OK="true"
@@ -177,11 +182,8 @@ get_network_info() {
         echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
     fi
 
-    # 后台清理残留进程，防止越南鸡中断
-    kill $p6 2>/dev/null
     rm -f "$t4" "$t6"
-
-    [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "未能探测到公网 IP"; exit 1; } || return 0
+    return 0
 }
 
 # 网络延迟探测模块
