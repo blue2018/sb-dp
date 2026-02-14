@@ -151,19 +151,20 @@ get_network_info() {
     info "获取网络信息..."
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6=""
     rm -f "$t4" "$t6"
-    # 1. 探测函数：1.1.1.1 归位首选，通过 IP 直接握手实现最快响应
     _f() { local p=$1; local out=$2
         { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' || \
           curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" 2>/dev/null || \
           curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" 2>/dev/null; } | tr -d '[:space:]' > "$out" 2>/dev/null; }
-    # 2. 暴力并发探测：不设门槛，让 v4 和 v6 在后台赛跑
-    _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!
-    # 3. 回收进程并精准清洗结果
+    # 1. IPv4 始终探测
+    _f -4 "$t4" & p4=$!
+    # 2. 智能门槛：只要网卡有非临时、非链路的 global IPv6 才启动异步探测
+    ip -6 addr show | grep -q "global" && { _f -6 "$t6" & p6=$!; }
+    # 3. 结果回收与精准清洗
     [ -n "$p4" ] && wait $p4 2>/dev/null; [ -n "$p6" ] && wait $p6 2>/dev/null
     [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
     [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
     rm -f "$t4" "$t6"
-    # 4. 极简样式化输出
+    # 4. 样式化输出
     [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
     [[ "${RAW_IP6:-}" == *:* ]] && { IS_V6_OK="true"; echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
     { [ -z "$RAW_IP4" ] && [ -z "${RAW_IP6:-}" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
