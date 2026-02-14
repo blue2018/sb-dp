@@ -152,18 +152,16 @@ get_network_info() {
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
 
-    # 1. IPv4 探测：确保稳拿结果
-    # 越南鸡在这一步是 100% 安全的
-    curl -4ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' > "$t4"
-    RAW_IP4=$(tr -d '[:space:]' < "$t4" 2>/dev/null)
+    # 1. 探测 IPv4 (IP直连，最快)
+    RAW_IP4=$(curl -4ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' | tr -d '[:space:]')
     [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m"
 
-    # 2. IPv6 探测：串行探测，且将连接超时压到极短 (1秒)
-    # 只要 1 秒内握手不成功，立刻彻底放弃，不给越南母鸡断网的机会
-    # 目标使用 IP 直连，规避 DNS 解析带来的卡顿
-    curl -6ksSfL --connect-timeout 1 --max-time 2 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' > "$t6"
-    
-    RAW_IP6=$(tr -d '[:space:]' < "$t6" 2>/dev/null)
+    # 2. 核心“保险丝”：只有明确看到全球单播地址 (2或3开头) 才允许尝试探测
+    # 这是保护越南小鸡不断网的最后屏障
+    if ip -6 addr show | grep 'inet6 ' | grep -vE 'temporary' | grep -qE 'inet6 [23]'; then
+        # 针对意大利鸡的逻辑：既然确定有公网 IP 潜力，才发起 1 秒极速探测
+        RAW_IP6=$(curl -6ksSfL --connect-timeout 1 --max-time 2 "https://[2606:4700:4700::1111]/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' | tr -d '[:space:]')
+    fi
 
     # 3. 结果显示
     if [[ "${RAW_IP6:-}" == *:* ]]; then
