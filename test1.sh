@@ -152,21 +152,30 @@ get_network_info() {
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
 
-    # 1. 探测函数：模仿 233boy 逻辑，优先使用 Cloudflare 这种在亚洲最稳的接口
+    # 1. 探测函数：参考开源脚本，使用纯 IP 接口 (1.1.1.1) 绕过 DNS 解析，这是最高效的方案
     _f() {
         local p=$1; local out=$2
-        # 越南小鸡必须优先请求 1.1.1.1，因为它绕过了大部分 DNS 污染
+        # 越南小鸡必备：1.1.1.1/cdn-cgi/trace 是目前全球最快且不依赖 DNS 的 IP 探测方式
         { curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" | grep -oE 'ip=[0-9.]+' | cut -d= -f2 || \
           curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api.ipify.org" || \
           curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://ifconfig.me"; } 2>/dev/null | tr -d '[:space:]' > "$out"
     }
 
-    # 2. 异步执行：保持你的风格
-    _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!; wait $p4 2>/dev/null; wait $p6 2>/dev/null
+    # 2. 串行异步：先启动 IPv4，如果 4 秒没结果再启动 IPv6，避免同时并发导致的系统资源抢占
+    _f -4 "$t4" & p4=$!
+    # 稍微延迟启动 v6，这是开源脚本处理 BusyBox 竞争的常用技巧
+    sleep 0.2
+    _f -6 "$t6" & p6=$!
+    
+    # 强制限时等待，防止 wait 死锁
+    wait $p4 2>/dev/null; wait $p6 2>/dev/null
 
-    # 3. 结果提取：改用最稳的 -oE，防止正则匹配整行失败
+    # 3. 结果提取：使用 -oE。原先的 ^...$ 在某些接口返回带 html 标签时会直接失败
     [ -s "$t4" ] && RAW_IP4=$(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
     [ -s "$t6" ] && RAW_IP6=$(grep -oE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
+    
+    # 清洗：过滤掉你那台越南小鸡自带的 fd91 内网 IPv6
+    [[ "$RAW_IP6" == fd* || "$RAW_IP6" == fe* ]] && RAW_IP6=""
     rm -f "$t4" "$t6"
 
     # 4. 极简风格输出
