@@ -151,22 +151,20 @@ get_network_info() {
     info "获取网络信息..."
     RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-    # 1. 探测函数：严格保持你的结构，只替换了更稳的网址
+    # 1. 探测函数：多接口备选 + 自动清洗
     _f() {
         local p=$1; local out=$2
-        # 移除 api64 这种双栈域名，换成纯粹的 v4/v6 专用接口，防止 DNS 引起的假死
-        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api.ipify.org" || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ifconfig.me" || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ident.me"; } | tr -d '[:space:]' > "$out" 2>/dev/null
+        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" || \
+          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ifconfig.co"; } | tr -d '[:space:]' > "$out" 2>/dev/null
     }
-    # 2. 异步执行与串行等待 (完全保留你的原样)
+    # 2. 异步执行与串行等待
     _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!; wait $p4 2>/dev/null; wait $p6 2>/dev/null
-    # 3. 结果提取：保持你的正则，但去掉 ^ $ 锚点提高兼容性
-    # 因为 tr -d 之后可能有不可见字符，去掉锚点能显著提高 BusyBox 下的匹配率
-    [ -s "$t4" ] && RAW_IP4=$(grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
-    [ -s "$t6" ] && RAW_IP6=$(grep -iE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
+    # 3. 结果提取与数据清洗
+    [ -s "$t4" ] && RAW_IP4=$(grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' "$t4")
+    [ -s "$t6" ] && RAW_IP6=$(grep -iE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6")
     rm -f "$t4" "$t6"
-    # 4. 极简风格输出 (完全保留你的原样)
+    # 4. 极简风格输出
     [ -n "$RAW_IP4" ] && \
         echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || \
         echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
