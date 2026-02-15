@@ -155,7 +155,7 @@ get_network_info() {
     _f() { 
         local p=$1
         { curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}'; } || \
-        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api.ipify.org" || \
+        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://icanhazip.com" || \
         curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://ifconfig.me" || echo ""
     }
     _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
