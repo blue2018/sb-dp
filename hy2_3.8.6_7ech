@@ -689,7 +689,7 @@ create_config() {
     "listen": "::",
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
-    "ignore_client_bandwidth": true,
+    "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
