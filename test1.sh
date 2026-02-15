@@ -835,16 +835,15 @@ get_env_data() {
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
-    # 3. 读取 ECH 并进行极致稳健的 URL 编码 (解决 BusyBox 解析坑)
+    # 3. 读取 ECH 并进行极致稳健的 URL 编码
     if [ -f "/etc/sing-box/certs/ech.pub" ]; then
-        local raw=$(grep -v "ECH CONFIGS" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
-        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g' | sed 's/\//%%2F/g' | sed 's/=/%%3D/g' | sed 's/%%/%/g')
+        RAW_ECH=$(grep -v "ECH CONFIGS" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
     fi
 }
 
 display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" status_info="" hostname_tag="$(hostname)"
-    local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
+	local BASE_PARAM="peer=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&hpkp=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
     local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" s_text="\033[1;33moffline\033[0m" p_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
     pgrep sing-box >/dev/null 2>&1 && { s_text="\033[1;33monline\033[0m"; s_icon="\033[1;32m[✔]\033[0m"; }
     _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
@@ -855,11 +854,11 @@ display_links() {
 
     echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon | 服务: $s_text $s_icon"
     if [ -n "${RAW_IP4:-}" ]; then
-        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v4"
+        LINK_V4="hysteria2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v4"
         echo -e "\n\033[1;35m[IPv4节点]\033[0m\n$LINK_V4"; FULL_CLIP="$LINK_V4"
     fi
     if [[ "${RAW_IP6:-}" == *:* ]]; then
-        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v6"
+        LINK_V6="hysteria2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v6"
         echo -e "\n\033[1;36m[IPv6节点]\033[0m\n$LINK_V6"; FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
     fi
     echo -e "\n\033[1;34m==========================================\033[0m"
