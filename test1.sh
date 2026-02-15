@@ -449,7 +449,7 @@ optimize_system() {
 		target_qlen=5000;  t_usc=150; ring=1024
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
-        VAR_HY2_BW="118"; max_udp_mb=$((mem_total * 45 / 100)) 
+        VAR_HY2_BW="100"; max_udp_mb=$((mem_total * 45 / 100)) 
         SBOX_GOLIMIT="$((mem_total * 65 / 100))MiB"; SBOX_GOGC="50"
         SBOX_MEM_HIGH="$((mem_total * 75 / 100))M"; SBOX_MEM_MAX="$((mem_total * 85 / 100))M"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=2097152
