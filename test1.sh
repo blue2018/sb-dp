@@ -843,38 +843,29 @@ get_env_data() {
 }
 
 display_links() {
-    local LINK_V4="" LINK_V6="" FULL_CLIP="" v4_status="" v6_status=""
-    local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
-    [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
-    [ -n "${RAW_ECH:-}" ] && BASE_PARAM="${BASE_PARAM}&ech=${RAW_ECH}"
-    
-    _do_probe() {
-        [ -z "$1" ] && return
-        (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
-        echo -e "\033[1;32m (已连通)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
-    }
-    
+    local LINK_V4="" LINK_V6="" FULL_CLIP="" status_info="" hostname_tag="$(hostname)"
+    local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
+    local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" s_text="\033[1;33moffline\033[0m" p_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
+    pgrep sing-box >/dev/null 2>&1 && { s_text="\033[1;33monline\033[0m"; s_icon="\033[1;32m[✔]\033[0m"; }
+    _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
     if command -v nc >/dev/null 2>&1; then
-        _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
-        v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
+        _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 & wait
+        [[ "$(cat /tmp/sb_v4_res 2>/dev/null)" == "OK" || "$(cat /tmp/sb_v6_res 2>/dev/null)" == "OK" ]] && p_icon="\033[1;32m[✔]\033[0m"
     fi
-    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m\n"
-    
-    [ -n "${RAW_IP4:-}" ] && {
-        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_Hy2_ECH_v4"
-        echo -e "\033[1;35m[IPv4节点链接]\033[0m$v4_status\n$LINK_V4\n"
-        FULL_CLIP="$LINK_V4"
-    }
-    [ -n "${RAW_IP6:-}" ] && {
-        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_Hy2_ECH_v6"
-        echo -e "\033[1;36m[IPv6节点链接]\033[0m$v6_status\n$LINK_V6\n"
-        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
-    }
-    echo -e "\033[1;34m==========================================\033[0m"
-    echo -e "\033[1;32m[ECH 已激活]\033[0m 流量已混入大厂标准 TLS 1.3 握手池"
+
+    echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon | 服务: $s_text $s_icon"
+    if [ -n "${RAW_IP4:-}" ]; then
+        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v4"
+        echo -e "\n\033[1;35m[IPv4节点]\033[0m\n$LINK_V4"; FULL_CLIP="$LINK_V4"
+    fi
+    if [[ "${RAW_IP6:-}" == *:* ]]; then
+        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v6"
+        echo -e "\n\033[1;36m[IPv6节点]\033[0m\n$LINK_V6"; FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
+    fi
+    echo -e "\n\033[1;34m==========================================\033[0m"
+    echo -e "\033[1;32m[ECH 已激活]\033[0m 流量已混入 $RAW_SNI 的 TLS 1.3 握手池"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
-
 
 display_system_status() {
     local VER_INFO=$(/usr/bin/sing-box version 2>/dev/null | head -n1 | sed 's/version /v/')
