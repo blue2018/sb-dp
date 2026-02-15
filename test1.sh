@@ -158,8 +158,8 @@ get_network_info() {
     # 2. 异步执行：并行探测
     _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
     # 3. 数据清洗：在主进程统一清洗数据
-    RAW_IP4=$(tr -d '[:space:]' < "$t4" 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1 || echo "")
-    RAW_IP6=$(tr -d '[:space:]' < "$t6" 2>/dev/null | grep -EiEo '([a-f0-9:]+:+)+[a-f0-9]+' | head -n 1 || echo "")
+    [ -s "$t4" ] && read -r RAW_IP4 < "$t4" && RAW_IP4=${RAW_IP4//[[:space:]]/}
+    [ -s "$t6" ] && read -r RAW_IP6 < "$t6" && RAW_IP6=${RAW_IP6//[[:space:]]/}
     rm -f "$t4" "$t6"
     # 4. 判定与输出
     [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true"
