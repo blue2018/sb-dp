@@ -157,9 +157,11 @@ get_network_info() {
           curl $p -ksSfL --connect-timeout 1 --max-time 2 "https://icanhazip.com" || echo ""; }
     # 2. 异步执行：并行探测
     _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
-    # 3. 数据清洗：在主进程统一清洗数据
+    # 3. 数据清洗 (融合版)：在主进程统一清洗数据
     [ -s "$t4" ] && read -r RAW_IP4 < "$t4" && RAW_IP4=${RAW_IP4//[[:space:]]/}
     [ -s "$t6" ] && read -r RAW_IP6 < "$t6" && RAW_IP6=${RAW_IP6//[[:space:]]/}
+    [[ ! "$RAW_IP4" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && RAW_IP4=""
+    [[ "$RAW_IP6" != *:* ]] && RAW_IP6=""
     rm -f "$t4" "$t6"
     # 4. 判定与输出
     [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true"
