@@ -150,7 +150,7 @@ generate_cert() {
 get_network_info() {
     info "获取网络信息..."; RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-    # 1. 探测函数：v4 用标准接口，v6 用专用 api6 接口。api6 在无 v6 时会秒断，在有 v6 时极稳
+    # 1. 探测函数：v4 用标准接口，v6 用专用 api6 接口，在无 v6 时会秒断，在有 v6 时极稳
     _f() { local p=$1
         { curl $p -ksSfL --connect-timeout 1 --max-time 3 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}'; } || \
         { [ "$p" = "-4" ] && curl $p -ksSfL --connect-timeout 1 --max-time 2 "https://api.ipify.org" || curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://api6.ipify.org" ; } || \
