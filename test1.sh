@@ -150,18 +150,16 @@ generate_cert() {
 get_network_info() {
     info "获取网络信息..."; RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-    # 1. 探测函数
     _f() { local p=$1
-        { curl $p -ksSfL --connect-timeout 1 --max-time 3 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}'; } || \
-          curl $p -ksSfL --connect-timeout 1 --max-time 2 "https://icanhazip.com" || \
-          curl $p -ksSfL --connect-timeout 1 --max-time 2 "https://ifconfig.me" || echo ""; }
-    # 2. 异步执行：并行探测。这里完全还原原版的 >"$t4" 模式，这是秒出的核心
+        { curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}'; } || \
+        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://icanhazip.com" || \
+        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://ifconfig.me" || echo ""; }
     _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
-    # 3. 数据清洗：在主进程统一清洗数据
-    RAW_IP4=$(tr -d '[:space:]' < "$t4" 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1 || echo "")
-    RAW_IP6=$(tr -d '[:space:]' < "$t6" 2>/dev/null | grep -EiEo '([a-f0-9:]+:+)+[a-f0-9]+' | head -n 1 || echo "")
+    # 数据清洗
+    [ -s "$t4" ] && RAW_IP4=$(tr -d '[:space:]' < "$t4" | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || echo "")
+    [ -s "$t6" ] && RAW_IP6=$(tr -d '[:space:]' < "$t6" | grep -Ei '([a-f0-9:]+:+)+[a-f0-9]+' || echo "")
     rm -f "$t4" "$t6"
-    # 4. 判定与输出
+    # 判定与输出
     [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true"
     [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
     [ "$IS_V6_OK" = "true" ] && echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
