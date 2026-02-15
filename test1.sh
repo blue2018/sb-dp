@@ -830,33 +830,17 @@ get_env_data() {
 
     # 1. 提取核心数据
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
+    [ -z "$data" ] && return 1
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data"
 
-    # 2. 提取 SNI (域名) - 终极防御逻辑
-    # 第一招：从证书物理文件提取 (最真实)
-    [ -f "$CERT_PATH" ] && RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
+    # 2. 提取 SNI (域名) —— 修正点：改回版本一正确的 sed 逻辑
+    RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
 
-    # 第二招：如果证书提取失败，直接从配置文件的 tls 块里暴力抓取 server_name
-    if [ -z "$RAW_SNI" ] || [ "$RAW_SNI" = "null" ]; then
-        RAW_SNI=$(jq -r '.. | objects | select(.has_service? or .type == "hysteria2") | .tls.server_name // empty' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-    fi
-
-    # 第三招：暴力兜底 - 直接从证书文件名所在的目录猜，或者用全局变量
-    if [ -z "$RAW_SNI" ] || [ "$RAW_SNI" = "null" ]; then
-        # 如果你的 TLS_DOMAIN 变量在脚本其他地方定义了，直接拿来用
-        RAW_SNI="${TLS_DOMAIN:-}"
-    fi
-
-    # 第四招：如果还是空的，强制从 /etc/sing-box/certs/ 目录下的文件名或者 openssl 生成记录里找
-    if [ -z "$RAW_SNI" ]; then
-        RAW_SNI=$(ls /etc/sing-box/certs/*.pem 2>/dev/null | head -n 1 | xargs openssl x509 -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
-    fi
-
-    # 3. 提取证书指纹 (FP)
+    # 3. 提取证书指纹 (FP) —— 确保与 SNI 逻辑分开
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
 
-    # 4. 读取 ECH
+    # 4. 读取 ECH —— 保持纯净 Base64 输出
     if [ -f "/etc/sing-box/certs/ech.pub" ]; then
         RAW_ECH=$(grep -v "ECH CONFIGS" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
     fi
