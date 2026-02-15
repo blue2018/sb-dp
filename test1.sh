@@ -10,7 +10,7 @@ SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF
 VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_ECH=""
 VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
-TLS_DOMAIN_POOL=("www.bing.com" "www.microsoft.com" "itunes.apple.com" "www.icloud.com" "www.visa.com" "www.cisco.com")
+TLS_DOMAIN_POOL=("www.bing.com" "www.microsoft.com" "itunes.apple.com" "www.icloud.com" "www.7-zip.org" "www.jsdelivr.com")
 pick_tls_domain() { echo "${TLS_DOMAIN_POOL[$RANDOM % ${#TLS_DOMAIN_POOL[@]}]}"; }
 TLS_DOMAIN="$(pick_tls_domain)"
 
@@ -154,7 +154,7 @@ generate_cert() {
     fi
 }
 
-# 获取公网IP(高效稳定探测)
+# 获取公网IP
 get_network_info() {
     info "获取网络信息..."; RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
@@ -234,25 +234,24 @@ apply_initcwnd_optimization() {
     local silent="${1:-false}" info gw dev mtu mss opts
     command -v ip >/dev/null || return 0
     local current_route=$(ip route show default | head -n1)
-    # 幂等性检查：若已包含 initcwnd 15 则跳过
     echo "$current_route" | grep -q "initcwnd 15" && { [[ "$silent" == "false" ]] && info "InitCWND 已优化，跳过"; INITCWND_DONE="true"; return 0; }
-
-    # 提取核心路由参数
     gw=$(echo "$current_route" | grep -oE 'via [^ ]+' | awk '{print $2}')
     dev=$(echo "$current_route" | grep -oE 'dev [^ ]+' | awk '{print $2}')
     mtu=$(echo "$current_route" | grep -oE 'mtu [0-9]+' | awk '{print $2}' || echo 1500)
     mss=$((mtu - 40))
     opts="initcwnd 15 initrwnd 15 advmss $mss"
 
-    # 执行修改（逻辑依然采用你的高效尝试链）
-    if { [ -n "$gw" ] && [ -n "$dev" ] && ip route change default via "$gw" dev "$dev" $opts 2>/dev/null; } || \
-       { [ -n "$gw" ] && [ -n "$dev" ] && ip route replace default via "$gw" dev "$dev" $opts 2>/dev/null; } || \
-       { [ -n "$dev" ] && ip route replace default dev "$dev" $opts 2>/dev/null; } || \
-       ip route change default $opts 2>/dev/null; then
-        INITCWND_DONE="true"
-        [[ "$silent" == "false" ]] && succ "InitCWND 优化成功 (15/MSS $mss)"
+    if ip route change default $(echo "$current_route" | cut -d' ' -f2-) 2>/dev/null; then
+        if { [ -n "$gw" ] && [ -n "$dev" ] && ip route change default via "$gw" dev "$dev" $opts 2>/dev/null; } || \
+           { [ -n "$gw" ] && [ -n "$dev" ] && ip route replace default via "$gw" dev "$dev" $opts 2>/dev/null; } || \
+           { [ -n "$dev" ] && ip route replace default dev "$dev" $opts 2>/dev/null; } || \
+           ip route change default $opts 2>/dev/null; then
+            INITCWND_DONE="true"
+            [[ "$silent" == "false" ]] && succ "InitCWND 优化成功 (15/MSS $mss)"
+        fi
     else
-        [[ "$silent" == "false" ]] && warn "InitCWND 修改失败（内核或容器限制）"
+        INITCWND_DONE="false"
+        [[ "$silent" == "false" ]] && warn "InitCWND 修改受限，维持系统默认 (10)"
     fi
 }
 
@@ -667,6 +666,7 @@ install_singbox() {
 # ==========================================
 # 配置文件生成
 # ==========================================
+# 配置文件生成 (集成 ECH)
 create_config() {
     local PORT_HY2="${1:-}"
     local cur_bw="${VAR_HY2_BW:-200}"
@@ -674,7 +674,7 @@ create_config() {
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
+    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
     
     # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
@@ -691,21 +691,21 @@ create_config() {
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":true,"disable_cache":false,"disable_expire":false},
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
     "listen": "::",
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
-    "ignore_client_bandwidth": true,
+    "ignore_client_bandwidth": false,
     "up_mbps": $cur_bw,
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
     "udp_fragment": true,
     "tls": {
       "enabled": true, 
-      "alpn": ["h3", "h2"], 
+      "alpn": ["h3"], 
       "min_version": "1.3", 
       "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
       "key_path": "/etc/sing-box/certs/privkey.pem",
@@ -733,7 +733,7 @@ setup_service() {
     local mem_total=$(probe_memory_total); local io_prio=4
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
     [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
-    [ "$mem_total" -lt 200 ] && io_prio=7
+    [ "$mem_total" -lt 200 ] && io_prio=7 
     local final_nice="$cur_nice"
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
     if ! renice "$cur_nice" $$ >/dev/null 2>&1; then
