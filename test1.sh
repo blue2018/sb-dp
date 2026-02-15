@@ -150,22 +150,23 @@ generate_cert() {
 get_network_info() {
     info "获取网络信息..."; RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-    # 1. 探测函数：必须在括号内做完所有动作，且最后加 || echo "" 确保子进程也是“成功”退出
-    _f() { local p=$1
-        { { curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}'; } || \
-          { curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api64.ipify.org"; } || \
-          { curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://icanhazip.com"; } ; } 2>/dev/null | tr -d '[:space:]' || echo ""; }
-    # 2. 异步执行：必须使用原始版的并行 wait 方式，一次性回收所有进程，不给脚本卡死在某个特定进程的机会
+    # 探测函数：通过逻辑或连接实现多接口备份，加入简易短路提升速度
+    _f() { local p=$1; { \
+        res=$(curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}') && [ -n "$res" ] && echo "$res" && return; \
+        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api64.ipify.org" || \
+        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://icanhazip.com"; \
+    } 2>/dev/null | tr -d '[:space:]' || true; }
+    # 异步执行：并行探测 v4 和 v6
     _f -4 >"$t4" & p4=$!; _f -6 >"$t6" & p6=$!; wait $p4 $p6 2>/dev/null
-    # 3. 数据清洗：严格遵循原始版的 || echo "" 赋值保护
+    # 数据清洗：严格保留 || echo "" 风格，head -n 1 确保取值唯一
     RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" 2>/dev/null | head -n 1 || echo "")
     RAW_IP6=$(grep -EiEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" 2>/dev/null | head -n 1 || echo "")
     rm -f "$t4" "$t6"
-    # 4. 判定与输出
+    # 结果判定与输出
     [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true"
-    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: 不可用"
-    [ "$IS_V6_OK" = "true" ] && echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv6: 不可用"
-    [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "错误: 未能探测到公网 IP"; exit 1; } || return 0
+    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
+    [ "$IS_V6_OK" = "true" ] && echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
+    [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "未能探测到公网 IP"; exit 1; } || return 0
 }
 
 # 网络延迟探测模块
