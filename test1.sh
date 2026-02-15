@@ -150,20 +150,17 @@ generate_cert() {
 get_network_info() {
     info "获取网络信息..."; RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-    # 探测函数：在括号末尾强制 || true，确保子进程无论如何都以 0 状态退出，彻底防止 set -e 中断
-    _f() { local p=$1; { \
-        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}' || \
-        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api64.ipify.org" || \
-        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://icanhazip.com"; \
-    } 2>/dev/null | tr -d '[:space:]' || true; }
-    # 异步执行：还原原始版的并行启动与并行回收模式
-    _f -4 >"$t4" & p4=$!; _f -6 >"$t6" & p6=$!
-    wait $p4 $p6 2>/dev/null
-    # 数据清洗：严格保留 || echo "" 风格，head -n 1 确保取值唯一
-    RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" 2>/dev/null | head -n 1 || echo "")
-    RAW_IP6=$(grep -EiEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" 2>/dev/null | head -n 1 || echo "")
+    # 1. 探测函数：保持单行流式风格，通过 && return 实现首选成功即秒出
+    _f() { local p=$1; curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | awk -F= '/ip/ {print $2}' | grep . && return
+           curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api64.ipify.org" 2>/dev/null | grep . && return
+           curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://icanhazip.com" 2>/dev/null; }
+    # 2. 异步启动，关键回收：并行等待，这是确保不断连、不卡死的灵魂
+    _f -4 >"$t4" & p4=$!; _f -6 >"$t6" & p6=$!; wait $p4 $p6 2>/dev/null
+    # 4. 数据清洗：在主进程利用 tr 过滤，配合 || echo "" 确保 set -e 环境下的安全
+    RAW_IP4=$(tr -d '[:space:]' < "$t4" 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1 || echo "")
+    RAW_IP6=$(tr -d '[:space:]' < "$t6" 2>/dev/null | grep -EiEo '([a-f0-9:]+:+)+[a-f0-9]+' | head -n 1 || echo "")
     rm -f "$t4" "$t6"
-    # 结果判定与输出
+    # 5. 判定与输出
     [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true"
     [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
     [ "$IS_V6_OK" = "true" ] && echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
