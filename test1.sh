@@ -122,10 +122,9 @@ prompt_for_port() {
 generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"; local TMP_ECH="/tmp/ech_out"
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-    
     # 1. 生成 TLS 证书
     if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
-        info "生成 ECC P-256 高性能证书 (域名: $TLS_DOMAIN)..."
+        info "生成 ECC 证书 (域名: $TLS_DOMAIN)..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
             -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" \
@@ -133,28 +132,21 @@ generate_cert() {
             -addext "subjectAltName=DNS:$TLS_DOMAIN" \
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
-
-    # 2. 生成 ECH 密钥 (核心修正：指定域名 + 保留 PEM 标头)
-    info "正在为 $TLS_DOMAIN 生成 ECH 密钥对..."
-    # 关键：这里不能用 "dummy"，必须用 $TLS_DOMAIN
+    # 2. 生成 ECH 密钥 (保留 PEM 标头)
+    info "生成 $TLS_DOMAIN 的 ECH 密钥对..."
     /usr/bin/sing-box generate ech-keypair "$TLS_DOMAIN" > "$TMP_ECH" 2>&1
-    
-    # 保留完整 PEM 格式，满足 v1.12 内核要求
     sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
     sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
     rm -f "$TMP_ECH"
-
-    # 3. 最终校验与权限
+    # 3. 校验并提取指纹
     if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
-        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.key" "$CERT_DIR/ech.pub"
+        chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/ech.key" && chmod 644 "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.pub"
         succ "ECC 证书与 ECH 密钥对就绪"
-    else 
-        err "证书或 ECH 密钥生成失败"; exit 1
-    fi
+    else err "证书或 ECH 密钥生成失败"; exit 1; fi
 }
 
-# 获取公网IP
+# 获取公网IP(高效稳定探测)
 get_network_info() {
     info "获取网络信息..."; RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
@@ -666,7 +658,6 @@ install_singbox() {
 # ==========================================
 # 配置文件生成
 # ==========================================
-# 配置文件生成 (集成 ECH)
 create_config() {
     local PORT_HY2="${1:-}"
     local cur_bw="${VAR_HY2_BW:-200}"
@@ -705,7 +696,7 @@ create_config() {
     "udp_fragment": true,
     "tls": {
       "enabled": true, 
-      "alpn": ["h3"], 
+      "alpn": ["h3", "h2"], 
       "min_version": "1.3", 
       "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
       "key_path": "/etc/sing-box/certs/privkey.pem",
@@ -733,7 +724,7 @@ setup_service() {
     local mem_total=$(probe_memory_total); local io_prio=4
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
     [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
-    [ "$mem_total" -lt 200 ] && io_prio=7 
+    [ "$mem_total" -lt 200 ] && io_prio=7
     local final_nice="$cur_nice"
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
     if ! renice "$cur_nice" $$ >/dev/null 2>&1; then
@@ -834,55 +825,45 @@ EOF
 # 信息展示模块
 # ==========================================
 get_env_data() {
-    local CONFIG_FILE="/etc/sing-box/config.json"
+    local CONFIG_FILE="/etc/sing-box/config.json"; RAW_ECH=""
     [ ! -f "$CONFIG_FILE" ] && return 1
-    # 1. 提取 PSK, 端口, 证书路径
+    # 1. 提取核心数据 (PSK, 端口, 证书路径)
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-    read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data" || true
-    # 2. 提取 SNI (域名)
+    [ -z "$data" ] && return 1
+    read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data"
+    # 2. 提取 SNI (域名) 与 证书指纹 (FP)
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
-    # 3. 提取证书 SHA256 指纹
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
-    RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | cut -d'=' -f2 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
-    # 4. 读取 ECH 并进行 URL 编码
+    RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
+    # 3. 读取 ECH 并进行极致稳健的 URL 编码 (解决 BusyBox 解析坑)
     if [ -f "/etc/sing-box/certs/ech.pub" ]; then
-        # 1. 先提取纯 Base64 字符串
         local raw=$(grep -v "ECH CONFIGS" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
-        # 2. 对特殊字符进行百分号编码 (适配客户端解析)
-        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g' | sed 's/%%/%/g')
+        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g' | sed 's/\//%%2F/g' | sed 's/=/%%3D/g' | sed 's/%%/%/g')
     fi
 }
 
 display_links() {
-    local LINK_V4="" LINK_V6="" FULL_CLIP="" v4_status="" v6_status=""
-    local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1"
-    [ -n "${RAW_FP:-}" ] && BASE_PARAM="${BASE_PARAM}&pinsha256=${RAW_FP}"
-    [ -n "${RAW_ECH:-}" ] && BASE_PARAM="${BASE_PARAM}&ech=${RAW_ECH}"
-    
-    _do_probe() {
-        [ -z "$1" ] && return
-        (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && \
-        echo -e "\033[1;32m (已连通)\033[0m" || echo -e "\033[1;33m (本地受阻)\033[0m"
-    }
-    
+    local LINK_V4="" LINK_V6="" FULL_CLIP="" status_info="" hostname_tag="$(hostname)"
+    local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
+    local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" s_text="\033[1;33moffline\033[0m" p_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
+    pgrep sing-box >/dev/null 2>&1 && { s_text="\033[1;33monline\033[0m"; s_icon="\033[1;32m[✔]\033[0m"; }
+    _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
     if command -v nc >/dev/null 2>&1; then
-        _do_probe "${RAW_IP4:-}" > /tmp/sb_v4 2>&1 & _do_probe "${RAW_IP6:-}" > /tmp/sb_v6 2>&1 & wait
-        v4_status=$(cat /tmp/sb_v4 2>/dev/null); v6_status=$(cat /tmp/sb_v6 2>/dev/null)
+        _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 & wait
+        [[ "$(cat /tmp/sb_v4_res 2>/dev/null)" == "OK" || "$(cat /tmp/sb_v6_res 2>/dev/null)" == "OK" ]] && p_icon="\033[1;32m[✔]\033[0m"
     fi
-    echo -e "\n\033[1;32m[节点信息]\033[0m \033[1;34m>>>\033[0m 运行端口: \033[1;33m${RAW_PORT:-"未知"}\033[0m\n"
-    
-    [ -n "${RAW_IP4:-}" ] && {
-        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#$(hostname)_Hy2_ECH_v4"
-        echo -e "\033[1;35m[IPv4节点链接]\033[0m$v4_status\n$LINK_V4\n"
-        FULL_CLIP="$LINK_V4"
-    }
-    [ -n "${RAW_IP6:-}" ] && {
-        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#$(hostname)_Hy2_ECH_v6"
-        echo -e "\033[1;36m[IPv6节点链接]\033[0m$v6_status\n$LINK_V6\n"
-        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP\n}$LINK_V6"
-    }
-    echo -e "\033[1;34m==========================================\033[0m"
-    echo -e "\033[1;32m[ECH 已激活]\033[0m 流量已混入大厂标准 TLS 1.3 握手池"
+
+    echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon | 服务: $s_text $s_icon"
+    if [ -n "${RAW_IP4:-}" ]; then
+        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v4"
+        echo -e "\n\033[1;35m[IPv4节点]\033[0m\n$LINK_V4"; FULL_CLIP="$LINK_V4"
+    fi
+    if [[ "${RAW_IP6:-}" == *:* ]]; then
+        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v6"
+        echo -e "\n\033[1;36m[IPv6节点]\033[0m\n$LINK_V6"; FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
+    fi
+    echo -e "\n\033[1;34m==========================================\033[0m"
+    echo -e "\033[1;32m[ECH 已激活]\033[0m 流量已混入 $RAW_SNI 的 TLS 1.3 握手池"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
