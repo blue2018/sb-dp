@@ -844,7 +844,8 @@ get_env_data() {
 
 display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" status_info="" hostname_tag="$(hostname)"
-	local BASE_PARAM="peer=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&hpkp=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
+	local current_sni="${RAW_SNI:-$TLS_DOMAIN}"
+    local BASE_PARAM="peer=${current_sni}&alpn=h3&insecure=1${RAW_FP:+&hpkp=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
     local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" s_text="\033[1;33moffline\033[0m" p_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
     pgrep sing-box >/dev/null 2>&1 && { s_text="\033[1;33monline\033[0m"; s_icon="\033[1;32m[✔]\033[0m"; }
     _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
