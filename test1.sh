@@ -152,7 +152,7 @@ get_network_info() {
     rm -f "$t4" "$t6"
     # 1. 探测函数
     _f() { local p=$1
-        { curl $p -ksSfL --connect-timeout 1 --max-time 4 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}' | grep . ; } || \
+        { curl $p -ksSfL --connect-timeout 1 --max-time 3 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}' | grep . ; } || \
         { curl $p -ksSfL --connect-timeout 1 --max-time 3 "https://icanhazip.com" ; } || \
         { curl $p -ksSfL --connect-timeout 1 --max-time 3 "https://ifconfig.me" ; } || echo ""; }
     # 2. 异步执行：并行探测。这里完全还原原版的 >"$t4" 模式，这是秒出的核心
