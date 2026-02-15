@@ -148,25 +148,25 @@ generate_cert() {
 
 # 获取公网IP(高效稳定探测)
 get_network_info() {
-    info "获取网络信息..."
-    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6" p4="" p6=""
+    info "获取网络信息..."; RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-    # 1. 探测函数：1.1.1.1 归位首选，通过 IP 直接握手实现最快响应
-    _f() { local p=$1; local out=$2
-        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://1.1.1.1/cdn-cgi/trace" 2>/dev/null | sed -n 's/^ip=//p' || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" 2>/dev/null || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" 2>/dev/null; } | tr -d '[:space:]' > "$out" 2>/dev/null; }
-    # 2. 暴力并发探测：不设门槛，让 v4 和 v6 在后台赛跑
-    _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!
-    # 3. 回收进程并精准清洗结果
-    [ -n "$p4" ] && wait $p4 2>/dev/null; [ -n "$p6" ] && wait $p6 2>/dev/null
-    [ -s "$t4" ] && RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" | head -n 1)
-    [ -s "$t6" ] && RAW_IP6=$(grep -iEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" | head -n 1)
+    # 1. 探测函数：单行逻辑，整合多接口备份
+    _f() { local p=$1; { \
+        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}' || \
+        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api64.ipify.org" || \
+        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://icanhazip.com"; \
+    } 2>/dev/null | tr -d '[:space:]'; }
+    # 2. 异步执行：不带等待提示，直接后台赛跑
+    _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
+    # 3. 数据清洗：利用 || echo "" 确保即使没搜到 IP 也不触发脚本中断退出 (set -e 兼容)
+    RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" 2>/dev/null | head -n 1 || echo "")
+    RAW_IP6=$(grep -EiEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" 2>/dev/null | head -n 1 || echo "")
     rm -f "$t4" "$t6"
-    # 4. 极简样式化输出
-    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m探测失败\033[0m"
-    [[ "${RAW_IP6:-}" == *:* ]] && { IS_V6_OK="true"; echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
-    { [ -z "$RAW_IP4" ] && [ -z "${RAW_IP6:-}" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
+    # 4. 判定与极简输出：压缩显示逻辑
+    [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true"
+    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: 不可用"
+    [ "$IS_V6_OK" = "true" ] && echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv6: 不可用"
+    [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "错误: 未能探测到公网 IP"; exit 1; } || return 0
 }
 
 # 网络延迟探测模块
