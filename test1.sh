@@ -150,27 +150,21 @@ generate_cert() {
 get_network_info() {
     info "获取网络信息..."; RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-
-    # 探测函数：在括号末尾强制 || true，通过 res 变量判断实现“首选成功即跳出”，大幅提速
-    _f() { local p=$1; { \
-        res=$(curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}') && [ -n "$res" ] && echo "$res" && return; \
-        res=$(curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://api64.ipify.org") && [ -n "$res" ] && echo "$res" && return; \
-        curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://icanhazip.com" || return 0; \
-    } 2>/dev/null | tr -d '[:space:]' || true; }
-
-    # 异步执行：并行探测 v4 和 v6，保留原始并行回收模式
-    _f -4 >"$t4" & p4=$!; _f -6 >"$t6" & p6=$!; wait $p4 $p6 2>/dev/null
-
-    # 数据清洗：严格保留 || echo "" 风格，head -n 1 确保取值唯一
-    RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" 2>/dev/null | head -n 1 || echo "")
-    RAW_IP6=$(grep -EiEo '([a-f0-9:]+:+)+[a-f0-9]+' "$t6" 2>/dev/null | head -n 1 || echo "")
+    # 1. 探测函数：还原原版流式结构。使用 || 串联，前一个失败立刻跑后一个，绝不中转变量
+    _f() { local p=$1
+        { curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}' | grep . ; } || \
+        { curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://api64.ipify.org" ; } || \
+        { curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://ifconfig.me" ; } || echo ""; }
+    # 2. 异步执行：并行探测。这里完全还原原版的 >"$t4" 模式，这是秒出的核心
+    _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
+    # 3. 数据清洗：在主进程统一清洗数据
+    RAW_IP4=$(tr -d '[:space:]' < "$t4" 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1 || echo "")
+    RAW_IP6=$(tr -d '[:space:]' < "$t6" 2>/dev/null | grep -EiEo '([a-f0-9:]+:+)+[a-f0-9]+' | head -n 1 || echo "")
     rm -f "$t4" "$t6"
-
-    # 结果判定与输出
+    # 4. 判定与输出
     [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true"
     [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
     [ "$IS_V6_OK" = "true" ] && echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
-
     [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "错误: 未能探测到公网 IP"; exit 1; } || return 0
 }
 
