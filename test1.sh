@@ -674,7 +674,7 @@ create_config() {
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
+    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
     
     # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
@@ -698,7 +698,7 @@ create_config() {
     "listen": "::",
     "listen_port": $PORT_HY2,
     "users": [ { "password": "$PSK" } ],
-    "ignore_client_bandwidth": false,
+    "ignore_client_bandwidth": true,
     "up_mbps": $cur_bw,
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
