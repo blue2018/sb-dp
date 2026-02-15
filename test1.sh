@@ -449,8 +449,8 @@ optimize_system() {
 		target_qlen=5000;  t_usc=150; ring=1024
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
-        VAR_HY2_BW="100"; max_udp_mb=$((mem_total * 45 / 100)) 
-        SBOX_GOLIMIT="$((mem_total * 65 / 100))MiB"; SBOX_GOGC="50"
+        VAR_HY2_BW="160"; max_udp_mb=$((mem_total * 45 / 100)) 
+        SBOX_GOLIMIT="$((mem_total * 65 / 100))MiB"; SBOX_GOGC="40"
         SBOX_MEM_HIGH="$((mem_total * 75 / 100))M"; SBOX_MEM_MAX="$((mem_total * 85 / 100))M"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=2097152
         g_procs=1; swappiness_val=10; busy_poll_val=0; ct_max=16384; ct_stream_to=30
@@ -466,8 +466,8 @@ optimize_system() {
     [ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min
     # 针对 100M- 机器严格锁定上限，防止内存被缓冲区填满导致波浪式掉速
     if [ "$mem_total" -lt 100 ]; then
-        [ "$dyn_buf" -gt 8388608 ] && dyn_buf=8388608   # 强制上限 8MB，维持高周转
-        [ "$dyn_buf" -lt 4194304 ] && dyn_buf=4194304   # 保底 4MB
+        [ "$dyn_buf" -gt 12582912 ] && dyn_buf=12582912   # 强制上限 12MB，维持高周转
+        [ "$dyn_buf" -lt 8388608 ] && dyn_buf=8388608   # 保底 8MB
     else
         [ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
         [ "$dyn_buf" -lt 16777216 ] && dyn_buf=16777216
