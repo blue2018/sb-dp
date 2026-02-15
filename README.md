@@ -4,7 +4,7 @@ Sing-box 自动化部署工具，支持HY2协议。
 ## ✅ 一键部署命令
 Hy2：
 ```bash
-curl -fsSL -H "Cache-Control: no-cache" https://raw.githubusercontent.com/blue2018/sb-dp/refs/heads/main/sb_hy2.sh -o /usr/local/bin/sb_hy2.sh && chmod +x /usr/local/bin/sb_hy2.sh && /usr/local/bin/sb_hy2.sh
+curl -fsSL -H "Cache-Control: no-cache" https://raw.githubusercontent.com/blue2018/sb-dp/refs/heads/main/hy2ech.sh -o /usr/local/bin/hy2ech.sh && chmod +x /usr/local/bin/hy2ech.sh && hy2ech.sh
 ```
 Hy2 / VLESS + ws + Argo：(testing)
 ```bash
