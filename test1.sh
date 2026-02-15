@@ -150,13 +150,13 @@ generate_cert() {
 get_network_info() {
     info "获取网络信息..."; RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-    # 探测函数：通过逻辑或连接实现多接口备份，加入简易短路提升速度
+    # 探测函数：在括号末尾强制 || true，通过 res 变量判断实现“首选成功即跳出”，大幅提速
     _f() { local p=$1; { \
-        res=$(curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}') && [ -n "$res" ] && echo "$res" && return; \
-        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://api64.ipify.org" || \
-        curl $p -ksSfL --connect-timeout 3 --max-time 5 "https://icanhazip.com"; \
+        res=$(curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}') && [ -n "$res" ] && echo "$res" && return; \
+        res=$(curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://api64.ipify.org") && [ -n "$res" ] && echo "$res" && return; \
+        curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://icanhazip.com" || return 0; \
     } 2>/dev/null | tr -d '[:space:]' || true; }
-    # 异步执行：并行探测 v4 和 v6
+    # 异步执行：并行探测 v4 和 v6，保留原始并行回收模式
     _f -4 >"$t4" & p4=$!; _f -6 >"$t6" & p6=$!; wait $p4 $p6 2>/dev/null
     # 数据清洗：严格保留 || echo "" 风格，head -n 1 确保取值唯一
     RAW_IP4=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$t4" 2>/dev/null | head -n 1 || echo "")
