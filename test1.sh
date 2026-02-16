@@ -859,18 +859,6 @@ get_env_data() {
 
 display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" status_info="" hostname_tag="$(hostname)"
-	info "正在执行配置合规性检查..."
-    if /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_check.log 2>&1; then
-        succ "配置预检通过：证书格式与逻辑架构正常"
-    else
-		echo -e "\n\033[1;34m==========================================\033[0m"
-        err "配置预检失败！"
-        warn "错误详情: $(cat /tmp/sb_check.log | tail -n 1 2>/dev/null)"
-        echo -e "\033[1;33m[建议]\033[0m 请检查证书/私钥是否完整，或端口是否冲突"
-        rm -f /tmp/sb_check.log; exit 1
-    fi
-    rm -f /tmp/sb_check.log
-	
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
     local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" s_text="\033[1;33moffline\033[0m" p_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
     pgrep sing-box >/dev/null 2>&1 && { s_text="\033[1;33monline\033[0m"; s_icon="\033[1;32m[✔]\033[0m"; }
