@@ -120,48 +120,31 @@ prompt_for_port() {
 
 # 生成 ECC P-256 高性能证书 + ECH 密钥对
 generate_cert() {
-    local CERT_DIR="/etc/sing-box/certs"
-    local TMP_ECH="/tmp/ech_out"
+    local CERT_DIR="/etc/sing-box/certs"; local TMP_ECH="/tmp/ech_out"; local cert_mode=""
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-    local cert_mode=""
+    # 选择模式并根据模式处理 TLS 证书
     while :; do
         echo -e "\n\033[1;36m[证书配置]\033[0m 请选择 TLS 证书来源："
         echo "1. 自动生成自签证书 (默认，适用于无域名用户)"
         echo "2. 手动粘贴 Cloudflare 证书 (适用于已在 CF 开启自定义域名的用户)"
-        read -r -p "请输入选项 [1-2] (默认1): " cert_mode
-        cert_mode=${cert_mode:-1}
-
-        if [[ "$cert_mode" == "1" || "$cert_mode" == "2" ]]; then
-            break
-        else
-            err "输入错误 [$cert_mode]，请输入 1 或 2"
-        fi
+        read -r -p "请输入选项 [1-2] (默认1): " cert_mode; cert_mode=${cert_mode:-1}
+        [[ "$cert_mode" =~ ^[1-2]$ ]] && break || err "输入错误，请输入 1 或 2"
     done
-
-    if [[ "$cert_mode" == "2" ]]; then
-        # 模式 2：手动录入 CF 证书
+    if [ "$cert_mode" = "2" ]; then
         while :; do
             read -r -p "请输入您在 CF 解析的二级域名 (例如: hy2.example.com): " USER_SNI
-            if [[ -n "$USER_SNI" ]]; then
-                TLS_DOMAIN="$USER_SNI"
-                break
-            else
-                err "域名不能为空，请重新输入"
-            fi
+            [ -n "$USER_SNI" ] && { TLS_DOMAIN="$USER_SNI"; break; } || err "域名不能为空"
         done
-
         info "准备接收证书 [Origin Certificate]..."
-        echo -e "请粘贴内容，完成后按下 \033[1;33m[回车]\033[0m，再按 \033[1;33m[Ctrl+D]\033[0m 结束："
+        echo -e "请粘贴内容，完成后按下 [回车]，再按 [Ctrl+D] 结束："
         cat > "$CERT_DIR/fullchain.pem"
         [ -n "$(tail -c1 "$CERT_DIR/fullchain.pem" 2>/dev/null)" ] && echo "" >> "$CERT_DIR/fullchain.pem"
         info "准备接收私钥 [Private Key]..."
-        echo -e "请粘贴内容，完成后按下 \033[1;33m[回车]\033[0m，再按 \033[1;33m[Ctrl+D]\033[0m 结束："
+        echo -e "请粘贴内容，完成后按下 [回车]，再按 [Ctrl+D] 结束："
         cat > "$CERT_DIR/privkey.pem"
         [ -n "$(tail -c1 "$CERT_DIR/privkey.pem" 2>/dev/null)" ] && echo "" >> "$CERT_DIR/privkey.pem"
-        succ "CF 证书导入完成 (SNI: $TLS_DOMAIN)"
     else
-        # 模式 1：原有自签逻辑
-        info "生成 ECC 自签证书 (域名: $TLS_DOMAIN)..."
+        info "生成 ECC 证书 (域名: $TLS_DOMAIN)..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
             -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" \
@@ -169,14 +152,12 @@ generate_cert() {
             -addext "subjectAltName=DNS:$TLS_DOMAIN" \
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
-
-    # 2. 生成 ECH 密钥 (必须针对当前的 $TLS_DOMAIN 实时生成)
+    # 2. 生成 ECH 密钥 (保持原有风格)
     info "生成 $TLS_DOMAIN 的 ECH 密钥对..."
     /usr/bin/sing-box generate ech-keypair "$TLS_DOMAIN" > "$TMP_ECH" 2>&1
     sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
     sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
     rm -f "$TMP_ECH"
-
     # 3. 校验并提取指纹
     if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
@@ -863,15 +844,15 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"; RAW_ECH=""
     [ ! -f "$CONFIG_FILE" ] && return 1
-    # 1. 提取核心数据 (PSK, 端口, 证书路径)
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     [ -z "$data" ] && return 1
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data"
-    # 2. 提取 SNI (域名) 与 证书指纹 (FP)
-    RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
+    # 提取 SNI 与 指纹
+    RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
+    [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
-    # 3. 读取 ECH 并进行极致稳健的 URL 编码 (解决 BusyBox 解析坑)
+    # 读取 ECH
     if [ -f "/etc/sing-box/certs/ech.pub" ]; then
         local raw=$(grep -v "ECH CONFIGS" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
         RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g' | sed 's/\//%%2F/g' | sed 's/=/%%3D/g' | sed 's/%%/%/g')
@@ -888,7 +869,6 @@ display_links() {
         _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 & wait
         [[ "$(cat /tmp/sb_v4_res 2>/dev/null)" == "OK" || "$(cat /tmp/sb_v6_res 2>/dev/null)" == "OK" ]] && p_icon="\033[1;32m[✔]\033[0m"
     fi
-
     echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon | 服务: $s_text $s_icon"
     if [ -n "${RAW_IP4:-}" ]; then
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v4"
