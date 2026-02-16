@@ -10,17 +10,14 @@ SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF
 VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_ECH=""
 VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
-TLS_DOMAIN_POOL=("www.bing.com" "www.microsoft.com" "itunes.apple.com" "www.icloud.com" "www.7-zip.org" "www.jsdelivr.com")
+TLS_DOMAIN_POOL=("www.bing.com" "www.microsoft.com" "itunes.apple.com" "www.icloud.com" "www.visa.com" "www.cisco.com")
 pick_tls_domain() { echo "${TLS_DOMAIN_POOL[$RANDOM % ${#TLS_DOMAIN_POOL[@]}]}"; }
 TLS_DOMAIN="$(pick_tls_domain)"
 
 # ==========================================
 # 彩色输出与工具函数
 # ==========================================
-info() { echo -e "\033[1;34m[INFO]\033[0m $*"; }
-warn() { echo -e "\033[1;33m[WARN]\033[0m $*"; }
-err()  { echo -e "\033[1;31m[ERR]\033[0m $*" >&2; }
-succ() { echo -e "\033[1;32m[OK]\033[0m $*"; }
+info() { echo -e "\033[1;34m[INFO]\033[0m $*"; }; warn() { echo -e "\033[1;33m[WARN]\033[0m $*"; }; err() { echo -e "\033[1;31m[ERR]\033[0m $*" >&2; }; succ() { echo -e "\033[1;32m[OK]\033[0m $*"; }
 
 # OSC 52 自动复制到剪贴板函数 (支持多行)
 copy_to_clipboard() {
@@ -120,10 +117,30 @@ prompt_for_port() {
 
 # 生成 ECC P-256 高性能证书 + ECH 密钥对
 generate_cert() {
-    local CERT_DIR="/etc/sing-box/certs"; local TMP_ECH="/tmp/ech_out"
+    local CERT_DIR="/etc/sing-box/certs"; local TMP_ECH="$CERT_DIR/ech_out.tmp"; local cert_mode=""
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-    # 1. 生成 TLS 证书
-    if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
+    while :; do
+        echo -e "\n\033[1;36m[证书配置]\033[0m 请选择 TLS 证书来源："
+        echo "1. 自动生成自签证书 (默认，适用于无域名用户)"
+        echo "2. 手动粘贴 Cloudflare 证书 (适用于已在 CF 开启自定义域名的用户)"
+        read -r -p "请输入选项 [1-2] (默认1): " cert_mode; cert_mode=${cert_mode:-1}
+        [[ "$cert_mode" =~ ^[1-2]$ ]] && break || err "输入错误，请输入 1 或 2"
+    done
+    if [ "$cert_mode" = "2" ]; then
+        while :; do
+            read -r -p "请输入您在 CF 解析的域名 (例如: hy2.example.com): " USER_SNI
+            [ -n "$USER_SNI" ] && { TLS_DOMAIN="$USER_SNI"; break; } || err "域名不能为空"
+        done
+        info "准备接收证书 [Origin Certificate]..."
+        echo -e "请粘贴内容，然后按下 [回车]，再按 [Ctrl+D] 完成录入："
+        cat > "$CERT_DIR/fullchain.pem"
+        [ -n "$(tail -c1 "$CERT_DIR/fullchain.pem" 2>/dev/null)" ] && echo "" >> "$CERT_DIR/fullchain.pem"
+        info "准备接收私钥 [Private Key]..."
+        echo -e "请粘贴内容，然后按下 [回车]，再按 [Ctrl+D] 完成录入："
+        cat > "$CERT_DIR/privkey.pem"
+        [ -n "$(tail -c1 "$CERT_DIR/privkey.pem" 2>/dev/null)" ] && echo "" >> "$CERT_DIR/privkey.pem"
+		succ "所有敏感信息已安全存储并锁死权限 (600)"
+    else
         info "生成 ECC 证书 (域名: $TLS_DOMAIN)..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
@@ -132,46 +149,43 @@ generate_cert() {
             -addext "subjectAltName=DNS:$TLS_DOMAIN" \
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
-    # 2. 生成 ECH 密钥 (保留 PEM 标头)
+    # 生成 ECH 密钥
     info "生成 $TLS_DOMAIN 的 ECH 密钥对..."
     /usr/bin/sing-box generate ech-keypair "$TLS_DOMAIN" > "$TMP_ECH" 2>&1
     sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
     sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
     rm -f "$TMP_ECH"
-    # 3. 校验并提取指纹
+    # 校验并提取指纹
     if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
         chmod 600 "$CERT_DIR/privkey.pem" "$CERT_DIR/ech.key" && chmod 644 "$CERT_DIR/fullchain.pem" "$CERT_DIR/ech.pub"
         succ "ECC 证书与 ECH 密钥对就绪"
     else err "证书或 ECH 密钥生成失败"; exit 1; fi
+    unset USER_SNI
 }
 
-# 获取公网IP
+# 获取公网IP(高效稳定探测)
 get_network_info() {
-    info "获取网络信息..."
-    RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
+    info "获取网络信息..."; RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-    # 1. 探测函数：多接口备选 + 自动清洗
-    _f() {
-        local p=$1; local out=$2
-        { curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://api64.ipify.org" || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://icanhazip.com" || \
-          curl $p -ksSfL --connect-timeout 5 --max-time 10 "https://ifconfig.co"; } | tr -d '[:space:]' > "$out" 2>/dev/null
-    }
-    # 2. 异步执行与串行等待
-    _f -4 "$t4" & p4=$!; _f -6 "$t6" & p6=$!; wait $p4 2>/dev/null; wait $p6 2>/dev/null
-    # 3. 结果提取与数据清洗
-    [ -s "$t4" ] && RAW_IP4=$(grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' "$t4")
-    [ -s "$t6" ] && RAW_IP6=$(grep -iE '([a-f0-9:]+:+)+[a-f0-9]+' "$t6")
+    # 1. 探测函数：v4 用标准接口，v6 用专用 api6 接口，在无 v6 时会秒断，在有 v6 时极稳
+    _f() { local p=$1
+        { curl $p -ksSfL --connect-timeout 1 --max-time 3 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}'; } || \
+        { [ "$p" = "-4" ] && curl $p -ksSfL --connect-timeout 1 --max-time 2 "https://api.ipify.org" || curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://api6.ipify.org" ; } || \
+          curl $p -ksSfL --connect-timeout 1 --max-time 2 "https://icanhazip.com" || echo ""; }
+    # 2. 异步执行：并行探测
+    _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
+    # 3. 数据清洗 (融合版)：在主进程统一清洗数据
+    [ -s "$t4" ] && read -r RAW_IP4 < "$t4" && RAW_IP4=${RAW_IP4//[[:space:]]/}
+    [ -s "$t6" ] && read -r RAW_IP6 < "$t6" && RAW_IP6=${RAW_IP6//[[:space:]]/}
+    [[ ! "$RAW_IP4" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && RAW_IP4=""
+    [[ "$RAW_IP6" != *:* ]] && RAW_IP6=""
     rm -f "$t4" "$t6"
-    # 4. 极简风格输出
-    [ -n "$RAW_IP4" ] && \
-        echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || \
-        echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
-    [[ "$RAW_IP6" == *:* ]] && { IS_V6_OK="true"; \
-        echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m"; } || \
-        echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
-    { [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ]; } && { err "未能探测到公网 IP"; exit 1; } || return 0
+    # 4. 判定与输出
+    [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true"
+    [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
+    [ "$IS_V6_OK" = "true" ] && echo -e "\033[1;32m[✔]\033[0m IPv6: \033[1;37m$RAW_IP6\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv6: \033[1;31m不可用\033[0m"
+    [ -z "$RAW_IP4" ] && [ -z "$RAW_IP6" ] && { err "错误: 未能探测到公网 IP"; exit 1; } || return 0
 }
 
 # 网络延迟探测模块
@@ -303,24 +317,18 @@ EOF
 # 动态 RTT 内存页钳位
 safe_rtt() {
     local dyn_buf="$1" rtt_val="$2" max_udp_pages="$3" udp_min="$4" udp_pre="$5" udp_max="$6" real_rtt_factors="$7" loss_compensation="$8"
-    local dyn_pages=$(( dyn_buf / 4096 ))
-    # 1. 计算探测 BDP：使用补偿后的画像值及丢包补偿系数
-    local probe_pages=$(( real_rtt_factors * 1024 * loss_compensation / 100 ))
-    # 2. 仲裁逻辑：探测值与 dyn_buf 保底值取最大者
+    local dyn_pages=$(( dyn_buf / 4096 )); local probe_pages=$(( real_rtt_factors * 1024 * loss_compensation / 100 ))
+    # 1. 基础仲裁
     rtt_scale_max=$(( probe_pages > dyn_pages ? probe_pages : dyn_pages ))
-    # 3. 延迟梯度补偿：根据实测 RTT 自动切换模式
+    # 2. 补偿逻辑 (增加小内存防溢出：100M- 小鸡 max_udp_pages 通常 < 16384)
     if [ "$rtt_val" -ge 150 ]; then
-        rtt_scale_max=$(( rtt_scale_max * 15 / 10 )); SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (QUIC远航)"
-    else
-        SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (QUIC竞速)"
-    fi
-    # 4. 生成三级梯度 (1.0 : 0.9 : 0.75) 与多级防护
+        local factor=15; [ "$max_udp_pages" -le 16384 ] && factor=12
+        rtt_scale_max=$(( rtt_scale_max * factor / 10 )); SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (QUIC远航)"
+    else SBOX_OPTIMIZE_LEVEL="${SBOX_OPTIMIZE_LEVEL} (QUIC竞速)"; fi
+    # 3. 三级梯度生成 (0.75 : 0.9 : 1.0)
     rtt_scale_pressure=$(( rtt_scale_max * 90 / 100 )); rtt_scale_min=$(( rtt_scale_max * 75 / 100 ))
-	# 激进内存保护 (当超过该档位设定的最大页数时钳位)
-    if [ "$rtt_scale_max" -gt "$max_udp_pages" ]; then
-        rtt_scale_max=$max_udp_pages; rtt_scale_pressure=$(( max_udp_pages * 95 / 100 )); rtt_scale_min=$(( max_udp_pages * 80 / 100 ))
-    fi
-    # 5. 系统全局硬上限最终防护
+    # 4. 档位钳位与物理上限终极对齐 (确保不穿透物理防线)
+    [ "$rtt_scale_max" -gt "$max_udp_pages" ] && { rtt_scale_max=$max_udp_pages; rtt_scale_pressure=$(( max_udp_pages * 95 / 100 )); rtt_scale_min=$(( max_udp_pages * 80 / 100 )); }
     rtt_scale_max=$(( rtt_scale_max < udp_max ? rtt_scale_max : udp_max ))
     rtt_scale_pressure=$(( rtt_scale_pressure < udp_pre ? rtt_scale_pressure : udp_pre ))
     rtt_scale_min=$(( rtt_scale_min < udp_min ? rtt_scale_min : udp_min ))
@@ -329,27 +337,22 @@ safe_rtt() {
 # sing-box 用户态运行时调度人格（Go/QUIC/缓冲区自适应）
 apply_userspace_adaptive_profile() {
     local g_procs="$1" wnd="$2" buf="$3" real_c="$4" mem_total="$5"
-    # === 1. P 处理器调度 (针对单核小鸡的特殊优化) ===
-    # 如果是单核，强行给 2 个 P 能够让网络 IO 和内存回收并行，不至于卡死
-    [ "$real_c" -eq 1 ] && export GOMAXPROCS=2 || export GOMAXPROCS="$g_procs"
-    # === 2. 内存回收策略分级 (76M+- 差异化处理) ===
-    [ "$mem_total" -lt 76 ] && \
-    { export GODEBUG="madvdontneed=1,scavenge_target=1"; info "Runtime → 激进回收模式 (76m-)"; } || \
-    { export GODEBUG="madvdontneed=1,asyncpreemptoff=1"; info "Runtime → 性能优先模式 (76m+)"; }
-    export GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}" GOGC="${SBOX_GOGC:-100}"
-    export SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" VAR_HY2_BW="${VAR_HY2_BW:-200}"
-    export SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"
-    # 针对 100M- 小鸡执行最后一道严谨校准 (Sanity Check)
+    # 内存回收策略：100M- 采用极度激进模式，确保内存页立即归还内核
     if [ "$mem_total" -lt 100 ]; then
-        local soft_line=$(( mem_total - 26 )) # 预留 28M 红线
-        [ "$soft_line" -lt 34 ] && soft_line=34 # 绝对启动底线
-        # 如果当前全局变量值超过红线，则强制钳位
-        [ "$(echo "$GOMEMLIMIT" | tr -dc '0-9')" -gt "$soft_line" ] && \
-        export GOMEMLIMIT="${soft_line}MiB" GOGC="100"
+        export GOMAXPROCS=1
+        export GODEBUG="madvdontneed=1,scavenge_target=1"
+        local sl=$(( mem_total * 65 / 100 )); [ "$sl" -lt 32 ] && sl=32
+        GOMEMLIMIT="${sl}MiB"; GOGC="50"
+        info "Runtime → 激进回收模式 (100M- 适配版)"
+    else
+        export GOMAXPROCS="$g_procs"
+        export GODEBUG="madvdontneed=1,asyncpreemptoff=1"
+        GOMEMLIMIT="${SBOX_GOLIMIT:-48MiB}"; GOGC="${SBOX_GOGC:-100}"
+        info "Runtime → 性能优先模式"
     fi
-    # === 3. 持久化配置 (修复潜在变量引用问题) ===
-    mkdir -p /etc/sing-box
-    cat > /etc/sing-box/env <<EOF
+	
+    export GOMEMLIMIT GOGC SINGBOX_QUIC_MAX_CONN_WINDOW="$wnd" VAR_HY2_BW="${VAR_HY2_BW:-200}" SINGBOX_UDP_RECVBUF="$buf" SINGBOX_UDP_SENDBUF="$buf"
+    mkdir -p /etc/sing-box; cat > /etc/sing-box/env <<EOF
 GOMAXPROCS=$GOMAXPROCS
 GOGC=$GOGC
 GOMEMLIMIT=$GOMEMLIMIT
@@ -360,7 +363,8 @@ SINGBOX_UDP_SENDBUF=$buf
 VAR_HY2_BW=$VAR_HY2_BW
 EOF
     chmod 644 /etc/sing-box/env
-    # === 4. CPU 亲和力优化 (绑定当前脚本到所有可用核心) ===
+	
+    # 4. CPU 亲和力 (仅多核且存在 taskset 时优化)
     [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1 && taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1
     info "Runtime → GOMAXPROCS: $GOMAXPROCS 核 | 内存限额: $GOMEMLIMIT | GOGC: $GOGC | Buffer: $((buf/1024)) KB"
 }
@@ -370,41 +374,47 @@ apply_nic_core_boost() {
     # 1. 寻找默认出口网卡
     local IFACE=$(ip route show default 2>/dev/null | awk '/default/{print $5; exit}')
     [ -z "$IFACE" ] && return 0
-    local real_c="$1" bgt="$2" usc="$3"	
-	# 2. 内核软中断预算优化
+    local real_c="$1" bgt="$2" usc="$3" mem_total="$4" target_qlen="$5" t_usc="$6" ring="$7" driver=""
+    # 2. 内核软中断预算优化
     sysctl -w net.core.netdev_budget="$bgt" net.core.netdev_budget_usecs="$usc" >/dev/null 2>&1 || true
     # 3. 驱动识别与发送队列 (TXQLEN) 动态调整
-    local driver=""
     [ -L "/sys/class/net/$IFACE/device/driver" ] && driver=$(basename "$(readlink "/sys/class/net/$IFACE/device/driver")")
-    local target_qlen=10000
+    # 4. 针对虚拟化环境的二度钳位 (在传入的 target_qlen 基础上判断)
     case "$driver" in
-        virtio_net|veth|"") target_qlen=5000 ;;  # 虚拟化环境降低队列深度，减少内存抖动
-        *) target_qlen=10000 ;;
+        virtio_net|veth|"") target_qlen=$((target_qlen / 2)) ;;
+        *) : ;;
     esac
-	# 4. 链路层特征与硬件卸载优化
-	if [ -d "/sys/class/net/$IFACE" ]; then
+    # 5. 链路层特征与硬件卸载优化
+    if [ -d "/sys/class/net/$IFACE" ]; then
         ip link set dev "$IFACE" txqueuelen "$target_qlen" 2>/dev/null || true     
         if command -v ethtool >/dev/null 2>&1; then
             ethtool -K "$IFACE" gro on gso on tso on lro off 2>/dev/null || true
-            local tuned_usc=100
-            [ "$real_c" -ge 2 ] && tuned_usc=150   # 大幅提升中断延迟阈值 (20 -> 100+)，牺牲 0.1ms 延迟，但能救活 CPU，对吞吐量至关重要
-            ethtool -C "$IFACE" rx-usecs "$tuned_usc" tx-usecs "$tuned_usc" 2>/dev/null || true
-            ethtool -G "$IFACE" rx 2048 tx 2048 2>/dev/null || true
+            ethtool -C "$IFACE" rx-usecs "$t_usc" tx-usecs "$t_usc" 2>/dev/null || true
+            ethtool -G "$IFACE" rx "$ring" tx "$ring" 2>/dev/null || true
         fi
     fi
-    # 5. 多核分发优化 (RPS/XPS)：解决单核处理瓶颈
+    # 6. 多核分发优化 (RPS/XPS)
     if [ "$real_c" -ge 2 ] && [ -d "/sys/class/net/$IFACE/queues" ]; then
         local MASK=$(printf '%x' $(( (1<<real_c)-1 )))
-		# 接收端分发 (RPS)
         for q in /sys/class/net/"$IFACE"/queues/rx-*/rps_cpus; do
             [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
         done
-		# 发送端分发 (XPS)
         for q in /sys/class/net/"$IFACE"/queues/tx-*/xps_cpus; do
             [ -w "$q" ] && echo "$MASK" > "$q" 2>/dev/null || true
         done
     fi
-	info "NIC 优化 → 网卡: $IFACE | QLen: $target_qlen | 中断延迟: ${tuned_usc:-default} us"
+    info "NIC 优化 → 网卡: $IFACE | 队列: $target_qlen | 中断延迟: ${t_usc}us | 环形缓冲区: $ring"
+}
+
+# 配置预检
+verify_config() {
+    local LOG="/tmp/sb_check.log"; info "执行配置合规性检查..."
+    if /usr/bin/sing-box check -c /etc/sing-box/config.json >"$LOG" 2>&1; then
+        succ "配置预检通过" && { rm -f "$LOG"; return 0; }
+    else
+        echo -e "\033[1;31m[!]\033[0m 错误详情: $(tail -n 1 "$LOG" 2>/dev/null)"
+        err "配置预检失败，拒绝应用变更！" && { rm -f "$LOG"; return 1; }
+    fi
 }
 
 #防火墙开放端口
@@ -434,42 +444,46 @@ optimize_system() {
     local rtt_res=($(probe_network_rtt)); local mem_total=$(probe_memory_total)
 	local rtt_avg="${rtt_res[0]:-150}" real_rtt_factors="${rtt_res[1]:-130}" loss_compensation="${rtt_res[2]:-100}"
     local real_c="$CPU_CORE" ct_max=16384 ct_udp_to=30 ct_stream_to=30
-    local dyn_buf g_procs g_wnd g_buf net_bgt net_usc tcp_rmem_max
+    local dyn_buf g_procs g_wnd g_buf net_bgt net_usc tcp_rmem_max target_qlen t_usc ring
     local max_udp_mb max_udp_pages udp_mem_global_min udp_mem_global_pressure udp_mem_global_max
     local swappiness_val="${SWAPPINESS_VAL:-10}" busy_poll_val="${BUSY_POLL_VAL:-0}"
     
     setup_zrm_swap "$mem_total"
 	info "系统画像: CPU核心: ${real_c} 核 | 系统内存: ${mem_total} mb | 平均延迟: ${rtt_avg} ms | RTT补偿: ${real_rtt_factors} ms | 丢包补偿: ${loss_compensation}%"
 
-    # 阶段一： 四档位差异化配置
+    # 阶段一： 四档位差异化配置 (精密调优版)
     if [ "$mem_total" -ge 450 ]; then
-        VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 66 / 100))
-        SBOX_GOLIMIT="$((mem_total * 76 / 100))MiB"; SBOX_GOGC="200"
+        VAR_HY2_BW="500"; max_udp_mb=$((mem_total * 60 / 100))
+        SBOX_GOLIMIT="$((mem_total * 76 / 100))MiB"; SBOX_GOGC="150"
         SBOX_MEM_HIGH="$((mem_total * 86 / 100))M"; SBOX_MEM_MAX="$((mem_total * 96 / 100))M"
         VAR_SYSTEMD_NICE="-15"; VAR_SYSTEMD_IOSCHED="realtime"; tcp_rmem_max=16777216
         g_procs=$real_c; swappiness_val=10; busy_poll_val=50; ct_max=65535; ct_stream_to=60
+		target_qlen=10000; t_usc=100; ring=2048
         SBOX_OPTIMIZE_LEVEL="512M 旗舰版"
     elif [ "$mem_total" -ge 200 ]; then
-        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 63 / 100))
-        SBOX_GOLIMIT="$((mem_total * 75 / 100))MiB"; SBOX_GOGC="150"
+        VAR_HY2_BW="300"; max_udp_mb=$((mem_total * 55 / 100))
+        SBOX_GOLIMIT="$((mem_total * 75 / 100))MiB"; SBOX_GOGC="100"
         SBOX_MEM_HIGH="$((mem_total * 85 / 100))M"; SBOX_MEM_MAX="$((mem_total * 95 / 100))M"
         VAR_SYSTEMD_NICE="-10"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=8388608
         g_procs=$real_c; swappiness_val=10; busy_poll_val=20; ct_max=32768; ct_stream_to=45
+		target_qlen=8000;  t_usc=150; ring=1024
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
-        VAR_HY2_BW="200"; max_udp_mb=$((mem_total * 60 / 100))
-        SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="130"
+        VAR_HY2_BW="200"; max_udp_mb=$((mem_total * 50 / 100))
+        SBOX_GOLIMIT="$((mem_total * 73 / 100))MiB"; SBOX_GOGC="80"
         SBOX_MEM_HIGH="$((mem_total * 83 / 100))M"; SBOX_MEM_MAX="$((mem_total * 93 / 100))M"
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
-        swappiness_val=60; busy_poll_val=0; ct_max=16384; ct_stream_to=30
+        swappiness_val=10; busy_poll_val=0; ct_max=16384; ct_stream_to=30
         [ "$real_c" -gt 2 ] && g_procs=2 || g_procs=$real_c
+		target_qlen=5000;  t_usc=150; ring=1024
         SBOX_OPTIMIZE_LEVEL="128M 紧凑版"
     else
-        VAR_HY2_BW="130"; max_udp_mb=$((mem_total * 56 / 100))
-        SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="100"
-        SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
+        VAR_HY2_BW="100"; max_udp_mb=$((mem_total * 45 / 100)) 
+        SBOX_GOLIMIT="$((mem_total * 65 / 100))MiB"; SBOX_GOGC="50"
+        SBOX_MEM_HIGH="$((mem_total * 75 / 100))M"; SBOX_MEM_MAX="$((mem_total * 85 / 100))M"
         VAR_SYSTEMD_NICE="-5"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=2097152
-        g_procs=1; swappiness_val=100; busy_poll_val=0; ct_max=16384; ct_stream_to=30
+        g_procs=1; swappiness_val=10; busy_poll_val=0; ct_max=16384; ct_stream_to=30
+		target_qlen=2000;  t_usc=250; ring=512
         SBOX_OPTIMIZE_LEVEL="64M 激进版"
     fi
 
@@ -479,46 +493,47 @@ optimize_system() {
     # 2. 设置跳板变量 dyn_buf (综合物理能力与带宽需求)
     dyn_buf=$(( (mem_total << 20) >> 3 ))
     [ "$dyn_buf" -lt "$bdp_min" ] && dyn_buf=$bdp_min
-    # 100M+ 机器给 32MB 爆发力保底；100M- 机器给 16MB 生存保底
-    [ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
-    [ "$dyn_buf" -lt 16777216 ] && dyn_buf=16777216
+    # 针对 100M- 机器严格锁定上限，防止内存被缓冲区填满导致波浪式掉速
+    if [ "$mem_total" -lt 100 ]; then
+        [ "$dyn_buf" -gt 8388608 ] && dyn_buf=8388608   # 强制上限 8MB，维持高周转
+        [ "$dyn_buf" -lt 4194304 ] && dyn_buf=4194304   # 保底 4MB
+    else
+        [ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
+        [ "$dyn_buf" -lt 16777216 ] && dyn_buf=16777216
+    fi
     [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864
-	
     # 3. 所有内核网络参数基于 dyn_buf 伸缩
     VAR_UDP_RMEM="$dyn_buf"; VAR_UDP_WMEM="$dyn_buf"
     VAR_DEF_MEM=$(( dyn_buf / 4 ))
     VAR_BACKLOG=$(( VAR_HY2_BW * 50 ))   # 队列从30提到50，抗突发丢包
     [ "$VAR_BACKLOG" -lt 8192 ] && VAR_BACKLOG=8192
-
     # 4. 联动导出：Sing-box 应用层参数
-    g_wnd=$(( VAR_HY2_BW * loss_compensation / 100 / 8 ))      # 激进窗口，应对 80ms+ 延迟（原为 /10）
-    [ "$g_wnd" -lt 15 ] && g_wnd=15  # 调高起步窗口（原为 12）
-    g_buf=$(( dyn_buf / 6 ))         # 应用层 buffer 设为跳板的 1/6（原为 /8）
-
-    # 5. 确定系统全局 UDP 限制 (作为 safe_rtt 的参照系)
-	udp_mem_global_min=$(( dyn_buf >> 12 ))
-	udp_mem_global_pressure=$(( (dyn_buf << 1) >> 12 ))  # 2倍压力线
-	udp_mem_global_max=$(( ((mem_total << 20) * 75 / 100) >> 12 ))   # 物理红线 75%
-	max_udp_pages=$(( max_udp_mb << 8 ))
-
-    # 6. 根据带宽目标设定基础预算：每 100M 带宽分配约 1000 的预算
-    local base_budget=$(( VAR_HY2_BW * 15 / 10 * 10 ))  # 基础权重增加50%
+    g_wnd=$(( VAR_HY2_BW * loss_compensation / 100 / 8 ))      
+    [ "$g_wnd" -lt 15 ] && g_wnd=15  
+    g_buf=$(( dyn_buf / 6 ))         
+    # 5. 确定系统全局 UDP 限制
+    udp_mem_global_min=$(( dyn_buf >> 12 ))
+    udp_mem_global_pressure=$(( (dyn_buf << 1) >> 12 ))  # 2倍压力线
+    udp_mem_global_max=$(( ((mem_total << 20) * 75 / 100) >> 12 ))   # 物理红线 75%
+    max_udp_pages=$(( max_udp_mb << 8 ))
+    # 6. 确定网卡调度预算
+    local base_budget=$(( VAR_HY2_BW * 15 / 10 * 10 ))  
     [ "$base_budget" -lt 2000 ] && base_budget=2000
     [ "$base_budget" -gt 6000 ] && base_budget=6000
-    # 多核：单次少吃多餐，靠多核并行 / 单核：必须一次多处理点，减少中断切换的开销
     [ "$real_c" -ge 2 ] && { net_bgt=$base_budget; net_usc=2000; } || { net_bgt=$(( base_budget << 1 )); net_usc=6000; }
-
     # 7. 内存保命机制：动态预留内核紧急水位 (vm.min_free_kbytes)
-    local min_free_val=$(( mem_total * 1024 * 4 / 100 ))  # 100M内存预留约4%
-    [ "$min_free_val" -lt 4608 ] && min_free_val=4608     # 最小不低于 3MB  
+    local min_free_val=$(( mem_total * 1024 * 5 / 100 ))  # 提升到 5%
+    # 针对 100M- 机器预留更多缓冲带（约 8-10MB），防止系统卡死
+    [ "$mem_total" -lt 100 ] && min_free_val=$(( min_free_val * 2 ))
+    [ "$min_free_val" -lt 8192 ] && [ "$mem_total" -lt 100 ] && min_free_val=8192 
+    [ "$min_free_val" -lt 4608 ] && min_free_val=4608      
     if [ "$mem_total" -gt 100 ]; then [ "$min_free_val" -gt 65536 ] && min_free_val=65536; fi
-	
 	# 9. 路况仲裁
     safe_rtt "$dyn_buf" "$rtt_avg" "$max_udp_pages" "$udp_mem_global_min" "$udp_mem_global_pressure" "$udp_mem_global_max" "$real_rtt_factors" "$loss_compensation"
     UDP_MEM_SCALE="$rtt_scale_min $rtt_scale_pressure $rtt_scale_max"
 	apply_initcwnd_optimization "false"
     apply_userspace_adaptive_profile "$g_procs" "$g_wnd" "$g_buf" "$real_c" "$mem_total"
-    apply_nic_core_boost "$real_c" "$net_bgt" "$net_usc"
+    apply_nic_core_boost "$real_c" "$net_bgt" "$net_usc" "$mem_total" "$target_qlen" "$t_usc" "$ring"
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW} Mbps"
     info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
 	
@@ -551,7 +566,7 @@ vm.overcommit_memory = 1                   # 允许内存超额分配
 vm.panic_on_oom = 0                        # 内存溢出时不崩溃系统
 $(grep -q "^/dev/zram0 " /proc/swaps 2>/dev/null && cat <<ZRAM_TUNING
 vm.page-cluster = 0                        # ZRAM环境下禁用预读 (提升随机读写)
-vm.vfs_cache_pressure = 500                # 积极回收文件缓存 (为网络腾内存)
+vm.vfs_cache_pressure = 1000                # 积极回收文件缓存 (为网络腾内存)
 ZRAM_TUNING
 )
 
@@ -585,7 +600,7 @@ net.ipv4.tcp_notsent_lowat = 16384         # 限制发送队列 (防延迟抖动
 net.ipv4.tcp_mtu_probing = 1               # MTU自动探测 (防UDP黑洞)
 net.ipv4.ip_no_pmtu_disc = 0               # 启用路径MTU探测 (寻找最优包大小)
 net.ipv4.tcp_frto = 2                      # 丢包环境重传判断优化
-net.ipv4.tcp_slow_start_after_idle = $([ "$rtt_avg" -ge 150 ] && echo "1" || echo "0") # 闲置后慢启动开关
+net.ipv4.tcp_slow_start_after_idle = 0     # 闲置后慢启动开关
 net.ipv4.tcp_limit_output_bytes = $([ "$mem_total" -ge 200 ] && echo "262144" || echo "131072") # 限制TCP连接占用发送队列
 net.ipv4.udp_gro_enabled = 1               # UDP 分段聚合 (降CPU负载)
 net.ipv4.udp_early_demux = 1               # UDP 早期路由优化
@@ -606,12 +621,11 @@ net.ipv4.tcp_max_orphans = $((mem_total * 1024)) # 最大孤儿连接数限制
 
 $([ "$mem_total" -lt 100 ] && cat <<LOWMEM
 # --- 针对 96M 小鸡的极低内存保护策略 ---
-net.ipv4.tcp_sack = 0                      # 禁用SACK (省内存)
-net.ipv4.tcp_dsack = 0                     # 禁用D-SACK
-net.ipv4.tcp_fack = 0                      # 禁用前向确认
-net.ipv4.tcp_timestamps = 0                # 禁用时间戳 (省包头开销)
-net.ipv4.tcp_moderate_rcvbuf = 0           # 锁定手动缓冲区 (防内核抢占)
-net.ipv4.tcp_max_syn_backlog = 2048        # 缩减握手队列
+net.ipv4.tcp_sack = 1                      # 禁用SACK (省内存)
+net.ipv4.tcp_dsack = 1                     # 禁用D-SACK
+net.ipv4.tcp_timestamps = 1                # 禁用时间戳 (省包头开销)
+net.ipv4.tcp_moderate_rcvbuf = 1           # 锁定手动缓冲区 (防内核抢占)
+net.ipv4.tcp_max_syn_backlog = 512         # 缩减握手队列
 LOWMEM
 )
 SYSCTL
@@ -673,7 +687,6 @@ install_singbox() {
 # ==========================================
 # 配置文件生成
 # ==========================================
-# 配置文件生成 (集成 ECH)
 create_config() {
     local PORT_HY2="${1:-}"
     local cur_bw="${VAR_HY2_BW:-200}"
@@ -681,24 +694,20 @@ create_config() {
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="50s"; [ "$mem_total" -ge 450 ] && timeout="60s"
-    
-    # 1. 端口确定逻辑
+    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
+    # 端口和 PSK (密码) 确定逻辑
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(printf "\n" | prompt_for_port); fi
     fi
-    
-    # 2. PSK (密码) 确定逻辑
     [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
-
-    # 3. 写入 Sing-box 配置文件 (移除 Obfs，添加 ECH)
+	# 写入 Sing-box 配置文件 (移除 Obfs，添加 ECH)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":false,"disable_cache":false,"disable_expire":false},
+  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":true,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
@@ -721,7 +730,7 @@ create_config() {
         "key_path": "/etc/sing-box/certs/ech.key"
       }
     },
-    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+    "masquerade": "https://$TLS_DOMAIN"
   }],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
@@ -740,7 +749,7 @@ setup_service() {
     local mem_total=$(probe_memory_total); local io_prio=4
     [ "$real_c" -le 1 ] && core_range="0" || core_range="0-$((real_c - 1))"
     [ "$mem_total" -ge 450 ] && [ "$io_class" = "realtime" ] && io_prio=0 || io_prio=4
-    [ "$mem_total" -lt 200 ] && io_prio=7 
+    [ "$mem_total" -lt 200 ] && io_prio=7
     local final_nice="$cur_nice"
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
     if ! renice "$cur_nice" $$ >/dev/null 2>&1; then
@@ -843,15 +852,15 @@ EOF
 get_env_data() {
     local CONFIG_FILE="/etc/sing-box/config.json"; RAW_ECH=""
     [ ! -f "$CONFIG_FILE" ] && return 1
-    # 1. 提取核心数据 (PSK, 端口, 证书路径)
     local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
     [ -z "$data" ] && return 1
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data"
-    # 2. 提取 SNI (域名) 与 证书指纹 (FP)
-    RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/' || echo "$TLS_DOMAIN")
+    # 提取 SNI 与 指纹
+    RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
+    [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
-    # 3. 读取 ECH 并进行极致稳健的 URL 编码 (解决 BusyBox 解析坑)
+    # 读取 ECH
     if [ -f "/etc/sing-box/certs/ech.pub" ]; then
         local raw=$(grep -v "ECH CONFIGS" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
         RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g' | sed 's/\//%%2F/g' | sed 's/=/%%3D/g' | sed 's/%%/%/g')
@@ -862,13 +871,14 @@ display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" status_info="" hostname_tag="$(hostname)"
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
     local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" s_text="\033[1;33moffline\033[0m" p_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
+	
     pgrep sing-box >/dev/null 2>&1 && { s_text="\033[1;33monline\033[0m"; s_icon="\033[1;32m[✔]\033[0m"; }
     _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
     if command -v nc >/dev/null 2>&1; then
         _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 & wait
         [[ "$(cat /tmp/sb_v4_res 2>/dev/null)" == "OK" || "$(cat /tmp/sb_v6_res 2>/dev/null)" == "OK" ]] && p_icon="\033[1;32m[✔]\033[0m"
     fi
-
+	
     echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon | 服务: $s_text $s_icon"
     if [ -n "${RAW_IP4:-}" ]; then
         LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_ECH_v4"
@@ -943,7 +953,7 @@ EOF
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port
         get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard
         optimize_system install_singbox create_config setup_service apply_firewall service_ctrl info err warn succ
-        apply_userspace_adaptive_profile apply_nic_core_boost
+        apply_userspace_adaptive_profile apply_nic_core_boost verify_config
         setup_zrm_swap safe_rtt generate_cert)
 
     for f in "${funcs[@]}"; do
@@ -958,10 +968,14 @@ elif [[ "${1:-}" == "--show-only" ]]; then
     get_env_data; echo -e "\n\033[1;34m==========================================\033[0m"
     display_system_status; display_links
 elif [[ "${1:-}" == "--reset-port" ]]; then
-    create_config "$2"; service_ctrl restart; get_env_data; display_links
+    f="/etc/sing-box/config.json"; cp "$f" "$f.bak"
+    create_config "$2"
+    if verify_config; then service_ctrl restart && succ "端口已重置并生效" && get_env_data && display_links && rm -f "$f.bak"
+    else mv "$f.bak" "$f" && service_ctrl restart && err "已回滚至旧配置"; fi
 elif [[ "${1:-}" == "--update-kernel" ]]; then
     if install_singbox "update"; then
-        service_ctrl restart; succ "内核已更新并应用防火墙规则"
+        if verify_config; then service_ctrl restart && succ "内核已更新并重启服务"
+        else err "新内核与当前配置不兼容，请检查配置或回退版本"; fi
     fi
 elif [[ "${1:-}" == "--apply-cwnd" ]]; then
     apply_userspace_adaptive_profile >/dev/null 2>&1 || true
@@ -998,24 +1012,28 @@ while true; do
     fi
     case "$opt" in
         1) source "$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
-        2) f="/etc/sing-box/config.json"; old=$(md5sum $f 2>/dev/null)
-            vi $f; if [ "$old" != "$(md5sum $f 2>/dev/null)" ]; then
-                service_ctrl restart && succ "配置已更新，网络画像与防火墙已同步刷新"
-            else info "配置未作变更"; fi
-            read -r -p $'\n按回车键返回菜单...' ;;
+		2) f="/etc/sing-box/config.json"; old_md5=$(md5sum "$f" 2>/dev/null); cp "$f" "$f.bak"; vi "$f"
+           if [ "$old_md5" != "$(md5sum "$f" 2>/dev/null)" ]; then
+               if verify_config; then service_ctrl restart && succ "配置已更新，服务已重载" && rm -f "$f.bak"
+               else warn "检测到语法错误，正在尝试回滚..."; mv "$f.bak" "$f" && service_ctrl restart && info "配置已还原，请再次尝试修改"; fi
+           else info "配置未作变更" && rm -f "$f.bak"; fi
+           read -r -p $'\n按回车键返回菜单...' ;;
         3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
-        6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
+		6) read -r -p "是否确定卸载？(默认N) [y/N]: " cf
            if [[ "${cf,,}" == "y" ]]; then
-               info "正在执行深度卸载..."; systemctl disable --now sing-box zram-swap 2>/dev/null; rc-service sing-box stop 2>/dev/null; rc-update del sing-box default 2>/dev/null
-               swapoff -a 2>/dev/null; [ -w /sys/block/zram0/reset ] && echo 1 > /sys/block/zram0/reset 2>/dev/null
-               [ -n "${RAW_PORT:-}" ] && command -v iptables >/dev/null && { iptables -D INPUT -p udp --dport "$RAW_PORT" -j ACCEPT 2>/dev/null; ip6tables -D INPUT -p udp --dport "$RAW_PORT" -j ACCEPT 2>/dev/null; }
-               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{sing-box,zram-swap}.service /etc/init.d/{sing-box,zram-swap} /etc/sysctl.d/99-sing-box.conf /tmp/sb_* ~/.acme.sh /swapfile
+               info "正在执行深度卸载..."
+               [ -f /etc/sing-box/config.json ] && RAW_PORT=$(grep '"listen_port":' /etc/sing-box/config.json | sed 's/[^0-9]//g')
+               systemctl disable --now sing-box zram-swap 2>/dev/null; rc-service sing-box stop 2>/dev/null
+               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB,zram-swap} /etc/systemd/system/{sing-box,zram-swap}.service /etc/init.d/{sing-box,zram-swap} /etc/sysctl.d/99-sing-box.conf /tmp/sb_* ~/.acme.sh /swapfile
+               [ -n "$RAW_PORT" ] && command -v iptables >/dev/null && { iptables -D INPUT -p udp --dport "$RAW_PORT" -j ACCEPT 2>/dev/null; ip6tables -D INPUT -p udp --dport "$RAW_PORT" -j ACCEPT 2>/dev/null; }
+               sed -i '/net.ipv4.ip_forward/c\net.ipv4.ip_forward = 0' /etc/sysctl.conf 2>/dev/null || echo "net.ipv4.ip_forward = 0" >> /etc/sysctl.conf
+               sed -i '/net.ipv6.conf.all.forwarding/c\net.ipv6.conf.all.forwarding = 0' /etc/sysctl.conf 2>/dev/null || echo "net.ipv6.conf.all.forwarding = 0" >> /etc/sysctl.conf
+               sed -i '/vm.swappiness/c\vm.swappiness = 60' /etc/sysctl.conf 2>/dev/null || echo "vm.swappiness = 60" >> /etc/sysctl.conf
                sed -i '/swapfile/d' /etc/fstab; crontab -l 2>/dev/null | grep -v "acme.sh" | crontab - 2>/dev/null
-               printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
-               sysctl --system >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "深度卸载完成：服务、防火墙及 ECH 密钥已清理"; exit 0
-           else info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; fi ;;
+               sysctl --system >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "深度卸载完成，系统环境已重置"; exit 0
+           else info "卸载操作已取消"; read -r -p "按回车键返回菜单..."; fi ;;
         0) exit 0 ;;
     esac
 done
@@ -1042,6 +1060,7 @@ create_config "$USER_PORT"
 get_env_data
 create_sb_tool
 setup_service
+verify_config || exit 1
 echo -e "\n\033[1;34m==========================================\033[0m"
 display_system_status
 echo -e "\033[1;34m------------------------------------------\033[0m"
