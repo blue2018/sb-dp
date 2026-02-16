@@ -686,16 +686,15 @@ create_config() {
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
-    
+    # 端口和 PSK (密码) 确定逻辑
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(printf "\n" | prompt_for_port); fi
     fi
-    
     [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
-
+	# 写入 Sing-box 配置文件 (移除 Obfs，添加 ECH)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -713,7 +712,7 @@ create_config() {
     "udp_fragment": true,
     "tls": {
       "enabled": true, 
-      "alpn": ["h3", "h2"], 
+      "alpn": ["h3"], 
       "min_version": "1.3", 
       "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
       "key_path": "/etc/sing-box/certs/privkey.pem",
