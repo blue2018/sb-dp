@@ -1026,13 +1026,16 @@ while true; do
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
         6) read -r -p "是否确定卸载？(默认N) [Y/N]: " cf
            if [[ "${cf,,}" == "y" ]]; then
-               info "正在执行深度卸载..."; systemctl disable --now sing-box zram-swap 2>/dev/null; rc-service sing-box stop 2>/dev/null; rc-update del sing-box default 2>/dev/null
-               swapoff -a 2>/dev/null; [ -w /sys/block/zram0/reset ] && echo 1 > /sys/block/zram0/reset 2>/dev/null
-               [ -n "${RAW_PORT:-}" ] && command -v iptables >/dev/null && { iptables -D INPUT -p udp --dport "$RAW_PORT" -j ACCEPT 2>/dev/null; ip6tables -D INPUT -p udp --dport "$RAW_PORT" -j ACCEPT 2>/dev/null; }
-               rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB} /etc/systemd/system/{sing-box,zram-swap}.service /etc/init.d/{sing-box,zram-swap} /etc/sysctl.d/99-sing-box.conf /tmp/sb_* ~/.acme.sh /swapfile
-               sed -i '/swapfile/d' /etc/fstab; crontab -l 2>/dev/null | grep -v "acme.sh" | crontab - 2>/dev/null
-               printf "net.ipv4.ip_forward=1\nnet.ipv6.conf.all.forwarding=1\nvm.swappiness=60\n" > /etc/sysctl.conf
-               sysctl --system >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "深度卸载完成：服务、防火墙及 ECH 密钥已清理"; exit 0
+              info "正在执行深度卸载..."
+              [ -f /etc/sing-box/config.json ] && RAW_PORT=$(grep '"listen_port":' /etc/sing-box/config.json | sed 's/[^0-9]//g')
+              systemctl disable --now sing-box zram-swap 2>/dev/null; rc-service sing-box stop 2>/dev/null
+              rm -rf /etc/sing-box /usr/bin/sing-box /usr/local/bin/{sb,SB,zram-swap} /etc/systemd/system/{sing-box,zram-swap}.service /etc/init.d/{sing-box,zram-swap} /etc/sysctl.d/99-sing-box.conf /tmp/sb_* ~/.acme.sh /swapfile
+              [ -n "$RAW_PORT" ] && command -v iptables >/dev/null && { iptables -D INPUT -p udp --dport "$RAW_PORT" -j ACCEPT 2>/dev/null; ip6tables -D INPUT -p udp --dport "$RAW_PORT" -j ACCEPT 2>/dev/null; }
+              sed -i '/net.ipv4.ip_forward/c\net.ipv4.ip_forward = 0' /etc/sysctl.conf 2>/dev/null || echo "net.ipv4.ip_forward = 0" >> /etc/sysctl.conf
+              sed -i '/net.ipv6.conf.all.forwarding/c\net.ipv6.conf.all.forwarding = 0' /etc/sysctl.conf 2>/dev/null || echo "net.ipv6.conf.all.forwarding = 0" >> /etc/sysctl.conf
+              sed -i '/vm.swappiness/c\vm.swappiness = 60' /etc/sysctl.conf 2>/dev/null || echo "vm.swappiness = 60" >> /etc/sysctl.conf
+              sed -i '/swapfile/d' /etc/fstab; crontab -l 2>/dev/null | grep -v "acme.sh" | crontab - 2>/dev/null
+              sysctl --system >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "深度卸载完成：系统参数已回归默认，所有配置已清理"; exit 0
            else info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; fi ;;
         0) exit 0 ;;
     esac
