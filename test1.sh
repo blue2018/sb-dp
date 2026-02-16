@@ -1013,11 +1013,6 @@ while true; do
     fi
     case "$opt" in
         1) source "$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
-        2) f="/etc/sing-box/config.json"; old=$(md5sum $f 2>/dev/null)
-            vi $f; if [ "$old" != "$(md5sum $f 2>/dev/null)" ]; then
-                service_ctrl restart && succ "配置已更新，网络画像与防火墙已同步刷新"
-            else info "配置未作变更"; fi
-            read -r -p $'\n按回车键返回菜单...' ;;
 		2) f="/etc/sing-box/config.json"; old_md5=$(md5sum "$f" 2>/dev/null); cp "$f" "$f.bak"
            vi "$f"
            if [ "$old_md5" != "$(md5sum "$f" 2>/dev/null)" ]; then
