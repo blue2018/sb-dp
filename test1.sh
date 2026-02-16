@@ -1032,8 +1032,8 @@ while true; do
                sed -i '/net.ipv6.conf.all.forwarding/c\net.ipv6.conf.all.forwarding = 0' /etc/sysctl.conf 2>/dev/null || echo "net.ipv6.conf.all.forwarding = 0" >> /etc/sysctl.conf
                sed -i '/vm.swappiness/c\vm.swappiness = 60' /etc/sysctl.conf 2>/dev/null || echo "vm.swappiness = 60" >> /etc/sysctl.conf
                sed -i '/swapfile/d' /etc/fstab; crontab -l 2>/dev/null | grep -v "acme.sh" | crontab - 2>/dev/null
-               sysctl --system >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "深度卸载完成，系统环境已重置"; return 0
-               else info "卸载操作已取消"; read -r -p "按回车键返回菜单..." ; fi ;;
+               sysctl --system >/dev/null 2>&1; systemctl daemon-reload 2>/dev/null; succ "深度卸载完成，系统环境已重置"; exit 0
+           else info "卸载操作已取消"; read -r -p "按回车键返回菜单..."; fi ;;
         0) exit 0 ;;
     esac
 done
