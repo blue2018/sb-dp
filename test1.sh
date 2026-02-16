@@ -120,11 +120,48 @@ prompt_for_port() {
 
 # 生成 ECC P-256 高性能证书 + ECH 密钥对
 generate_cert() {
-    local CERT_DIR="/etc/sing-box/certs"; local TMP_ECH="/tmp/ech_out"
+    local CERT_DIR="/etc/sing-box/certs"
+    local TMP_ECH="/tmp/ech_out"
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-    # 1. 生成 TLS 证书
-    if [ ! -f "$CERT_DIR/fullchain.pem" ]; then
-        info "生成 ECC 证书 (域名: $TLS_DOMAIN)..."
+    local cert_mode=""
+    while :; do
+        echo -e "\n\033[1;36m[证书配置]\033[0m 请选择 TLS 证书来源："
+        echo "1. 自动生成自签证书 (默认，适用于无域名用户)"
+        echo "2. 手动粘贴 Cloudflare 证书 (适用于已在 CF 开启自定义域名的用户)"
+        read -r -p "请输入选项 [1-2] (默认1): " cert_mode
+        cert_mode=${cert_mode:-1}
+
+        if [[ "$cert_mode" == "1" || "$cert_mode" == "2" ]]; then
+            break
+        else
+            err "输入错误 [$cert_mode]，请输入 1 或 2"
+        fi
+    done
+
+    if [[ "$cert_mode" == "2" ]]; then
+        # 模式 2：手动录入 CF 证书
+        while :; do
+            read -r -p "请输入您在 CF 解析的二级域名 (例如: hy2.example.com): " USER_SNI
+            if [[ -n "$USER_SNI" ]]; then
+                TLS_DOMAIN="$USER_SNI"
+                break
+            else
+                err "域名不能为空，请重新输入"
+            fi
+        done
+
+        info "准备接收证书 [Origin Certificate]..."
+        echo -e "请粘贴内容，完成后按下 \033[1;33m[回车]\033[0m，再按 \033[1;33m[Ctrl+D]\033[0m 结束："
+        cat > "$CERT_DIR/fullchain.pem"
+        [ -n "$(tail -c1 "$CERT_DIR/fullchain.pem" 2>/dev/null)" ] && echo "" >> "$CERT_DIR/fullchain.pem"
+        info "准备接收私钥 [Private Key]..."
+        echo -e "请粘贴内容，完成后按下 \033[1;33m[回车]\033[0m，再按 \033[1;33m[Ctrl+D]\033[0m 结束："
+        cat > "$CERT_DIR/privkey.pem"
+        [ -n "$(tail -c1 "$CERT_DIR/privkey.pem" 2>/dev/null)" ] && echo "" >> "$CERT_DIR/privkey.pem"
+        succ "CF 证书导入完成 (SNI: $TLS_DOMAIN)"
+    else
+        # 模式 1：原有自签逻辑
+        info "生成 ECC 自签证书 (域名: $TLS_DOMAIN)..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
             -keyout "$CERT_DIR/privkey.pem" -out "$CERT_DIR/fullchain.pem" \
             -days 3650 -sha256 -subj "/CN=$TLS_DOMAIN" \
@@ -132,12 +169,14 @@ generate_cert() {
             -addext "subjectAltName=DNS:$TLS_DOMAIN" \
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
-    # 2. 生成 ECH 密钥 (保留 PEM 标头)
+
+    # 2. 生成 ECH 密钥 (必须针对当前的 $TLS_DOMAIN 实时生成)
     info "生成 $TLS_DOMAIN 的 ECH 密钥对..."
     /usr/bin/sing-box generate ech-keypair "$TLS_DOMAIN" > "$TMP_ECH" 2>&1
     sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
     sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
     rm -f "$TMP_ECH"
+
     # 3. 校验并提取指纹
     if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
@@ -667,18 +706,15 @@ create_config() {
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
     
-    # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(printf "\n" | prompt_for_port); fi
     fi
     
-    # 2. PSK (密码) 确定逻辑
     [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
 
-    # 3. 写入 Sing-box 配置文件 (移除 Obfs，添加 ECH)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -705,7 +741,7 @@ create_config() {
         "key_path": "/etc/sing-box/certs/ech.key"
       }
     },
-    "masquerade": "https://${TLS_DOMAIN:-www.microsoft.com}"
+    "masquerade": "https://$TLS_DOMAIN"
   }],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
