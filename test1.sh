@@ -407,6 +407,17 @@ apply_nic_core_boost() {
     info "NIC 优化 → 网卡: $IFACE | 队列: $target_qlen | 中断延迟: ${t_usc}us | 环形缓冲区: $ring"
 }
 
+# 配置预检
+verify_config() {
+    local LOG="/tmp/sb_check.log"; info "正在执行配置合规性检查..."
+    if /usr/bin/sing-box check -c /etc/sing-box/config.json >"$LOG" 2>&1; then
+        succ "配置预检通过" && { rm -f "$LOG"; return 0; }
+    else
+        echo -e "\033[1;31m[!]\033[0m 错误详情: $(tail -n 1 "$LOG" 2>/dev/null)"
+        err "配置预检失败，拒绝应用变更！" && { rm -f "$LOG"; return 1; }
+    fi
+}
+
 #防火墙开放端口
 apply_firewall() {
     local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
@@ -943,7 +954,7 @@ EOF
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port
         get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard
         optimize_system install_singbox create_config setup_service apply_firewall service_ctrl info err warn succ
-        apply_userspace_adaptive_profile apply_nic_core_boost
+        apply_userspace_adaptive_profile apply_nic_core_boost verify_config
         setup_zrm_swap safe_rtt generate_cert)
 
     for f in "${funcs[@]}"; do
@@ -958,10 +969,14 @@ elif [[ "${1:-}" == "--show-only" ]]; then
     get_env_data; echo -e "\n\033[1;34m==========================================\033[0m"
     display_system_status; display_links
 elif [[ "${1:-}" == "--reset-port" ]]; then
-    create_config "$2"; service_ctrl restart; get_env_data; display_links
+    f="/etc/sing-box/config.json"; cp "$f" "$f.bak"
+    create_config "$2"
+    if verify_config; then service_ctrl restart && succ "端口已重置并生效" && get_env_data && display_links && rm -f "$f.bak"
+    else mv "$f.bak" "$f" && service_ctrl restart && err "已回滚至旧配置"; fi
 elif [[ "${1:-}" == "--update-kernel" ]]; then
     if install_singbox "update"; then
-        service_ctrl restart; succ "内核已更新并应用防火墙规则"
+        if verify_config; then service_ctrl restart && succ "内核已更新并重启服务"
+        else err "新内核与当前配置不兼容，请检查配置或回退版本"; fi
     fi
 elif [[ "${1:-}" == "--apply-cwnd" ]]; then
     apply_userspace_adaptive_profile >/dev/null 2>&1 || true
@@ -1003,6 +1018,13 @@ while true; do
                 service_ctrl restart && succ "配置已更新，网络画像与防火墙已同步刷新"
             else info "配置未作变更"; fi
             read -r -p $'\n按回车键返回菜单...' ;;
+		2) f="/etc/sing-box/config.json"; old_md5=$(md5sum "$f" 2>/dev/null); cp "$f" "$f.bak"
+           vi "$f"
+           if [ "$old_md5" != "$(md5sum "$f" 2>/dev/null)" ]; then
+             if verify_config; then service_ctrl restart && succ "配置已更新，服务已重载" && rm -f "$f.bak"
+             else warn "检测到语法错误，正在尝试回滚..."; mv "$f.bak" "$f" && service_ctrl restart && info "配置已还原，请再次尝试修改"; fi
+           else info "配置未作变更" && rm -f "$f.bak"; fi
+           read -r -p $'\n按回车键返回菜单...' ;;
         3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
@@ -1042,6 +1064,7 @@ create_config "$USER_PORT"
 get_env_data
 create_sb_tool
 setup_service
+verify_config || exit 1
 echo -e "\n\033[1;34m==========================================\033[0m"
 display_system_status
 echo -e "\033[1;34m------------------------------------------\033[0m"
