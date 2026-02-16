@@ -409,7 +409,7 @@ apply_nic_core_boost() {
 
 # 配置预检
 verify_config() {
-    local LOG="/tmp/sb_check.log"; info "正在执行配置合规性检查..."
+    local LOG="/tmp/sb_check.log"; info "执行配置合规性检查..."
     if /usr/bin/sing-box check -c /etc/sing-box/config.json >"$LOG" 2>&1; then
         succ "配置预检通过" && { rm -f "$LOG"; return 0; }
     else
