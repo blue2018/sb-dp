@@ -863,7 +863,7 @@ display_links() {
     if /usr/bin/sing-box check -c /etc/sing-box/config.json >/tmp/sb_check.log 2>&1; then
         succ "配置预检通过：证书格式与逻辑架构正常"
     else
-        echo -e "\n\033[1;31m==========================================\033[0m"
+		echo -e "\n\033[1;34m==========================================\033[0m"
         err "配置预检失败！"
         warn "错误详情: $(cat /tmp/sb_check.log | tail -n 1 2>/dev/null)"
         echo -e "\033[1;33m[建议]\033[0m 请检查证书/私钥是否完整，或端口是否冲突"
