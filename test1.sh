@@ -122,7 +122,6 @@ prompt_for_port() {
 generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"; local TMP_ECH="/tmp/ech_out"; local cert_mode=""
     mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-    # 选择模式并根据模式处理 TLS 证书
     while :; do
         echo -e "\n\033[1;36m[证书配置]\033[0m 请选择 TLS 证书来源："
         echo "1. 自动生成自签证书 (默认，适用于无域名用户)"
@@ -862,6 +861,7 @@ display_links() {
     local LINK_V4="" LINK_V6="" FULL_CLIP="" status_info="" hostname_tag="$(hostname)"
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
     local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" s_text="\033[1;33moffline\033[0m" p_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
+	
     pgrep sing-box >/dev/null 2>&1 && { s_text="\033[1;33monline\033[0m"; s_icon="\033[1;32m[✔]\033[0m"; }
     _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
     if command -v nc >/dev/null 2>&1; then
