@@ -1013,11 +1013,10 @@ while true; do
     fi
     case "$opt" in
         1) source "$SBOX_CORE" --show-only; read -r -p $'\n按回车键返回菜单...' ;;
-		2) f="/etc/sing-box/config.json"; old_md5=$(md5sum "$f" 2>/dev/null); cp "$f" "$f.bak"
-           vi "$f"
+		2) f="/etc/sing-box/config.json"; old_md5=$(md5sum "$f" 2>/dev/null); cp "$f" "$f.bak"; vi "$f"
            if [ "$old_md5" != "$(md5sum "$f" 2>/dev/null)" ]; then
-             if verify_config; then service_ctrl restart && succ "配置已更新，服务已重载" && rm -f "$f.bak"
-             else warn "检测到语法错误，正在尝试回滚..."; mv "$f.bak" "$f" && service_ctrl restart && info "配置已还原，请再次尝试修改"; fi
+               if verify_config; then service_ctrl restart && succ "配置已更新，服务已重载" && rm -f "$f.bak"
+               else warn "检测到语法错误，正在尝试回滚..."; mv "$f.bak" "$f" && service_ctrl restart && info "配置已还原，请再次尝试修改"; fi
            else info "配置未作变更" && rm -f "$f.bak"; fi
            read -r -p $'\n按回车键返回菜单...' ;;
         3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
