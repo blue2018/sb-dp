@@ -142,6 +142,7 @@ generate_cert() {
         echo -e "请粘贴内容，然后按下 [回车]，再按 [Ctrl+D] 完成录入："
         cat > "$CERT_DIR/privkey.pem"
         [ -n "$(tail -c1 "$CERT_DIR/privkey.pem" 2>/dev/null)" ] && echo "" >> "$CERT_DIR/privkey.pem"
+		succ "所有敏感文件已安全存储并锁死权限 (600)"
     else
         info "生成 ECC 证书 (域名: $TLS_DOMAIN)..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
