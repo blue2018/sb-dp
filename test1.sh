@@ -874,7 +874,7 @@ get_env_data() {
 	# 读取 ECH 并进行 URL 编码
     if [ -f "/etc/sing-box/certs/ech.pub" ]; then
         local raw=$(tr -dc 'a-zA-Z0-9+/=' < "/etc/sing-box/certs/ech.pub")
-        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g; s/%%/%/g')
+        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g' | sed 's/%%/%/g')
     fi
 }
 
