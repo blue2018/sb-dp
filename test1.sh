@@ -131,15 +131,16 @@ generate_cert() {
             read -r -p "请输入您在 CF 解析的域名 (例如: hy2.example.com): " USER_SNI
             [ -n "$USER_SNI" ] && { TLS_DOMAIN="$USER_SNI"; break; } || err "域名不能为空"
         done
-        info "准备接收证书 [Origin Certificate]..."
-        echo -e "请粘贴内容，然后按下 [回车]，再按 [Ctrl+D] 完成录入："
-        cat > "$CERT_DIR/fullchain.pem"
-        [ -n "$(tail -c1 "$CERT_DIR/fullchain.pem" 2>/dev/null)" ] && echo "" >> "$CERT_DIR/fullchain.pem"
-        info "准备接收私钥 [Private Key]..."
-        echo -e "请粘贴内容，然后按下 [回车]，再按 [Ctrl+D] 完成录入："
-        cat > "$CERT_DIR/privkey.pem"
-        [ -n "$(tail -c1 "$CERT_DIR/privkey.pem" 2>/dev/null)" ] && echo "" >> "$CERT_DIR/privkey.pem"
-		succ "所有敏感信息已安全存储并锁死权限 (600)"
+        info "准备接收证书与私钥内容..."
+        echo -e "请将 CF 的 [Origin Certificate] 和 [Private Key] 全部内容粘贴到下方，然后按下 [回车]，再按 [Ctrl+D] 完成提交："
+        local TMP_PEM="$CERT_DIR/input.tmp"
+        cat > "$TMP_PEM"
+        sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$TMP_PEM" > "$CERT_DIR/fullchain.pem"
+        sed -n '/-----BEGIN \(.*\)PRIVATE KEY-----/,/-----END \(.*\)PRIVATE KEY-----/p' "$TMP_PEM" > "$CERT_DIR/privkey.pem"
+        rm -f "$TMP_PEM"
+        if [ -s "$CERT_DIR/fullchain.pem" ] && [ -s "$CERT_DIR/privkey.pem" ]; then succ "已自动识别并分离证书与私钥"
+        else err "识别失败：未在内容中找到合规的 PEM 块"; exit 1; fi
+        succ "所有敏感信息已安全存储并锁死权限 (600)"
     else
         info "生成 ECC 证书 (域名: $TLS_DOMAIN)..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
@@ -149,8 +150,7 @@ generate_cert() {
             -addext "subjectAltName=DNS:$TLS_DOMAIN" \
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
-	
-    # 生成 ECH 密钥
+    # 生成 ECH 密钥 (保持原有逻辑)
     info "生成 $TLS_DOMAIN 的 ECH 密钥对..."
     /usr/bin/sing-box generate ech-keypair "$TLS_DOMAIN" > "$TMP_ECH" 2>&1
     sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
