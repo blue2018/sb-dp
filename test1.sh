@@ -700,9 +700,9 @@ create_config() {
     local sniffing=''; local dns_out=''; local route_rule=''
     
     if [ "$mem_total" -ge 100 ]; then
-        dns_srv='{"tag":"google-doh","address":"https://8.8.8.8/dns-query","detour":"direct-out"},{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"}'
-        sniffing=', "sniffing": { "enabled": true, "timeout": "300ms" }'
-        route_rule=', "route": { "rules": [ { "protocol": "dns", "action": "hijack-dns" }, { "protocol": "bittorrent", "outbound": "direct-out" } ] }'
+        dns_srv='{"tag":"google-doh","address":"https://8.8.4.4/dns-query","detour":"direct-out"},{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"}'
+        sniffing=', "sniff_override": ["http", "tls", "quic"], "sniff_timeout": "300ms"'
+        route_rule=', "route": { "rules": [ { "protocol": "dns", "action": "hijack-dns" } ] }'
     fi
     
     # 端口和 PSK (密码) 确定逻辑
