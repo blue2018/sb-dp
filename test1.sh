@@ -705,7 +705,7 @@ create_config() {
         route_rule=', "route": { "rules": [ { "protocol": "dns", "action": "hijack-dns" }, { "protocol": "bittorrent", "outbound": "direct-out" } ] }'
     fi
     
-    # 端口和 PSK (密码) 确定逻辑 (完全保留)
+    # 端口和 PSK (密码) 确定逻辑
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(printf "\n" | prompt_for_port); fi
@@ -714,7 +714,7 @@ create_config() {
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
     
-    # 写入 Sing-box 配置文件 (移除过时的 dns-out，启用 hijack-dns)
+    # 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
