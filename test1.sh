@@ -695,17 +695,17 @@ create_config() {
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
-	
+    
     local dns_srv='{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}'
     local sniffing=''; local dns_out=''; local route_rule=''
+    
     if [ "$mem_total" -ge 100 ]; then
         dns_srv='{"tag":"google-doh","address":"https://8.8.8.8/dns-query","detour":"direct-out"},{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"}'
         sniffing=', "sniffing": { "enabled": true, "timeout": "300ms" }'
-        dns_out=', {"type": "dns", "tag": "dns-out"}'
-        route_rule=', "route": { "rules": [ { "protocol": "dns", "outbound": "dns-out" } ] }'
+        route_rule=', "route": { "rules": [ { "protocol": "dns", "action": "hijack-dns" }, { "protocol": "bittorrent", "outbound": "direct-out" } ] }'
     fi
-	
-    # 端口和 PSK (密码) 确定逻辑
+    
+    # 端口和 PSK (密码) 确定逻辑 (完全保留)
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
         else PORT_HY2=$(printf "\n" | prompt_for_port); fi
@@ -713,8 +713,8 @@ create_config() {
     [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
-	
-    # 写入 Sing-box 配置文件 (保持紧致书写风格)
+    
+    # 写入 Sing-box 配置文件 (移除过时的 dns-out，启用 hijack-dns)
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
@@ -743,7 +743,7 @@ create_config() {
     },
     "masquerade": "https://$TLS_DOMAIN"
   }],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"} $dns_out] $route_rule
+  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}] $route_rule
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
