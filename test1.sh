@@ -132,7 +132,7 @@ generate_cert() {
             [ -n "$USER_SNI" ] && { TLS_DOMAIN="$USER_SNI"; break; } || err "域名不能为空"
         done
         info "准备接收证书与私钥内容..."
-        echo -e "请将 CF 的 [Origin Certificate] 和 [Private Key] 全部内容粘贴到下方，然后按下 [回车]，再按 [Ctrl+D] 完成提交："
+        echo -e "请将 CF 的 [Origin Certificate] 和 [Private Key] 粘贴到下方，然后按下 [回车]，再按 [Ctrl+D] 完成提交："
         local TMP_PEM="$CERT_DIR/input.tmp"
         cat > "$TMP_PEM"
         sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$TMP_PEM" > "$CERT_DIR/fullchain.pem"
