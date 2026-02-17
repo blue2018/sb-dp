@@ -1057,10 +1057,10 @@ optimize_system
 install_singbox "install"
 generate_cert
 create_config "$USER_PORT"
+verify_config || exit 1
 get_env_data
 create_sb_tool
 setup_service
-verify_config || exit 1
 echo -e "\n\033[1;34m==========================================\033[0m"
 display_system_status
 echo -e "\033[1;34m------------------------------------------\033[0m"
