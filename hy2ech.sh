@@ -126,20 +126,22 @@ generate_cert() {
         read -r -p "请输入选项 [1-2] (默认1): " cert_mode; cert_mode=${cert_mode:-1}
         [[ "$cert_mode" =~ ^[1-2]$ ]] && break || err "输入错误，请输入 1 或 2"
     done
+	
     if [ "$cert_mode" = "2" ]; then
         while :; do
             read -r -p "请输入您在 CF 解析的域名 (例如: hy2.example.com): " USER_SNI
             [ -n "$USER_SNI" ] && { TLS_DOMAIN="$USER_SNI"; break; } || err "域名不能为空"
         done
-        info "准备接收证书 [Origin Certificate]..."
-        echo -e "请粘贴内容，然后按下 [回车]，再按 [Ctrl+D] 完成录入："
-        cat > "$CERT_DIR/fullchain.pem"
-        [ -n "$(tail -c1 "$CERT_DIR/fullchain.pem" 2>/dev/null)" ] && echo "" >> "$CERT_DIR/fullchain.pem"
-        info "准备接收私钥 [Private Key]..."
-        echo -e "请粘贴内容，然后按下 [回车]，再按 [Ctrl+D] 完成录入："
-        cat > "$CERT_DIR/privkey.pem"
-        [ -n "$(tail -c1 "$CERT_DIR/privkey.pem" 2>/dev/null)" ] && echo "" >> "$CERT_DIR/privkey.pem"
-		succ "所有敏感信息已安全存储并锁死权限 (600)"
+        info "准备接收证书与私钥内容..."
+        echo -e "请将 CF 的 [Origin Certificate] 和 [Private Key] 粘贴到下方，然后按下 [回车]，再按 [Ctrl+D] 完成提交："
+        local TMP_PEM="$CERT_DIR/input.tmp"
+        cat > "$TMP_PEM"
+        sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' "$TMP_PEM" > "$CERT_DIR/fullchain.pem"
+        sed -n '/-----BEGIN \(.*\)PRIVATE KEY-----/,/-----END \(.*\)PRIVATE KEY-----/p' "$TMP_PEM" > "$CERT_DIR/privkey.pem"
+        rm -f "$TMP_PEM"
+        if [ -s "$CERT_DIR/fullchain.pem" ] && [ -s "$CERT_DIR/privkey.pem" ]; then succ "已自动识别并分离证书与私钥"
+        else err "识别失败：未在内容中找到合规的 PEM 块"; exit 1; fi
+        succ "所有敏感信息已安全存储并锁死权限 (600)"
     else
         info "生成 ECC 证书 (域名: $TLS_DOMAIN)..."
         openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
@@ -149,12 +151,14 @@ generate_cert() {
             -addext "subjectAltName=DNS:$TLS_DOMAIN" \
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
-    # 生成 ECH 密钥
+	
+    # 生成 ECH 密钥 (保持原有逻辑)
     info "生成 $TLS_DOMAIN 的 ECH 密钥对..."
     /usr/bin/sing-box generate ech-keypair "$TLS_DOMAIN" > "$TMP_ECH" 2>&1
     sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
     sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
     rm -f "$TMP_ECH"
+	
     # 校验并提取指纹
     if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
@@ -168,19 +172,23 @@ generate_cert() {
 get_network_info() {
     info "获取网络信息..."; RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
+	
     # 1. 探测函数：v4 用标准接口，v6 用专用 api6 接口，在无 v6 时会秒断，在有 v6 时极稳
     _f() { local p=$1
         { curl $p -ksSfL --connect-timeout 1 --max-time 3 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}'; } || \
         { [ "$p" = "-4" ] && curl $p -ksSfL --connect-timeout 1 --max-time 2 "https://api.ipify.org" || curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://api6.ipify.org" ; } || \
           curl $p -ksSfL --connect-timeout 1 --max-time 2 "https://icanhazip.com" || echo ""; }
+		  
     # 2. 异步执行：并行探测
     _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
+	
     # 3. 数据清洗 (融合版)：在主进程统一清洗数据
     [ -s "$t4" ] && read -r RAW_IP4 < "$t4" && RAW_IP4=${RAW_IP4//[[:space:]]/}
     [ -s "$t6" ] && read -r RAW_IP6 < "$t6" && RAW_IP6=${RAW_IP6//[[:space:]]/}
     [[ ! "$RAW_IP4" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && RAW_IP4=""
     [[ "$RAW_IP6" != *:* ]] && RAW_IP6=""
     rm -f "$t4" "$t6"
+	
     # 4. 判定与输出
     [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true"
     [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
@@ -694,7 +702,10 @@ create_config() {
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
+	local dns_srv='{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}'
+    [ "$mem_total" -ge 100 ] && timeout="40s" && dns_srv='{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"tag":"google-doh","address":"https://8.8.8.8/dns-query","detour":"direct-out"}'
+    [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
+    
     # 端口和 PSK (密码) 确定逻辑
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
@@ -703,11 +714,12 @@ create_config() {
     [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
-	# 写入 Sing-box 配置文件 (移除 Obfs，添加 ECH)
+    
+    # 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": {"servers":[{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}],"strategy":"$ds","independent_cache":true,"disable_cache":false,"disable_expire":false},
+  "dns": {"servers":[$dns_srv],"strategy":"$ds","independent_cache":true,"disable_cache":false,"disable_expire":false},
   "inbounds": [{
     "type": "hysteria2",
     "tag": "hy2-in",
@@ -756,7 +768,6 @@ setup_service() {
         warn "当前环境禁止高优先级调度，已自动回退至默认权重 (Nice 0)"
         final_nice=0
     fi
-    info "正在写入配置并启动服务..."
     if [ "$OS" = "alpine" ]; then
         command -v taskset >/dev/null || apk add --no-cache util-linux >/dev/null 2>&1
         cat > /etc/init.d/sing-box <<EOF
@@ -860,10 +871,10 @@ get_env_data() {
     [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
     local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
     RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
-    # 读取 ECH
+	# 读取 ECH 并进行 URL 编码
     if [ -f "/etc/sing-box/certs/ech.pub" ]; then
-        local raw=$(grep -v "ECH CONFIGS" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
-        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g' | sed 's/\//%%2F/g' | sed 's/=/%%3D/g' | sed 's/%%/%/g')
+        local raw=$(grep -v "ECH" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
+        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g' | sed 's/%%/%/g')
     fi
 }
 
@@ -928,25 +939,14 @@ create_sb_tool() {
     cat > "$CORE_TMP" <<EOF
 #!/usr/bin/env bash
 set -uo pipefail
-OS='$OS'
-SBOX_ARCH='$SBOX_ARCH'
-CPU_CORE='$CPU_CORE'
-SBOX_CORE='$SBOX_CORE'
-VAR_HY2_BW='${VAR_HY2_BW:-200}'
-SBOX_GOLIMIT='$SBOX_GOLIMIT'
-SBOX_GOGC='${SBOX_GOGC:-100}'
-SBOX_MEM_MAX='$SBOX_MEM_MAX'
-SBOX_MEM_HIGH='${SBOX_MEM_HIGH:-}'
-SBOX_OPTIMIZE_LEVEL='$SBOX_OPTIMIZE_LEVEL'
-INITCWND_DONE='${INITCWND_DONE:-false}'
-VAR_SYSTEMD_NICE='${VAR_SYSTEMD_NICE:--5}'
-VAR_SYSTEMD_IOSCHED='$VAR_SYSTEMD_IOSCHED'
-OS_DISPLAY='$OS_DISPLAY'
-TLS_DOMAIN='$TLS_DOMAIN'
-RAW_SNI='${RAW_SNI:-$TLS_DOMAIN}'
-RAW_ECH='${RAW_ECH:-}'
-RAW_IP4='${RAW_IP4:-}'
-RAW_IP6='${RAW_IP6:-}'
+OS='$OS'; SBOX_ARCH='$SBOX_ARCH'; CPU_CORE='$CPU_CORE'; SBOX_CORE='$SBOX_CORE'
+VAR_HY2_BW='${VAR_HY2_BW:-200}'; SBOX_GOLIMIT='$SBOX_GOLIMIT'
+SBOX_GOGC='${SBOX_GOGC:-100}'; SBOX_MEM_MAX='$SBOX_MEM_MAX'
+SBOX_MEM_HIGH='${SBOX_MEM_HIGH:-}'; SBOX_OPTIMIZE_LEVEL='$SBOX_OPTIMIZE_LEVEL'
+INITCWND_DONE='${INITCWND_DONE:-false}'; VAR_SYSTEMD_NICE='${VAR_SYSTEMD_NICE:--5}'
+VAR_SYSTEMD_IOSCHED='$VAR_SYSTEMD_IOSCHED'; OS_DISPLAY='$OS_DISPLAY'; TLS_DOMAIN='$TLS_DOMAIN'
+RAW_SNI='${RAW_SNI:-$TLS_DOMAIN}'; RAW_ECH='${RAW_ECH:-}'
+RAW_IP4='${RAW_IP4:-}'; RAW_IP6='${RAW_IP6:-}'
 IS_V6_OK='${IS_V6_OK:-false}'
 EOF
     # 导出函数
