@@ -149,6 +149,7 @@ generate_cert() {
             -addext "subjectAltName=DNS:$TLS_DOMAIN" \
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
+	
     # 生成 ECH 密钥
     info "生成 $TLS_DOMAIN 的 ECH 密钥对..."
     /usr/bin/sing-box generate ech-keypair "$TLS_DOMAIN" > "$TMP_ECH" 2>&1
@@ -693,13 +694,11 @@ create_config() {
     mkdir -p /etc/sing-box
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-	
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
     
     local dns_srv='{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}'
     local sniffing=''; local route_rule=''
-    
     if [ "$mem_total" -ge 100 ]; then
         dns_srv='{"tag":"google-doh","address":"https://8.8.4.4/dns-query","detour":"direct-out"},{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"}'
         sniffing=', "sniff": true, "sniff_override_destination": true, "sniff_timeout": "300ms"'
