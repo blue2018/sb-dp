@@ -126,6 +126,7 @@ generate_cert() {
         read -r -p "请输入选项 [1-2] (默认1): " cert_mode; cert_mode=${cert_mode:-1}
         [[ "$cert_mode" =~ ^[1-2]$ ]] && break || err "输入错误，请输入 1 或 2"
     done
+	
     if [ "$cert_mode" = "2" ]; then
         while :; do
             read -r -p "请输入您在 CF 解析的域名 (例如: hy2.example.com): " USER_SNI
@@ -150,12 +151,14 @@ generate_cert() {
             -addext "subjectAltName=DNS:$TLS_DOMAIN" \
             -addext "extendedKeyUsage=serverAuth" &>/dev/null
     fi
+	
     # 生成 ECH 密钥 (保持原有逻辑)
     info "生成 $TLS_DOMAIN 的 ECH 密钥对..."
     /usr/bin/sing-box generate ech-keypair "$TLS_DOMAIN" > "$TMP_ECH" 2>&1
     sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
     sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
     rm -f "$TMP_ECH"
+	
     # 校验并提取指纹
     if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
@@ -698,11 +701,8 @@ create_config() {
     [ "$mem_total" -ge 100 ] && timeout="40s"; [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
     
     local dns_srv='{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}'
-    local sniffing=''; local route_rule=''
     if [ "$mem_total" -ge 100 ]; then
         dns_srv='{"tag":"google-doh","address":"https://8.8.4.4/dns-query","detour":"direct-out"},{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"}'
-        sniffing=', "sniff": true, "sniff_override_destination": true, "sniff_timeout": "300ms"'
-        route_rule=', "route": { "rules": [ { "protocol": "dns", "action": "hijack-dns" } ] }'
     fi
     
     # 端口和 PSK (密码) 确定逻辑
@@ -729,7 +729,7 @@ create_config() {
     "up_mbps": $cur_bw,
     "down_mbps": $cur_bw,
     "udp_timeout": "$timeout",
-    "udp_fragment": true $sniffing,
+    "udp_fragment": true,
     "tls": {
       "enabled": true, 
       "alpn": ["h3"], 
@@ -743,7 +743,7 @@ create_config() {
     },
     "masquerade": "https://$TLS_DOMAIN"
   }],
-  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}] $route_rule
+  "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
