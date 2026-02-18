@@ -924,12 +924,7 @@ display_links() {
     
     # 增强服务状态检测：如果是外部模式，同时检测两个进程
     local is_running=false
-    if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
-        pgrep sing-box >/dev/null 2>&1 && pgrep cloudflared >/dev/null 2>&1 && is_running=true
-    else
-        pgrep sing-box >/dev/null 2>&1 && is_running=true
-    fi
-
+    pgrep sing-box >/dev/null 2>&1 && { [ "${USE_EXTERNAL_ARGO:-false}" != "true" ] || pgrep cloudflared >/dev/null 2>&1; } && { s_text="\033[1;33monline\033[0m"; s_icon="\033[1;32m[✔]\033[0m"; }
     [ "$is_running" = "true" ] && { s_text="\033[1;33monline\033[0m"; s_icon="\033[1;32m[✔]\033[0m"; }
     
     _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
