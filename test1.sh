@@ -737,13 +737,11 @@ create_config() {
       "masquerade": "https://'$TLS_DOMAIN'"
     }'
 
-    # 构造 Argo Inbound (修正 TLS 和隧道逻辑)
     # 构造 Argo Inbound
     local ARGO_IN=""; [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && ARGO_IN=',{
-      "type": "vless", "tag": "vless-argo-in",
-      "server_name": "'$A_DOMAIN'",
-      "cloudflare": { "enabled": true, "tunnel": { "token": "'$A_TOKEN'" } },
-      "users": [ { "uuid": "'$PSK'", "flow": "" } ], "tls": { "enabled": false },
+      "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
+      "users": [ { "uuid": "'$PSK'", "flow": "" } ],
+      "tls": { "enabled": false },
       "transport": { "type": "httpupgrade", "host": "'$A_DOMAIN'" }
     }'
     
@@ -1078,6 +1076,19 @@ install_singbox "install"
 generate_cert
 create_config "$USER_PORT"
 verify_config || exit 1
+if [ -n "$ARGO_TOKEN" ]; then
+    if ! command -v cloudflared &> /dev/null; then
+        info "下载 Argo 驱动..."
+        curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
+    fi
+    # 杀掉旧进程，确保新 Token 生效
+    pgrep -f "cloudflared tunnel" >/dev/null && pkill -f "cloudflared tunnel"
+    nohup /usr/local/bin/cloudflared tunnel --no-autoupdate run --token "$ARGO_TOKEN" >/dev/null 2>&1 &
+    
+    # 写入定时任务确保重启后自动运行 (兼容性最强的自启方案)
+    (crontab -l 2>/dev/null | grep -v "cloudflared"; echo "@reboot nohup /usr/local/bin/cloudflared tunnel --no-autoupdate run --token $ARGO_TOKEN >/dev/null 2>&1 &") | crontab -
+    succ "Argo 隧道驱动已启动并设置开机自启"
+fi
 get_env_data
 create_sb_tool
 setup_service; echo -e "\n\033[1;34m==========================================\033[0m"
