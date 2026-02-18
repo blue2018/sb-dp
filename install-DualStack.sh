@@ -735,38 +735,38 @@ create_config() {
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
 
-    # 构造 Hysteria2 Inbound
-    local HY2_IN='{
-      "type": "hysteria2", "tag": "hy2-in", "listen": "::", "listen_port": '$PORT_HY2',
-      "users": [ { "password": "'$PSK'" } ],
-      "ignore_client_bandwidth": false, "up_mbps": '$cur_bw', "down_mbps": '$cur_bw', "udp_timeout": "'$timeout'", "udp_fragment": true,
+    # 构造 Hysteria2 Inbound (使用 printf 确保变量安全填入)
+    local HY2_IN=$(printf '{
+      "type": "hysteria2", "tag": "hy2-in", "listen": "::", "listen_port": %s,
+      "users": [ { "password": "%s" } ],
+      "ignore_client_bandwidth": false, "up_mbps": %s, "down_mbps": %s, "udp_timeout": "%s", "udp_fragment": true,
       "tls": {
         "enabled": true, "alpn": ["h3"], "min_version": "1.3", 
         "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
         "key_path": "/etc/sing-box/certs/privkey.pem",
         "ech": { "enabled": true, "key_path": "/etc/sing-box/certs/ech.key" }
       },
-      "masquerade": "https://'$TLS_DOMAIN'"
-    }'
+      "masquerade": "https://%s"
+    }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN")
 
     # 构造 Argo Inbound (动态适配内核能力)
-    local ARGO_IN=""
+	local ARGO_IN=""
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
         if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
-            # 外部模式：必须指定 listen 为 127.0.0.1，防止外部扫描到该端口
-            ARGO_IN=',{
+		    # 外部模式：必须指定 listen 为 127.0.0.1，防止外部扫描到该端口
+            ARGO_IN=$(printf ',{
               "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
-              "users": [ { "uuid": "'$PSK'", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "'$A_DOMAIN'" }
-            }'
+              "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
+              "transport": { "type": "httpupgrade", "host": "%s" }
+            }' "$PSK" "$A_DOMAIN")
         else
-            # 内建模式：内核自带 argo 驱动，不需要 listen 端口，它是主动连接 CF 的
-            ARGO_IN=',{
-              "type": "vless", "tag": "vless-argo-in", "server_name": "'$A_DOMAIN'",
-              "cloudflare": { "enabled": true, "tunnel": { "token": "'$A_TOKEN'" } },
-              "users": [ { "uuid": "'$PSK'", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "'$A_DOMAIN'" }
-            }'
+		    # 内建模式：内核自带 argo 驱动，不需要 listen 端口，它是主动连接 CF 的
+            ARGO_IN=$(printf ',{
+              "type": "vless", "tag": "vless-argo-in", "server_name": "%s",
+              "cloudflare": { "enabled": true, "tunnel": { "token": "%s" } },
+              "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
+              "transport": { "type": "httpupgrade", "host": "%s" }
+            }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN")
         fi
     fi
     
