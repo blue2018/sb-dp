@@ -132,7 +132,7 @@ setup_argo_logic() {
             elif [ -f "/usr/local/bin/cloudflared" ]; then
                 USE_EXTERNAL_ARGO="true"; echo -e "\033[1;33m[INFO]\033[0m 已存在外部客户端，跳过下载" >&2
             else
-                USE_EXTERNAL_ARGO="true"; echo -ne "\033[1;32m[下载]\033[0m 下载官方 cloudflared... " >&2
+                USE_EXTERNAL_ARGO="true"; echo -ne "\033[1;32m[INFO]\033[0m 下载官方 cloudflared... " >&2
                 wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x /usr/local/bin/cloudflared && echo -e "\033[1;32m[完成]\033[0m" >&2 || { echo -e "\033[1;31m[失败]\033[0m" >&2; exit 1; }
             fi; break
         done
