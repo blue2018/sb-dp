@@ -90,7 +90,7 @@ get_cpu_core() {
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
     local p rand argo_t argo_d
-    echo -e "\n\033[1;32m[配置引导]\033[0m\n1. Hysteria2+TLS+ECH: UDP 端口直连 (默认)\n2. VLESS+HTTPUpgrade+TLS+Argo: CF 隧道转发 (可选)\n-------------------------------------------------" >&2
+    echo -e "\n\033[1;32m[配置引导]\033[0m\n1. Hysteria2 + TLS + ECH: UDP 端口直连(默认)\n2. VLESS + HTTPUpgrade + TLS + Argo: CF 隧道转发(可选)\n-------------------------------------------------" >&2
     echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车，则跳过可选协议): " >&2; read -r argo_d
     if [ -n "$argo_d" ]; then
         while :; do
