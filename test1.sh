@@ -113,7 +113,7 @@ prompt_for_port() {
     echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车，则跳过可选协议): " >&2; read -r argo_d
     if [ -n "$argo_d" ]; then
         while :; do
-            echo -ne "请输入Argo隧道的 Token: " >&2; read -r argo_t
+            echo -ne "请输入 Argo 隧道的 Token: " >&2; read -r argo_t
             [ -n "$argo_t" ] && { ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"; break; }
             echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2
         done
