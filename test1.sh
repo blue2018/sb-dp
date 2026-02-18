@@ -116,7 +116,7 @@ prompt_for_port() {
 # 获取 Argo 隧道配置
 prompt_for_argo() {
     local argo_d argo_t
-    echo -e "\033[1;32m[可选配置]\033[0m\nVLESS + HttpUpgrade + TLS + Argo: CF隧道转发\n-------------------------------------------------" >&2
+    echo -e "\033[1;32m[可选配置]\033[0m\nVLESS + HttpUpgrade + TLS + Argo: CF隧道转发\n-----------------------------------------------" >&2
     echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车跳过可选配置): " >&2; read -r argo_d
     if [ -n "$argo_d" ]; then
         while :; do
