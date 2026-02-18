@@ -733,14 +733,11 @@ create_config() {
 
 	# 构造 Argo Inbound
     local ARGO_IN=""; [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && ARGO_IN=',{
-      "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
+      "type": "vless", "tag": "vless-argo-in",
+	  "listen": "127.0.0.1", "listen_port": 8001,
       "cloudflare_tunnel": { "token": "'$A_TOKEN'" },
       "users": [ { "uuid": "'$PSK'", "flow": "" } ],
-      "tls": { 
-        "enabled": true, "server_name": "'$A_DOMAIN'",
-        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
-        "key_path": "/etc/sing-box/certs/privkey.pem"
-      },
+      "tls": { "enabled": false },
       "transport": { "type": "httpupgrade" }
     }'
 	
