@@ -708,8 +708,8 @@ create_config() {
     local dns_srv='{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}'
     [ "$mem_total" -ge 100 ] && timeout="40s" && dns_srv='{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"tag":"google-doh","address":"https://8.8.8.8/dns-query","detour":"direct-out"}'
     [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
-	
-    # 端口和 PSK (密码) 确定逻辑
+
+	# 端口和 PSK (密码) 确定逻辑
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.. | objects | select(.type == "hysteria2") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1)
         else PORT_HY2=$(printf "\n" | prompt_for_port | awk '{print $1}'); fi
@@ -717,8 +717,8 @@ create_config() {
     [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
-	
-    # 构造 Hysteria2 Inbound
+
+	# 构造 Hysteria2 Inbound
     local HY2_IN='{
       "type": "hysteria2", "tag": "hy2-in", "listen": "::", "listen_port": '$PORT_HY2',
       "users": [ { "password": "'$PSK'" } ],
@@ -731,20 +731,21 @@ create_config() {
       },
       "masquerade": "https://'$TLS_DOMAIN'"
     }'
-    # 构造 Argo Inbound (逻辑紧凑判定)
+
+	# 构造 Argo Inbound
     local ARGO_IN=""; [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && ARGO_IN=',{
       "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1",
       "cloudflare_tunnel": { "token": "'$A_TOKEN'" },
       "users": [ { "uuid": "'$PSK'", "flow": "" } ],
       "tls": { 
-	    "enabled": true, "server_name": "'$A_DOMAIN'",
+        "enabled": true, "server_name": "'$A_DOMAIN'",
         "certificate_path": "/etc/sing-box/certs/fullchain.pem",
         "key_path": "/etc/sing-box/certs/privkey.pem"
       },
       "transport": { "type": "httpupgrade" }
     }'
 	
-    # 写入 Sing-box 配置文件
+	# 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
