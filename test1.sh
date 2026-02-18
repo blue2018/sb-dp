@@ -919,37 +919,32 @@ get_env_data() {
 
 display_links() {
     local LINK_V4="" LINK_V6="" LINK_ARGO="" FULL_CLIP="" hostname_tag="$(hostname)"
+    # 精准提取：解决多 inbound 下端口拼接导致的卡死问题
+    local RAW_PORT=$(grep -oE '"listen_port":[[:space:]]*[0-9]+' /etc/sing-box/config.json | head -n 1 | grep -oE '[0-9]+')
+    local RAW_PSK=$(grep -oE '"password":[[:space:]]*"[^"]+"' /etc/sing-box/config.json | head -n 1 | cut -d'"' -f4)
+    local RAW_SNI=$(grep -oE '"server_name":[[:space:]]*"[^"]+"' /etc/sing-box/config.json | head -n 1 | cut -d'"' -f4)
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
     local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" s_text="\033[1;33moffline\033[0m" p_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
-    
-    if pgrep sing-box >/dev/null 2>&1; then
-        if [ "${USE_EXTERNAL_ARGO:-false}" != "true" ] || pgrep cloudflared >/dev/null 2>&1; then
-            s_text="\033[1;33monline\033[0m"; s_icon="\033[1;32m[✔]\033[0m"
-        fi
-    fi
+
+    # 状态检测：单行流式判断，兼容双进程模式
+    pgrep sing-box >/dev/null 2>&1 && { [ "${USE_EXTERNAL_ARGO:-false}" != "true" ] || pgrep cloudflared >/dev/null 2>&1; } && s_text="\033[1;33monline\033[0m" && s_icon="\033[1;32m[✔]\033[0m"
+
+    # 保留你的双重 nc 探测逻辑
     _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
+    
     if command -v nc >/dev/null 2>&1; then
-        _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 & wait
+        _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 &
+        # 替代 wait：硬超时保险，防止 nc 进程在某些路由下挂起导致脚本不往走
+        local t=0; while [ $t -lt 10 ] && pgrep -f "nc -z -u" >/dev/null 2>&1; do sleep 0.3; t=$((t+1)); done
         [[ "$(cat /tmp/sb_v4_res 2>/dev/null)" == "OK" || "$(cat /tmp/sb_v6_res 2>/dev/null)" == "OK" ]] && p_icon="\033[1;32m[✔]\033[0m"
     fi
-    
+
     echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon | 服务: $s_text $s_icon"
-    # 1. Hy2 IPv4
-    if [ -n "${RAW_IP4:-}" ]; then
-        LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v4"
-        echo -e "\n\033[1;35m[IPv4 节点]\033[0m\n$LINK_V4"; FULL_CLIP="$LINK_V4"
-    fi
-    # 2. Hy2 IPv6
-    if [[ "${RAW_IP6:-}" == *:* ]]; then
-        LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v6"
-        echo -e "\n\033[1;36m[IPv6 节点]\033[0m\n$LINK_V6"; FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
-    fi
-    # 3. VLESS Argo
-    if [ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ]; then
-        LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo"
-        echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO"; FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
-    fi
-    
+    # 链接生成：紧凑排列
+    [ -n "${RAW_IP4:-}" ] && LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v4" && echo -e "\n\033[1;35m[IPv4 节点]\033[0m\n$LINK_V4" && FULL_CLIP="$LINK_V4"
+    [[ "${RAW_IP6:-}" == *:* ]] && LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v6" && echo -e "\n\033[1;36m[IPv6 节点]\033[0m\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
+    [ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ] && LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo" && echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
+
     echo -e "\n\033[1;34m==========================================\033[0m"
     echo -e "\033[1;32m[安全增强]\033[0m 流量已混入 $RAW_SNI 的 TLS 1.3 握手池"
     [ -n "$RAW_ARGO_DOMAIN" ] && echo -e "\033[1;32m[隧道增强]\033[0m 已启用 Cloudflare Argo 反向转发"
