@@ -1069,8 +1069,8 @@ CPU_CORE=$(get_cpu_core)
 export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
-TMP_RES=$(prompt_for_port)
-read -r USER_PORT ARGO_DOMAIN ARGO_TOKEN <<< "$TMP_RES"
+prompt_for_port > /tmp/sb_input_res
+read -r USER_PORT ARGO_DOMAIN ARGO_TOKEN < /tmp/sb_input_res && rm -f /tmp/sb_input_res
 optimize_system
 install_singbox "install"
 generate_cert
