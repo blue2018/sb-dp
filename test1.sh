@@ -738,9 +738,11 @@ create_config() {
     }'
 
     # 构造 Argo Inbound (修正 TLS 和隧道逻辑)
+    # 构造 Argo Inbound
     local ARGO_IN=""; [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && ARGO_IN=',{
       "type": "vless", "tag": "vless-argo-in",
-      "cloudflare_tunnel": { "token": "'$A_TOKEN'", "domain": "'$A_DOMAIN'" },
+      "server_name": "'$A_DOMAIN'",
+      "cloudflare": { "enabled": true, "tunnel": { "token": "'$A_TOKEN'" } },
       "users": [ { "uuid": "'$PSK'", "flow": "" } ], "tls": { "enabled": false },
       "transport": { "type": "httpupgrade", "host": "'$A_DOMAIN'" }
     }'
@@ -1078,9 +1080,7 @@ create_config "$USER_PORT"
 verify_config || exit 1
 get_env_data
 create_sb_tool
-setup_service
-echo -e "\n\033[1;34m==========================================\033[0m"
-display_system_status
-echo -e "\033[1;34m------------------------------------------\033[0m"
+setup_service; echo -e "\n\033[1;34m==========================================\033[0m"
+display_system_status; echo -e "\033[1;34m------------------------------------------\033[0m"
 display_links
 info "脚本部署完毕，输入 'sb' 管理"
