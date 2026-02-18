@@ -87,38 +87,30 @@ get_cpu_core() {
     else echo "$n"; fi
 }
 
-# 获取端口和argo信息并校验 (范围：1025-65535)
+# 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p rand argo_t argo_d
-    echo -e "\n\033[1;32m[配置引导]\033[0m\n1. Hysteria2 + TLS + ECH: UDP端口直连(默认)\n2. VLESS + HttpUpgrade + TLS + Argo: CF隧道转发(可选)\n-------------------------------------------------" >&2
+    local p rand
     while :; do
-        echo -ne "请输入端口 [1025-65535] (回车随机生成): " >&2; read -r p
+        read -r -p "请输入端口 [1025-65535] (回车随机生成): " p
         if [ -z "$p" ]; then
             if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
             elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' '); p=$((1025 + rand % 64511))
             else p=$((1025 + RANDOM % 64511)); fi
         fi
-        if [[ ! "$p" =~ ^[0-9]+$ ]] || [ "$p" -lt 1025 ] || [ "$p" -gt 65535 ]; then
-            echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字" >&2
-        else
+        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
             local occupied=""
             if command -v ss >/dev/null 2>&1; then occupied=$(ss -tunlp | grep -w ":$p")
             elif command -v netstat >/dev/null 2>&1; then occupied=$(netstat -tunlp | grep -w ":$p")
-            elif command -v lsof >/dev/null 2>&1; then occupied=$(lsof -i :"$p"); fi
-            if [ -n "$occupied" ]; then echo -e "\033[1;33m[WARN]\033[0m 端口 $p 已被占用，请更换端口或直接回车随机生成" >&2; p=""
-            else echo -e "\033[1;32m[INFO]\033[0m 使用端口: $p" >&2; break; fi
-        fi
+            elif command -v lsof >/dev/null 2>&1; then occupied=$(lsof -i :"$p")
+            fi
+            if [ -n "$occupied" ]; then
+                echo -e "\033[1;33m[WARN]\033[0m 端口 $p 已被占用，请更换端口或直接回车重新生成" >&2
+                p=""; continue
+            fi
+            echo -e "\033[1;32m[INFO]\033[0m 使用端口: $p" >&2
+            echo "$p"; return 0
+        else echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字" >&2; fi
     done
-	
-    echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车，则跳过可选协议): " >&2; read -r argo_d
-    if [ -n "$argo_d" ]; then
-        while :; do
-            echo -ne "请输入 Argo 隧道的 Token: " >&2; read -r argo_t
-            [ -n "$argo_t" ] && { echo "ARGO_DOMAIN='$argo_d'" >/tmp/sb_argo_vars; echo "ARGO_TOKEN='$argo_t'" >>/tmp/sb_argo_vars; break; }
-            echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2
-        done
-    else ARGO_DOMAIN=""; ARGO_TOKEN=""; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2; fi
-    echo "$p"; return 0
 }
 
 # 生成 ECC P-256 高性能证书 + ECH 密钥对
@@ -220,6 +212,7 @@ probe_network_rtt() {
         rtt_val="150"; echo -e "\033[1;33m[WARN]\033[0m 探测受阻，应用全球预估值: 150ms" >&2
     fi
     set -e
+    # 画像联动赋值
     real_rtt_factors=$(( rtt_val + 100 ))   # 延迟补偿：实测值 + 100ms (平衡握手开销)
 	# 丢包补偿：每 1% 丢包增加 5% 缓冲区冗余，最高 200%
     loss_compensation=$(( 100 + loss_val * 5 )); [ "$loss_compensation" -gt 200 ] && loss_compensation=200
@@ -1070,7 +1063,6 @@ export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
 USER_PORT=$(prompt_for_port)
-[ -f /tmp/sb_argo_vars ] && { . /tmp/sb_argo_vars; export ARGO_DOMAIN ARGO_TOKEN; rm -f /tmp/sb_argo_vars; } || export ARGO_DOMAIN="" ARGO_TOKEN=""
 optimize_system
 install_singbox "install"
 generate_cert
