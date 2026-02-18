@@ -113,18 +113,29 @@ prompt_for_port() {
     done
 }
 
-# 获取 Argo 隧道配置
-prompt_for_argo() {
-    local argo_d argo_t
-    echo -e "\033[1;32m[可选配置]\033[0m\nVLESS + HttpUpgrade + TLS + Argo: CF隧道转发\n-----------------------------------------------" >&2
+# 创建 Argo 隧道
+setup_argo_logic() {
+    local argo_d argo_t mem_total=$(probe_memory_total); : ${mem_total:=64}
+    echo -e "\033[1;32m[可选配置]\033[0m\nVLESS + HttpUpgrade + Argo: CF隧道转发\n-----------------------------------------------" >&2
     echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车跳过可选配置): " >&2; read -r argo_d
-    if [ -n "$argo_d" ]; then
+    if [ -z "$argo_d" ]; then ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2
+    elif [ "$mem_total" -lt 200 ] && ! /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
+        ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"
+        echo -e "\033[1;33m[跳过]\033[0m 内存不足 200M 且内核不支持内建 Argo，为保系统稳定已自动跳过" >&2
+    else
         while :; do
             echo -ne "请输入 Argo 隧道的 Token: " >&2; read -r argo_t
-            [ -n "$argo_t" ] && { ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"; break; }
-            echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2
+            if [ -n "$argo_t" ]; then
+                ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"
+                if /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
+                    USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 检测到内核支持内建 Argo，开启单进程模式" >&2
+                else
+                    USE_EXTERNAL_ARGO="true"; echo -e "\033[1;33m[INFO]\033[0m 内核不支持 Argo，将调用外部 cloudflared 客户端" >&2
+                    [ ! -f "/usr/local/bin/cloudflared" ] && { echo -e "\033[1;32m[下载]\033[0m 正在下载官方 cloudflared..." >&2; wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x /usr/local/bin/cloudflared; }
+                fi; break
+            fi; echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2
         done
-    else ARGO_DOMAIN=""; ARGO_TOKEN=""; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2; fi
+    fi
 }
 
 # 生成 ECC P-256 高性能证书 + ECH 密钥对
@@ -737,14 +748,26 @@ create_config() {
       "masquerade": "https://'$TLS_DOMAIN'"
     }'
 
-    # 构造 Argo Inbound
-    local ARGO_IN=""; [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && ARGO_IN=',{
-      "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
-      "users": [ { "uuid": "'$PSK'", "flow": "" } ],
-      "tls": { "enabled": false },
-      "transport": { "type": "httpupgrade", "host": "'$A_DOMAIN'" },
-      "cloudflare": { "enabled": true, "tunnel": { "token": "'$A_TOKEN'" } }
-    }'
+    # 构造 Argo Inbound (动态适配内核能力)
+    local ARGO_IN=""
+    if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
+        if [ "$USE_EXTERNAL_ARGO" = "true" ]; then
+            # 外部模式：Sing-box 仅监听本地端口，不包含 cloudflare 字段
+            ARGO_IN=',{
+              "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
+              "users": [ { "uuid": "'$PSK'", "flow": "" } ], "tls": { "enabled": false },
+              "transport": { "type": "httpupgrade", "host": "'$A_DOMAIN'" }
+            }'
+        else
+            # 内建模式：保持你原有的配置
+            ARGO_IN=',{
+              "type": "vless", "tag": "vless-argo-in", "server_name": "'$A_DOMAIN'",
+              "cloudflare": { "enabled": true, "tunnel": { "token": "'$A_TOKEN'" } },
+              "users": [ { "uuid": "'$PSK'", "flow": "" } ], "tls": { "enabled": false },
+              "transport": { "type": "httpupgrade", "host": "'$A_DOMAIN'" }
+            }'
+        fi
+    fi
     
     # 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
@@ -974,7 +997,7 @@ EOF
         get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard
         optimize_system install_singbox create_config setup_service apply_firewall service_ctrl info err warn succ
         apply_userspace_adaptive_profile apply_nic_core_boost verify_config
-        setup_zrm_swap safe_rtt generate_cert prompt_for_argo)
+        setup_zrm_swap safe_rtt generate_cert setup_argo_logic)
 
     for f in "${funcs[@]}"; do
         if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
