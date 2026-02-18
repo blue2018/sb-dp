@@ -125,15 +125,16 @@ setup_argo_logic() {
     else
         while :; do
             echo -ne "请输入 Argo 隧道的 Token: " >&2; read -r argo_t
-            if [ -n "$argo_t" ]; then
-                ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"
-                if /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
-                    USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 检测到内核支持内建 Argo，开启单进程模式" >&2
-                else
-                    USE_EXTERNAL_ARGO="true"; echo -e "\033[1;33m[INFO]\033[0m 内核不支持 Argo，将调用外部 cloudflared 客户端" >&2
-                    [ ! -f "/usr/local/bin/cloudflared" ] && { echo -e "\033[1;32m[下载]\033[0m 正在下载官方 cloudflared..." >&2; wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x /usr/local/bin/cloudflared; }
-                fi; break
-            fi; echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2
+            if [ -z "$argo_t" ]; then echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2; continue; fi
+            ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"
+            if /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
+                USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 检测到内核支持内建 Argo，开启单进程模式" >&2
+            elif [ -f "/usr/local/bin/cloudflared" ]; then
+                USE_EXTERNAL_ARGO="true"; echo -e "\033[1;33m[INFO]\033[0m 已存在外部客户端，跳过下载" >&2
+            else
+                USE_EXTERNAL_ARGO="true"; echo -ne "\033[1;32m[下载]\033[0m 正在下载官方 cloudflared... " >&2
+                wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x /usr/local/bin/cloudflared && echo -e "\033[1;32m[完成]\033[0m" >&2 || { echo -e "\033[1;31m[失败]\033[0m" >&2; exit 1; }
+            fi; break
         done
     fi
 }
