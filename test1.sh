@@ -114,7 +114,7 @@ prompt_for_port() {
     if [ -n "$argo_d" ]; then
         while :; do
             echo -ne "请输入 Argo 隧道的 Token: " >&2; read -r argo_t
-            [ -n "$argo_t" ] && { ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"; break; }
+            [ -n "$argo_t" ] && { echo "ARGO_DOMAIN='$argo_d'" >/tmp/sb_argo_vars; echo "ARGO_TOKEN='$argo_t'" >>/tmp/sb_argo_vars; break; }
             echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2
         done
     else ARGO_DOMAIN=""; ARGO_TOKEN=""; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2; fi
@@ -220,7 +220,6 @@ probe_network_rtt() {
         rtt_val="150"; echo -e "\033[1;33m[WARN]\033[0m 探测受阻，应用全球预估值: 150ms" >&2
     fi
     set -e
-    # 画像联动赋值
     real_rtt_factors=$(( rtt_val + 100 ))   # 延迟补偿：实测值 + 100ms (平衡握手开销)
 	# 丢包补偿：每 1% 丢包增加 5% 缓冲区冗余，最高 200%
     loss_compensation=$(( 100 + loss_val * 5 )); [ "$loss_compensation" -gt 200 ] && loss_compensation=200
@@ -1071,6 +1070,7 @@ export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
 USER_PORT=$(prompt_for_port)
+[ -f /tmp/sb_argo_vars ] && { . /tmp/sb_argo_vars; export ARGO_DOMAIN ARGO_TOKEN; rm -f /tmp/sb_argo_vars; } || export ARGO_DOMAIN="" ARGO_TOKEN=""
 optimize_system
 install_singbox "install"
 generate_cert
