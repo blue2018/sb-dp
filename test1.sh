@@ -752,14 +752,14 @@ create_config() {
     local ARGO_IN=""
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
         if [ "$USE_EXTERNAL_ARGO" = "true" ]; then
-            # 外部模式：Sing-box 仅监听本地端口，不包含 cloudflare 字段
+            # 外部模式：必须指定 listen 为 127.0.0.1，防止外部扫描到该端口
             ARGO_IN=',{
               "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
               "users": [ { "uuid": "'$PSK'", "flow": "" } ], "tls": { "enabled": false },
               "transport": { "type": "httpupgrade", "host": "'$A_DOMAIN'" }
             }'
         else
-            # 内建模式：保持你原有的配置
+            # 内建模式：内核自带 argo 驱动，不需要 listen 端口，它是主动连接 CF 的
             ARGO_IN=',{
               "type": "vless", "tag": "vless-argo-in", "server_name": "'$A_DOMAIN'",
               "cloudflare": { "enabled": true, "tunnel": { "token": "'$A_TOKEN'" } },
