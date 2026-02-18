@@ -741,13 +741,13 @@ create_config() {
       "users": [ { "password": "%s" } ],
       "ignore_client_bandwidth": false, "up_mbps": %s, "down_mbps": %s, "udp_timeout": "%s", "udp_fragment": true,
       "tls": {
-        "enabled": true, "alpn": ["h3"], "min_version": "1.3", 
+        "enabled": true, "server_name": "%s", "alpn": ["h3"], "min_version": "1.3", 
         "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
         "key_path": "/etc/sing-box/certs/privkey.pem",
         "ech": { "enabled": true, "key_path": "/etc/sing-box/certs/ech.key" }
       },
       "masquerade": "https://%s"
-    }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN")
+    }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN" "$TLS_DOMAIN")
 
     # 构造 Argo Inbound (动态适配内核能力)
 	local ARGO_IN=""
