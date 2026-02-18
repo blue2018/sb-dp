@@ -868,20 +868,23 @@ EOF
 # 信息展示模块
 # ==========================================
 get_env_data() {
-    local CONFIG_FILE="/etc/sing-box/config.json"; RAW_ECH=""
-    [ ! -f "$CONFIG_FILE" ] && return 1
-    local data=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CONFIG_FILE" 2>/dev/null | head -n 1)
-    [ -z "$data" ] && return 1
-    read -r RAW_PSK RAW_PORT CERT_PATH <<< "$data"
+    local CFG="/etc/sing-box/config.json"; RAW_ECH=""
+    [ ! -f "$CFG" ] && return 1
+    # 提取 Hy2 核心数据
+    local d=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CFG" 2>/dev/null | head -n 1)
+    [ -z "$d" ] && return 1
+    read -r RAW_PSK RAW_PORT CERT_PATH <<< "$d"
+    # 提取 Argo 域名 (通过 tag 准确定位)
+    RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .tls.server_name // empty' "$CFG" 2>/dev/null)
     # 提取 SNI 与 指纹
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
     [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
-    local FP_FILE="/etc/sing-box/certs/cert_fingerprint.txt"
-    RAW_FP=$([ -f "$FP_FILE" ] && cat "$FP_FILE" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
-	# 读取 ECH 并进行 URL 编码
+    local F_P="/etc/sing-box/certs/cert_fingerprint.txt"
+    RAW_FP=$([ -f "$F_P" ] && cat "$F_P" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
+    # 读取 ECH 并进行 URL 编码
     if [ -f "/etc/sing-box/certs/ech.pub" ]; then
-        local raw=$(grep -v "ECH" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
-        RAW_ECH=$(echo "$raw" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g' | sed 's/%%/%/g')
+        local r=$(grep -v "ECH" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
+        RAW_ECH=$(echo "$r" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g' | sed 's/%%/%/g')
     fi
 }
 
