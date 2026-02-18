@@ -4,8 +4,8 @@ set -euo pipefail
 # ==========================================
 # 基础变量声明与环境准备
 # ==========================================
-SBOX_ARCH="";            OS_DISPLAY="";          SBOX_CORE="/etc/sing-box/core_script.sh"
-SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测"
+SBOX_ARCH="";            OS_DISPLAY="";          SBOX_CORE="/etc/sing-box/core_script.sh";    ARGO_DOMAIN=""
+SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测"; ARGO_TOKEN=""
 SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM="";      USER_PORT=""
 VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_ECH=""
 VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
@@ -700,54 +700,66 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local PORT_HY2="${1:-}"
-    local cur_bw="${VAR_HY2_BW:-200}"
+    local PORT_HY2="${1:-}"; local A_DOMAIN="${2:-}"; local A_TOKEN="${3:-}"; local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-	local dns_srv='{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}'
+    local dns_srv='{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}'
     [ "$mem_total" -ge 100 ] && timeout="40s" && dns_srv='{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"tag":"google-doh","address":"https://8.8.8.8/dns-query","detour":"direct-out"}'
     [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
-    
     # 端口和 PSK (密码) 确定逻辑
     if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.inbounds[0].listen_port' /etc/sing-box/config.json)
-        else PORT_HY2=$(printf "\n" | prompt_for_port); fi
+        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.. | objects | select(.type == "hysteria2") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+        else PORT_HY2=$(printf "\n" | prompt_for_port | awk '{print $1}'); fi
     fi
     [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
-    
+    # 构造 Hysteria2 Inbound
+    local HY2_IN='{
+      "type": "hysteria2",
+      "tag": "hy2-in",
+      "listen": "::",
+      "listen_port": '$PORT_HY2',
+      "users": [ { "password": "'$PSK'" } ],
+      "ignore_client_bandwidth": false,
+      "up_mbps": '$cur_bw',
+      "down_mbps": '$cur_bw',
+      "udp_timeout": "'$timeout'",
+      "udp_fragment": true,
+      "tls": {
+        "enabled": true, "alpn": ["h3"], "min_version": "1.3", 
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
+        "key_path": "/etc/sing-box/certs/privkey.pem",
+        "ech": { "enabled": true, "key_path": "/etc/sing-box/certs/ech.key" }
+      },
+      "masquerade": "https://'$TLS_DOMAIN'"
+    }'
+    # 构造 Argo Inbound (逻辑紧凑判定)
+    local ARGO_IN=""; [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && ARGO_IN=',{
+      "type": "vless",
+      "tag": "vless-argo-in",
+      "listen": "127.0.0.1",
+      "cloudflare_tunnel": { "token": "'$A_TOKEN'" },
+      "users": [ { "uuid": "'$PSK'", "flow": "" } ],
+      "tls": {
+        "enabled": true,
+        "server_name": "'$A_DOMAIN'",
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+        "key_path": "/etc/sing-box/certs/privkey.pem"
+      },
+      "transport": { "type": "httpupgrade" }
+    }'
     # 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
   "dns": {"servers":[$dns_srv],"strategy":"$ds","independent_cache":true,"disable_cache":false,"disable_expire":false},
-  "inbounds": [{
-    "type": "hysteria2",
-    "tag": "hy2-in",
-    "listen": "::",
-    "listen_port": $PORT_HY2,
-    "users": [ { "password": "$PSK" } ],
-    "ignore_client_bandwidth": false,
-    "up_mbps": $cur_bw,
-    "down_mbps": $cur_bw,
-    "udp_timeout": "$timeout",
-    "udp_fragment": true,
-    "tls": {
-      "enabled": true, 
-      "alpn": ["h3"], 
-      "min_version": "1.3", 
-      "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
-      "key_path": "/etc/sing-box/certs/privkey.pem",
-      "ech": {
-        "enabled": true,
-        "key_path": "/etc/sing-box/certs/ech.key"
-      }
-    },
-    "masquerade": "https://$TLS_DOMAIN"
-  }],
+  "inbounds": [
+    $HY2_IN
+    $ARGO_IN
+  ],
   "outbounds": [{"type": "direct", "tag": "direct-out", "domain_strategy": "$ds"}]
 }
 EOF
