@@ -1074,7 +1074,7 @@ USER_PORT=$(prompt_for_port)
 optimize_system
 install_singbox "install"
 generate_cert
-create_config "$USER_PORT"
+create_config "$USER_PORT" "$ARGO_DOMAIN" "$ARGO_TOKEN"
 verify_config || exit 1
 get_env_data
 create_sb_tool
