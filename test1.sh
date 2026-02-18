@@ -132,7 +132,7 @@ setup_argo_logic() {
             elif [ -f "/usr/local/bin/cloudflared" ]; then
                 USE_EXTERNAL_ARGO="true"; echo -e "\033[1;33m[INFO]\033[0m 已存在外部客户端，跳过下载" >&2
             else
-                USE_EXTERNAL_ARGO="true"; echo -ne "\033[1;32m[下载]\033[0m 正在下载官方 cloudflared... " >&2
+                USE_EXTERNAL_ARGO="true"; echo -ne "\033[1;32m[下载]\033[0m 下载官方 cloudflared... " >&2
                 wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x /usr/local/bin/cloudflared && echo -e "\033[1;32m[完成]\033[0m" >&2 || { echo -e "\033[1;31m[失败]\033[0m" >&2; exit 1; }
             fi; break
         done
@@ -929,8 +929,7 @@ display_links() {
 
     # 状态检测：单行流式判断，兼容双进程模式
     pgrep sing-box >/dev/null 2>&1 && { [ "${USE_EXTERNAL_ARGO:-false}" != "true" ] || pgrep cloudflared >/dev/null 2>&1; } && s_text="\033[1;33monline\033[0m" && s_icon="\033[1;32m[✔]\033[0m"
-
-    # 保留你的双重 nc 探测逻辑
+    # 双重 nc 探测逻辑
     _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 2 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
     
     if command -v nc >/dev/null 2>&1; then
