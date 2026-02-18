@@ -1068,9 +1068,8 @@ detect_os
 [ "$(id -u)" != "0" ] && err "请使用 root 运行" && exit 1
 install_dependencies
 CPU_CORE=$(get_cpu_core); export CPU_CORE
-get_network_info
-echo -e "-----------------------------------------------"
-USER_PORT=$(prompt_for_port)
+get_network_info; echo -e "-----------------------------------------------"
+USER_PORT=$(prompt_for_port); echo -e "-----------------------------------------------"
 prompt_for_argo; export ARGO_DOMAIN ARGO_TOKEN
 optimize_system
 install_singbox "install"
