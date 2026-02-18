@@ -964,8 +964,8 @@ SBOX_MEM_HIGH='${SBOX_MEM_HIGH:-}'; SBOX_OPTIMIZE_LEVEL='$SBOX_OPTIMIZE_LEVEL'
 INITCWND_DONE='${INITCWND_DONE:-false}'; VAR_SYSTEMD_NICE='${VAR_SYSTEMD_NICE:--5}'
 VAR_SYSTEMD_IOSCHED='$VAR_SYSTEMD_IOSCHED'; OS_DISPLAY='$OS_DISPLAY'; TLS_DOMAIN='$TLS_DOMAIN'
 RAW_SNI='${RAW_SNI:-$TLS_DOMAIN}'; RAW_ECH='${RAW_ECH:-}'
-RAW_IP4='${RAW_IP4:-}'; RAW_IP6='${RAW_IP6:-}'
-IS_V6_OK='${IS_V6_OK:-false}'
+RAW_IP4='${RAW_IP4:-}'; RAW_IP6='${RAW_IP6:-}'; IS_V6_OK='${IS_V6_OK:-false}'
+ARGO_DOMAIN='${ARGO_DOMAIN:-}'; ARGO_TOKEN='${ARGO_TOKEN:-}'
 EOF
     # 导出函数
     local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port
