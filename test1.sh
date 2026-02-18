@@ -733,11 +733,14 @@ create_config() {
 
 	# 构造 Argo Inbound
     local ARGO_IN=""; [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && ARGO_IN=',{
-      "type": "vless", "tag": "vless-argo-in",
-	  "listen": "127.0.0.1", "listen_port": 8001,
+      "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
       "cloudflare_tunnel": { "token": "'$A_TOKEN'" },
       "users": [ { "uuid": "'$PSK'", "flow": "" } ],
-      "tls": { "enabled": false },
+      "tls": { 
+        "enabled": true, "server_name": "'$A_DOMAIN'",
+        "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+        "key_path": "/etc/sing-box/certs/privkey.pem"
+      },
       "transport": { "type": "httpupgrade" }
     }'
 	
@@ -870,8 +873,8 @@ get_env_data() {
     local d=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CFG" 2>/dev/null | head -n 1)
     [ -z "$d" ] && return 1
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$d"
-	# 提取 Argo 域名 (通过环境变量文件获取最稳妥)
-    [ -f /etc/sing-box/env ] && RAW_ARGO_DOMAIN=$(grep 'ARGO_DOMAIN' /etc/sing-box/env | cut -d"'" -f2)
+    # 提取 Argo 域名 (通过 tag 准确定位)
+    RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .tls.server_name // empty' "$CFG" 2>/dev/null)
     # 提取 SNI 与 指纹
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
     [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
