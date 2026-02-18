@@ -935,7 +935,6 @@ display_system_status() {
     fi
     local current_cca=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
     case "$current_cca" in bbr3) bbr_display="BBRv3 (极致响应)" ;; bbr2) bbr_display="BBRv2 (平衡加速)" ;; bbr) bbr_display="BBRv1 (标准加速)" ;; *) bbr_display="$current_cca (非标准)" ;; esac
-
     echo -e "系统版本: \033[1;33m$OS_DISPLAY\033[0m"
     echo -e "内核信息: \033[1;33m$VER_INFO\033[0m"
     echo -e "进程权重: \033[1;33mNice $NI_VAL $NI_LBL\033[0m"
@@ -1070,7 +1069,8 @@ CPU_CORE=$(get_cpu_core)
 export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
-read -r USER_PORT ARGO_DOMAIN ARGO_TOKEN <<< "$(prompt_for_port)"
+TMP_RES=$(prompt_for_port)
+read -r USER_PORT ARGO_DOMAIN ARGO_TOKEN <<< "$TMP_RES"
 optimize_system
 install_singbox "install"
 generate_cert
