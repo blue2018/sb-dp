@@ -87,10 +87,29 @@ get_cpu_core() {
     else echo "$n"; fi
 }
 
-# 获取并校验端口 (范围：1025-65535)
+# 获取端口和argo信息并校验 (范围：1025-65535)
 prompt_for_port() {
     local p rand argo_t argo_d
     echo -e "\n\033[1;32m[配置引导]\033[0m\n1. Hysteria2 + TLS + ECH: UDP 端口直连(默认)\n2. VLESS + HttpUpgrade + TLS + Argo: CF 隧道转发(可选)\n-------------------------------------------------" >&2
+    while :; do
+        echo -ne "请输入端口 [1025-65535] (回车随机生成): " >&2; read -r p
+        if [ -z "$p" ]; then
+            if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
+            elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' '); p=$((1025 + rand % 64511))
+            else p=$((1025 + RANDOM % 64511)); fi
+        fi
+        if [[ ! "$p" =~ ^[0-9]+$ ]] || [ "$p" -lt 1025 ] || [ "$p" -gt 65535 ]; then
+            echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字" >&2
+        else
+            local occupied=""
+            if command -v ss >/dev/null 2>&1; then occupied=$(ss -tunlp | grep -w ":$p")
+            elif command -v netstat >/dev/null 2>&1; then occupied=$(netstat -tunlp | grep -w ":$p")
+            elif command -v lsof >/dev/null 2>&1; then occupied=$(lsof -i :"$p"); fi
+            if [ -n "$occupied" ]; then echo -e "\033[1;33m[WARN]\033[0m 端口 $p 已被占用，请更换端口或直接回车随机生成" >&2; p=""
+            else echo -e "\033[1;32m[INFO]\033[0m 使用端口: $p" >&2; break; fi
+        fi
+    done
+	
     echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车，则跳过可选协议): " >&2; read -r argo_d
     if [ -n "$argo_d" ]; then
         while :; do
@@ -99,23 +118,7 @@ prompt_for_port() {
             echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2
         done
     else ARGO_DOMAIN=""; ARGO_TOKEN=""; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2; fi
-    while :; do
-        echo -ne "请输入端口 [1025-65535] (回车随机生成): " >&2; read -r p
-        if [ -z "$p" ]; then
-            if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
-            elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' '); p=$((1025 + rand % 64511))
-            else p=$((1025 + RANDOM % 64511)); fi
-        fi
-        if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
-            local occupied=""
-            if command -v ss >/dev/null 2>&1; then occupied=$(ss -tunlp | grep -w ":$p")
-            elif command -v netstat >/dev/null 2>&1; then occupied=$(netstat -tunlp | grep -w ":$p")
-            elif command -v lsof >/dev/null 2>&1; then occupied=$(lsof -i :"$p")
-            fi
-            if [ -n "$occupied" ]; then echo -e "\033[1;33m[WARN]\033[0m 端口 $p 已被占用，请更换端口或直接回车随机生成" >&2; p=""; continue; fi
-            echo -e "\033[1;32m[INFO]\033[0m 使用端口: $p" >&2; echo "$p"; return 0
-        else echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字" >&2; fi
-    done
+    echo "$p"; return 0
 }
 
 # 生成 ECC P-256 高性能证书 + ECH 密钥对
@@ -161,7 +164,6 @@ generate_cert() {
     sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
     sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
     rm -f "$TMP_ECH"
-	
     # 校验并提取指纹
     if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
@@ -184,14 +186,12 @@ get_network_info() {
 		  
     # 2. 异步执行：并行探测
     _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
-	
     # 3. 数据清洗 (融合版)：在主进程统一清洗数据
     [ -s "$t4" ] && read -r RAW_IP4 < "$t4" && RAW_IP4=${RAW_IP4//[[:space:]]/}
     [ -s "$t6" ] && read -r RAW_IP6 < "$t6" && RAW_IP6=${RAW_IP6//[[:space:]]/}
     [[ ! "$RAW_IP4" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && RAW_IP4=""
     [[ "$RAW_IP6" != *:* ]] && RAW_IP6=""
     rm -f "$t4" "$t6"
-	
     # 4. 判定与输出
     [[ "$RAW_IP6" == *:* ]] && IS_V6_OK="true"
     [ -n "$RAW_IP4" ] && echo -e "\033[1;32m[✔]\033[0m IPv4: \033[1;37m$RAW_IP4\033[0m" || echo -e "\033[1;31m[✖]\033[0m IPv4: \033[1;31m不可用\033[0m"
