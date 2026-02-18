@@ -1104,7 +1104,7 @@ install_dependencies
 CPU_CORE=$(get_cpu_core); export CPU_CORE
 get_network_info; echo -e "-----------------------------------------------"
 USER_PORT=$(prompt_for_port); echo -e "-----------------------------------------------"
-setup_argo_logic; export ARGO_DOMAIN ARGO_TOKEN; echo -e "-----------------------------------------------"
+setup_argo_logic; export ARGO_DOMAIN ARGO_TOKEN USE_EXTERNAL_ARGO; echo -e "-----------------------------------------------"
 optimize_system
 install_singbox "install"
 generate_cert
