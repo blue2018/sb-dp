@@ -877,6 +877,11 @@ EOF
     done
     # 异步补课逻辑。在进程确认拉起后，从脚本主体执行一次优化，这样既保证了优化生效，又不会因为优化脚本运行时间长而导致服务启动超时
     ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 &
+	# --- 双进程外部 Argo 拉起逻辑 ---
+    if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
+        pkill -9 cloudflared >/dev/null 2>&1
+        GOGC=20 nohup /usr/local/bin/cloudflared tunnel --no-autoupdate run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
+    fi
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
