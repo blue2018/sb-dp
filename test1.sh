@@ -699,7 +699,7 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local PORT_HY2="${1:-}"; local A_DOMAIN="${2:-}"; local A_TOKEN="${3:-}"; local cur_bw="${VAR_HY2_BW:-200}"
+    local PORT_HY2="${1:-}"; local A_DOMAIN="${ARGO_DOMAIN:-}"; local A_TOKEN="${ARGO_TOKEN:-}"; local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
@@ -1074,7 +1074,7 @@ USER_PORT=$(prompt_for_port)
 optimize_system
 install_singbox "install"
 generate_cert
-create_config "$USER_PORT" "$ARGO_DOMAIN" "$ARGO_TOKEN"
+create_config "$USER_PORT"
 verify_config || exit 1
 get_env_data
 create_sb_tool
