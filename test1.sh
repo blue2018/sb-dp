@@ -90,16 +90,17 @@ get_cpu_core() {
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
     local p rand argo_t argo_d
-    echo -e "\n\033[1;32m[配置引导]\033[0m\n1. Hysteria2+TLS+ECH: UDP 端口直连 (默认)\n2. VLESS+HTTPUpgrade+TLS+Argo: CF 隧道转发 (可选)\n-------------------------------------------------"
-    echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车则跳过可选协议): "; read -r argo_d
+    echo -e "\n\033[1;32m[配置引导]\033[0m\n1. Hysteria2+TLS+ECH: UDP 端口直连 (默认)\n2. VLESS+HTTPUpgrade+TLS+Argo: CF 隧道转发 (可选)\n-------------------------------------------------" >&2
+    echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车，则跳过可选协议): " >&2; read -r argo_d
     if [ -n "$argo_d" ]; then
         while :; do
-            read -r -p "请输入Argo隧道的 Token: " argo_t
-            [ -n "$argo_t" ] && break || echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2  
+            echo -ne "请输入Argo隧道的 Token: " >&2; read -r argo_t
+            [ -n "$argo_t" ] && { ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"; break; }
+            echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2
         done
-    else echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2; fi
+    else ARGO_DOMAIN=""; ARGO_TOKEN=""; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2; fi
     while :; do
-        read -r -p "请输入端口 [1025-65535] (回车随机生成): " p
+        echo -ne "请输入端口 [1025-65535] (回车随机生成): " >&2; read -r p
         if [ -z "$p" ]; then
             if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
             elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' '); p=$((1025 + rand % 64511))
@@ -112,9 +113,7 @@ prompt_for_port() {
             elif command -v lsof >/dev/null 2>&1; then occupied=$(lsof -i :"$p")
             fi
             if [ -n "$occupied" ]; then echo -e "\033[1;33m[WARN]\033[0m 端口 $p 已被占用，请更换端口或直接回车随机生成" >&2; p=""; continue; fi
-            echo -e "\033[1;32m[INFO]\033[0m 使用端口: $p" >&2
-            echo "$p" "$argo_d" "$argo_t"
-            return 0
+            echo -e "\033[1;32m[INFO]\033[0m 使用端口: $p" >&2; echo "$p"; return 0
         else echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字" >&2; fi
     done
 }
@@ -916,6 +915,7 @@ display_links() {
         LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo"
         echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO"; FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
     fi
+	
     echo -e "\n\033[1;34m==========================================\033[0m"
     echo -e "\033[1;32m[安全增强]\033[0m 流量已混入 $RAW_SNI 的 TLS 1.3 握手池"
     [ -n "$RAW_ARGO_DOMAIN" ] && echo -e "\033[1;32m[隧道增强]\033[0m 已启用 Cloudflare Argo 反向转发"
@@ -935,6 +935,7 @@ display_system_status() {
     fi
     local current_cca=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
     case "$current_cca" in bbr3) bbr_display="BBRv3 (极致响应)" ;; bbr2) bbr_display="BBRv2 (平衡加速)" ;; bbr) bbr_display="BBRv1 (标准加速)" ;; *) bbr_display="$current_cca (非标准)" ;; esac
+	
     echo -e "系统版本: \033[1;33m$OS_DISPLAY\033[0m"
     echo -e "内核信息: \033[1;33m$VER_INFO\033[0m"
     echo -e "进程权重: \033[1;33mNice $NI_VAL $NI_LBL\033[0m"
@@ -1069,12 +1070,11 @@ CPU_CORE=$(get_cpu_core)
 export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
-prompt_for_port > /tmp/sb_input_res
-read -r USER_PORT ARGO_DOMAIN ARGO_TOKEN < /tmp/sb_input_res && rm -f /tmp/sb_input_res
+USER_PORT=$(prompt_for_port)
 optimize_system
 install_singbox "install"
 generate_cert
-create_config "$USER_PORT" "$ARGO_DOMAIN" "$ARGO_TOKEN"
+create_config "$USER_PORT"
 verify_config || exit 1
 get_env_data
 create_sb_tool
