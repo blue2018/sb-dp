@@ -113,6 +113,20 @@ prompt_for_port() {
     done
 }
 
+# 获取 Argo 隧道配置
+prompt_for_argo() {
+    local argo_d argo_t
+    echo -e "\033[1;32m[可选配置]\033[0m\nVLESS + HttpUpgrade + TLS + Argo: CF隧道转发\n-------------------------------------------------" >&2
+    echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车跳过可选配置): " >&2; read -r argo_d
+    if [ -n "$argo_d" ]; then
+        while :; do
+            echo -ne "请输入 Argo 隧道的 Token: " >&2; read -r argo_t
+            [ -n "$argo_t" ] && { ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"; break; }
+            echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2
+        done
+    else ARGO_DOMAIN=""; ARGO_TOKEN=""; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2; fi
+}
+
 # 生成 ECC P-256 高性能证书 + ECH 密钥对
 generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"; local TMP_ECH="$CERT_DIR/ech_out.tmp"; local cert_mode=""
@@ -964,7 +978,7 @@ EOF
         get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard
         optimize_system install_singbox create_config setup_service apply_firewall service_ctrl info err warn succ
         apply_userspace_adaptive_profile apply_nic_core_boost verify_config
-        setup_zrm_swap safe_rtt generate_cert)
+        setup_zrm_swap safe_rtt generate_cert prompt_for_argo)
 
     for f in "${funcs[@]}"; do
         if declare -f "$f" >/dev/null 2>&1; then declare -f "$f" >> "$CORE_TMP"; echo "" >> "$CORE_TMP"; fi
@@ -1063,6 +1077,7 @@ export CPU_CORE
 get_network_info
 echo -e "-----------------------------------------------"
 USER_PORT=$(prompt_for_port)
+prompt_for_argo
 optimize_system
 install_singbox "install"
 generate_cert
