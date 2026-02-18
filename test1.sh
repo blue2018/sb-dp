@@ -739,9 +739,10 @@ create_config() {
 
     # 构造 Argo Inbound
     local ARGO_IN=""; [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && ARGO_IN=',{
-      "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
-      "users": [ { "uuid": "'$PSK'", "flow": "" } ],
-      "tls": { "enabled": false },
+      "type": "vless", "tag": "vless-argo-in",
+      "server_name": "'$A_DOMAIN'",
+      "cloudflare": { "enabled": true, "tunnel": { "token": "'$A_TOKEN'" } },
+      "users": [ { "uuid": "'$PSK'", "flow": "" } ], "tls": { "enabled": false },
       "transport": { "type": "httpupgrade", "host": "'$A_DOMAIN'" }
     }'
     
@@ -1076,31 +1077,6 @@ install_singbox "install"
 generate_cert
 create_config "$USER_PORT"
 verify_config || exit 1
-# --- Argo 隧道驱动逻辑 ---
-if [ -n "$ARGO_TOKEN" ]; then
-    if ! command -v cloudflared &> /dev/null; then
-        info "下载 Argo 驱动..."
-        curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
-    fi
-
-    info "正在启动 Argo 隧道..."
-    # 1. 彻底清理旧进程，防止端口或 Token 冲突
-    pkill -9 -f "cloudflared tunnel" >/dev/null 2>&1
-    
-    # 2. 使用更稳定的启动方式，重定向所有输出防止 Terminated
-    # 增加 sleep 1 确保进程有时间初始化
-    setsid /usr/local/bin/cloudflared tunnel --no-autoupdate run --token "$ARGO_TOKEN" >/dev/null 2>&1 &
-    sleep 1
-    
-    # 3. 检查进程是否真的跑起来了
-    if pgrep -f "cloudflared tunnel" >/dev/null; then
-        # 写入定时任务确保重启后自动运行
-        (crontab -l 2>/dev/null | grep -v "cloudflared"; echo "@reboot setsid /usr/local/bin/cloudflared tunnel --no-autoupdate run --token $ARGO_TOKEN >/dev/null 2>&1 &") | crontab -
-        succ "Argo 隧道驱动已启动"
-    else
-        err "Argo 启动失败，请检查 Token 是否有效"
-    fi
-fi
 get_env_data
 create_sb_tool
 setup_service; echo -e "\n\033[1;34m==========================================\033[0m"
