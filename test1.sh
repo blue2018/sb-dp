@@ -784,11 +784,9 @@ create_config() {
     # 构造 VLESS REALITY Inbound
 	local cc=$(curl -sL --max-time 3 "http://ip-api.com/line?fields=countryCode" | tr '[:upper:]' '[:lower:]')
     local REALITY_DEST="www.google.${cc:-com}"
-    [[ "$cc" =~ ^(hk|jp|gb|au)$ ]] && REALITY_DEST="www.google.co.$cc"
-    [[ "$cc" == "us" ]] && REALITY_DEST="www.google.com"
     local REALITY_IN=$(printf ',{
       "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
-      "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision-udp443" } ],
+      "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
       "tls": {
         "enabled": true, "server_name": "%s",
         "reality": {
