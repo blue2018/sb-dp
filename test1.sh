@@ -782,10 +782,13 @@ create_config() {
     }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN" "$TLS_DOMAIN")
 
     # 构造 VLESS REALITY Inbound
-	local REALITY_DEST=$(pick_tls_domain)
+    local cc=$(curl -sL --max-time 3 "http://ip-api.com/line?fields=countryCode" | tr '[:upper:]' '[:lower:]')
+    local REALITY_DEST="www.google.${cc:-com}"
+    [[ "$cc" =~ ^(hk|jp|gb|au)$ ]] && REALITY_DEST="www.google.co.$cc"
+    [[ "$cc" == "us" ]] && REALITY_DEST="www.google.com"
     local REALITY_IN=$(printf ',{
       "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
-      "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
+      "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision-udp443" } ],
       "tls": {
         "enabled": true, "server_name": "%s",
         "reality": {
