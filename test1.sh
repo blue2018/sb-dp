@@ -139,31 +139,6 @@ setup_argo_logic() {
     fi
 }
 
-# argo 优选ip
-select_argo_ip() {
-    [ -z "$ARGO_DOMAIN" ] && return
-    info "正在为 Argo 隧道优选最佳接入点 (CF IP Selection)..."
-    # 扩展节点池：针对不同线路的 CF Anycast IP
-    local nodes=("104.16.160.1" "172.67.13.1" "104.21.70.1" "162.159.192.1" "108.162.192.1")
-    local best_ip=""; local tmp_file="/tmp/cf_nodes"
-    rm -f "$tmp_file"
-    # 并发测速 (nc 检测 443 端口连通性)
-    for ip in "${nodes[@]}"; do
-        (nc -z -w 2 "$ip" 443 && echo "$ip" >> "$tmp_file") &
-    done
-    wait
-    best_ip=$(head -n 1 "$tmp_file" 2>/dev/null || echo "104.16.160.1")
-    # 核心改动：解决 Resource busy，使用临时文件 + cat 覆盖
-    if [ -f /etc/hosts ]; then
-        grep -v "argotunnel.com" /etc/hosts > /etc/hosts.tmp 2>/dev/null
-        echo "$best_ip region1.v2.argotunnel.com" >> /etc/hosts.tmp
-        echo "$best_ip region2.v2.argotunnel.com" >> /etc/hosts.tmp
-        if cat /etc/hosts.tmp > /etc/hosts 2>/dev/null; then succ "Argo 已锁定优选接入点: $best_ip"
-        else warn "hosts 文件锁定，优选接入点尝试失败"; fi
-        rm -f /etc/hosts.tmp
-    fi
-}
-
 # 生成 ECC P-256 高性能证书 + ECH 密钥对
 generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"; local TMP_ECH="$CERT_DIR/ech_out.tmp"; local cert_mode=""
@@ -795,8 +770,7 @@ create_config() {
 
     # 构造 Hysteria2 Inbound
     local HY2_IN=$(printf '{
-      "type": "hysteria2", "tag": "hy2-in", "listen": "::", "listen_port": %s,
-      "users": [ { "password": "%s" } ],
+      "type": "hysteria2", "tag": "hy2-in", "listen": "::", "listen_port": %s, "users": [ { "password": "%s" } ],
       "ignore_client_bandwidth": false, "up_mbps": %s, "down_mbps": %s, "udp_timeout": "%s", "udp_fragment": true,
       "tls": {
         "enabled": true, "server_name": "%s", "alpn": ["h3"], "min_version": "1.3", 
@@ -812,13 +786,13 @@ create_config() {
       "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
       "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
       "tls": {
-        "enabled": true, "server_name": "%s",
+        "enabled": true, "server_name": "www.google.com", "utls": { "enabled": true, "fingerprint": "chrome" },
         "reality": {
-          "enabled": true, "handshake": { "server": "%s", "server_port": 443 },
+          "enabled": true, "handshake": { "server": "www.google.com", "server_port": 443 },
           "private_key": "%s", "short_id": ["%s"]
         }
       }
-    }' "$PORT_REALITY" "$PSK" "$TLS_DOMAIN" "$TLS_DOMAIN" "$p_key" "$s_id")
+    }' "$PORT_REALITY" "$PSK" "$p_key" "$s_id")
 
     # 构造 Argo Inbound (动态适配内核能力)
 	local ARGO_IN=""
