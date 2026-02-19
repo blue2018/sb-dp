@@ -139,6 +139,31 @@ setup_argo_logic() {
     fi
 }
 
+# argo 优选ip
+select_argo_ip() {
+    [ -z "$ARGO_DOMAIN" ] && return
+    info "正在为 Argo 隧道优选最佳接入点 (CF IP Selection)..."
+    # 扩展节点池：针对不同线路的 CF Anycast IP
+    local nodes=("104.16.160.1" "172.67.13.1" "104.21.70.1" "162.159.192.1" "108.162.192.1")
+    local best_ip=""; local tmp_file="/tmp/cf_nodes"
+    rm -f "$tmp_file"
+    # 并发测速 (nc 检测 443 端口连通性)
+    for ip in "${nodes[@]}"; do
+        (nc -z -w 2 "$ip" 443 && echo "$ip" >> "$tmp_file") &
+    done
+    wait
+    best_ip=$(head -n 1 "$tmp_file" 2>/dev/null || echo "104.16.160.1")
+    # 核心改动：解决 Resource busy，使用临时文件 + cat 覆盖
+    if [ -f /etc/hosts ]; then
+        grep -v "argotunnel.com" /etc/hosts > /etc/hosts.tmp 2>/dev/null
+        echo "$best_ip region1.v2.argotunnel.com" >> /etc/hosts.tmp
+        echo "$best_ip region2.v2.argotunnel.com" >> /etc/hosts.tmp
+        if cat /etc/hosts.tmp > /etc/hosts 2>/dev/null; then succ "Argo 黑科技已锁定优选接入点: $best_ip"
+        else warn "hosts 文件锁定，优选接入点尝试失败"; fi
+        rm -f /etc/hosts.tmp
+    fi
+}
+
 # 生成 ECC P-256 高性能证书 + ECH 密钥对
 generate_cert() {
     local CERT_DIR="/etc/sing-box/certs"; local TMP_ECH="$CERT_DIR/ech_out.tmp"; local cert_mode=""
@@ -189,26 +214,6 @@ generate_cert() {
         succ "ECC 证书与 ECH 密钥对就绪"
     else err "证书或 ECH 密钥生成失败"; exit 1; fi
     unset USER_SNI
-}
-
-select_argo_ip() {
-    [ -z "$ARGO_DOMAIN" ] && return
-    info "正在为 Argo 隧道优选最佳接入点 (CF IP Selection)..."
-    # 扩展节点池：包含部分针对亚太优化的 Anycast IP
-    local nodes=("104.16.160.1" "172.67.13.1" "104.21.70.1" "162.159.192.1" "108.162.192.1")
-    local best_ip=""; local tmp_file="/tmp/cf_nodes"
-    rm -f "$tmp_file"
-    # 并发测速 (nc 检测 443 端口连通性)
-    for ip in "${nodes[@]}"; do
-        (nc -z -w 2 "$ip" 443 && echo "$ip" >> "$tmp_file") &
-    done
-    wait
-    best_ip=$(head -n 1 "$tmp_file" 2>/dev/null || echo "104.16.160.1")
-    # 修改 hosts 强制指向优选 IP，cloudflared 默认会连接 *.v2.argotunnel.com，这里锁定其接入点
-    sed -i '/argotunnel.com/d' /etc/hosts
-    echo "$best_ip region1.v2.argotunnel.com" >> /etc/hosts
-    echo "$best_ip region2.v2.argotunnel.com" >> /etc/hosts
-    succ "Argo 黑科技已锁定优选接入点: $best_ip"
 }
 
 # 获取公网IP(高效稳定探测)
