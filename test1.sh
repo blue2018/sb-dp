@@ -774,27 +774,24 @@ create_config() {
         [ -z "$PORT_REALITY" ] && PORT_REALITY=$((PORT_HY2 + 3))
     fi
 
-    # 2. PSK 与 REALITY 密钥处理 (深度持久化)
-    local p_key=""; local pub_key=""; local s_id=""
-    # 优先从现有 JSON 配置读取
-    if [ -f /etc/sing-box/config.json ]; then
-        [ -z "$PSK" ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-        p_key=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.private_key // empty' /etc/sing-box/config.json 2>/dev/null | head -n1)
-        s_id=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.short_id[0] // empty' /etc/sing-box/config.json 2>/dev/null | head -n1)
-    fi
-	[ -n "$p_key" ] && echo "$p_key" > /etc/sing-box/certs/reality_priv.txt && chmod 600 /etc/sing-box/certs/reality_priv.txt
-    # 兜底生成 PSK
-    [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
-    [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
-    # 兜底生成 Reality 密钥对
+	# 2. PSK 与密钥处理 (深度持久化)
+    local p_key="" s_id="" c_path="/etc/sing-box/certs"
+    [ -f /etc/sing-box/config.json ] && {
+        [ -z "$PSK" ] && PSK=$(jq -r '..|objects|select(.type=="hysteria2")|.users[0].password//empty' /etc/sing-box/config.json | head -1)
+        p_key=$(jq -r '..|objects|select(.tag=="vless-reality-in")|.tls.reality.private_key//empty' /etc/sing-box/config.json | head -1)
+        s_id=$(jq -r '..|objects|select(.tag=="vless-reality-in")|.tls.reality.short_id[0]//empty' /etc/sing-box/config.json | head -1)
+    }
+    # 救火读取备份
+    [ -z "$p_key" ] && [ -f "$c_path/reality_priv.txt" ] && p_key=$(cat "$c_path/reality_priv.txt")
+    # 兜底生成 PSK & 密钥对
+    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
+    # 密钥对生成与自我修复
     if [ -z "$p_key" ]; then
-        local keypair=$(/usr/bin/sing-box generate reality-keypair)
-        p_key=$(echo "$keypair" | awk '/Private key:/{print $3}')
-        pub_key=$(echo "$keypair" | awk '/Public key:/{print $3}')
-        [ -z "$s_id" ] && s_id=$(openssl rand -hex 8)
-        [ -n "$p_key" ] && echo "$p_key" > /etc/sing-box/certs/reality_priv.txt
-        [ -n "$pub_key" ] && echo "$pub_key" > /etc/sing-box/certs/reality_pub.txt
+        local kp=$(/usr/bin/sing-box generate reality-keypair)
+        p_key=$(echo "$kp" | awk '/Priv/{print $3}'); s_id=$(openssl rand -hex 8)
+        echo "$(echo "$kp" | awk '/Pub/{print $3}')" > "$c_path/reality_pub.txt"
     fi
+    [ -n "$p_key" ] && echo "$p_key" > "$c_path/reality_priv.txt" && chmod 600 "$c_path/reality_priv.txt"
 
     # 构造 Hysteria2 Inbound
     local HY2_IN=$(printf '{
