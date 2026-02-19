@@ -1046,7 +1046,7 @@ elif [[ "${1:-}" == "--show-only" ]]; then
     display_system_status; display_links
 elif [[ "${1:-}" == "--reset-port" ]]; then
     f="/etc/sing-box/config.json"; cp "$f" "$f.bak"
-    create_config "$2"
+    create_config "$2" "$3"
     if verify_config; then service_ctrl restart && succ "端口已重置并生效" && get_env_data && display_links && rm -f "$f.bak"
     else mv "$f.bak" "$f" && service_ctrl restart && err "已回滚至旧配置"; fi
 elif [[ "${1:-}" == "--update-kernel" ]]; then
@@ -1095,7 +1095,15 @@ while true; do
                else warn "检测到语法错误，正在尝试回滚..."; mv "$f.bak" "$f" && service_ctrl restart && info "配置已还原，请再次尝试修改"; fi
            else info "配置未作变更" && rm -f "$f.bak"; fi
            read -r -p $'\n按回车键返回菜单...' ;;
-        3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
+        3) 
+           echo -e "\n\033[1;34m端口重置管理\033[0m\n1. 重置 Hysteria2\n2. 重置 VLESS-Reality\n3. 取消"
+           read -r -p "请选择: " opt
+           case "$opt" in
+               1) source "$SBOX_CORE" --reset-port "$(prompt_for_port)" "current" ;;
+               2) source "$SBOX_CORE" --reset-port "current" "$(prompt_for_port)" ;;
+               *) continue ;;
+           esac
+           read -r -p $'\n操作完成，按回车键返回...' ;;
         4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
 		6) read -r -p "是否确定卸载？(默认N) [y/N]: " cf
