@@ -769,11 +769,11 @@ create_config() {
       "tls": {
         "enabled": true, "server_name": "%s",
         "reality": {
-          "enabled": true, "handshake": { "server": "www.microsoft.com", "server_port": 443 },
+          "enabled": true, "handshake": { "server": "%s", "server_port": 443 },
           "private_key": "%s", "short_id": ["%s"]
         }
       }
-    }' "$PORT_REALITY" "$PSK" "$A_DOMAIN" "$rand_sni" "$p_key" "$s_id")
+    }' "$PORT_REALITY" "$PSK" "$A_DOMAIN" "$A_DOMAIN" "$p_key" "$s_id")
 
     # 3. 构造 Argo Inbound (黑科技：加入 Mux 多路复用)
     local ARGO_IN=""
