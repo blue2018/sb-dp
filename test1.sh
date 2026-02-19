@@ -982,7 +982,9 @@ get_env_data() {
     local rd=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | "\(.listen_port) \(.tls.server_name) \(.tls.reality.short_id[0])"' "$CFG" 2>/dev/null | head -n 1)
     if [ -n "$rd" ]; then
         read -r RAW_REA_PORT RAW_REA_SNI RAW_REA_SID <<< "$rd"
-        RAW_REA_PBK=$([ -f "/etc/sing-box/certs/reality_pub.txt" ] && cat "/etc/sing-box/certs/reality_pub.txt" | tr -d '\n\r ')
+        RAW_REA_PBK=$([ -f "/etc/sing-box/certs/reality_pub.txt" ] && cat "/etc/sing-box/certs/reality_pub.txt" | tr -d '[:space:]')
+        [ -z "$RAW_REA_PBK" ] && [ -f "/etc/sing-box/certs/reality_priv.txt" ] && \
+        RAW_REA_PBK=$(/usr/bin/sing-box generate reality-keypair -private-key $(cat /etc/sing-box/certs/reality_priv.txt) 2>/dev/null | awk '/Public key:/{print $3}')
     fi
     # 3. 提取 Argo 域名
     RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // empty' "$CFG" 2>/dev/null)
@@ -993,7 +995,7 @@ get_env_data() {
     RAW_FP=$([ -f "$F_P" ] && cat "$F_P" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
     # 5. 读取 ECH 并进行 URL 编码
     if [ -f "/etc/sing-box/certs/ech.pub" ]; then
-        local r=$(grep -v "ECH" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
+        local r=$(grep -v "ECH" "/etc/sing-box/certs/ech.pub" | tr -d '[:space:]')
         RAW_ECH=$(echo "$r" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g' | sed 's/%%/%/g')
     fi
 }
