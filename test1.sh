@@ -786,13 +786,13 @@ create_config() {
       "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
       "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
       "tls": {
-        "enabled": true, "server_name": "www.google.com", "utls": { "enabled": true, "fingerprint": "chrome" },
+        "enabled": true, "server_name": "%s", "utls": { "enabled": true, "fingerprint": "chrome" },
         "reality": {
-          "enabled": true, "handshake": { "server": "www.google.com", "server_port": 443 },
+          "enabled": true, "handshake": { "server": "%s", "server_port": 443 },
           "private_key": "%s", "short_id": ["%s"]
         }
       }
-    }' "$PORT_REALITY" "$PSK" "$p_key" "$s_id")
+    }' "$PORT_REALITY" "$PSK" "$TLS_DOMAIN" "$TLS_DOMAIN" "$p_key" "$s_id")
 
     # 构造 Argo Inbound (动态适配内核能力)
 	local ARGO_IN=""
