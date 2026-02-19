@@ -980,12 +980,12 @@ get_env_data() {
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$d"
     # 2. 提取 Reality 核心数据
     local rd=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | "\(.listen_port) \(.tls.server_name) \(.tls.reality.short_id[0])"' "$CFG" 2>/dev/null | head -n 1)
-    if [ -n "$rd" ]; then
-        read -r RAW_REA_PORT RAW_REA_SNI RAW_REA_SID <<< "$rd"
-        RAW_REA_PBK=$([ -f "/etc/sing-box/certs/reality_pub.txt" ] && cat "/etc/sing-box/certs/reality_pub.txt" | tr -d '[:space:]')
-        [ -z "$RAW_REA_PBK" ] && [ -f "/etc/sing-box/certs/reality_priv.txt" ] && \
-        RAW_REA_PBK=$(/usr/bin/sing-box generate reality-keypair -private-key $(cat /etc/sing-box/certs/reality_priv.txt) 2>/dev/null | awk '/Public key:/{print $3}')
-    fi
+	if [ -n "$rd" ]; then
+	    read -r RAW_REA_PORT RAW_REA_SNI RAW_REA_SID <<< "$rd"
+	    RAW_REA_PBK=$([ -f "/etc/sing-box/certs/reality_pub.txt" ] && cat "/etc/sing-box/certs/reality_pub.txt" | tr -d '[:space:]')
+	    [ -z "$RAW_REA_PBK" ] && [ -f "/etc/sing-box/certs/reality_priv.txt" ] && \
+	    RAW_REA_PBK=$(/usr/bin/sing-box generate reality-keypair -private-key $(cat /etc/sing-box/certs/reality_priv.txt | tr -d '[:space:]') 2>/dev/null | awk '/Pub/{print $NF}')
+	fi
     # 3. 提取 Argo 域名
     RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // .server_name // empty' "$CFG" 2>/dev/null | head -n 1)
     # 4. 提取 Hy2 的 SNI 与指纹
