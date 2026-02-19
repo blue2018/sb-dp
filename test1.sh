@@ -782,7 +782,7 @@ create_config() {
     }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN" "$TLS_DOMAIN")
 
     # 构造 VLESS REALITY Inbound
-    local cc=$(curl -sL --max-time 3 "http://ip-api.com/line?fields=countryCode" | tr '[:upper:]' '[:lower:]')
+	local cc=$(curl -sL --max-time 3 "http://ip-api.com/line?fields=countryCode" | tr '[:upper:]' '[:lower:]')
     local REALITY_DEST="www.google.${cc:-com}"
     [[ "$cc" =~ ^(hk|jp|gb|au)$ ]] && REALITY_DEST="www.google.co.$cc"
     [[ "$cc" == "us" ]] && REALITY_DEST="www.google.com"
@@ -795,7 +795,7 @@ create_config() {
           "enabled": true, "handshake": { "server": "%s", "server_port": 443 }, "private_key": "%s", "short_id": ["%s"]
         }
       }
-    }' "443" "$PSK" "$REALITY_DEST" "$REALITY_DEST" "$p_key" "$s_id")
+    }' "$PORT_REALITY" "$PSK" "$REALITY_DEST" "$REALITY_DEST" "$p_key" "$s_id")
 
     # 构造 Argo Inbound (动态适配内核能力)
 	local ARGO_IN=""
@@ -953,14 +953,14 @@ get_env_data() {
     [ -z "$d" ] && return 1
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$d"
     # 2. Reality 数据
-	local rd=$(jq -r '..|objects|select(.tag=="vless-reality-in")|((.listen_port|tostring)+" "+.tls.server_name+" "+.tls.reality.short_id[0]+" "+.users[0].flow)//empty' "$CFG" 2>/dev/null | head -n 1)
-	if [ -n "$rd" ]; then
-	    read -r RAW_REA_PORT RAW_REA_SNI RAW_REA_SID RAW_REA_FLOW <<< "$rd"
-	    RAW_REA_PBK=$([ -f "/etc/sing-box/certs/reality_pub.txt" ] && cat /etc/sing-box/certs/reality_pub.txt | tr -d '[:space:]' || {
-	        local priv=$(cat /etc/sing-box/certs/reality_priv.txt 2>/dev/null | tr -d '[:space:]')
-	        [ -n "$priv" ] && /usr/bin/sing-box generate reality-keypair -private-key "$priv" 2>/dev/null | awk '/Pub/{print $NF}'
-	    })
-	fi
+    local rd=$(jq -r '..|objects|select(.tag=="vless-reality-in")|((.listen_port|tostring)+" "+.tls.server_name+" "+.tls.reality.short_id[0])//empty' "$CFG" 2>/dev/null | head -n 1)
+    if [ -n "$rd" ]; then
+        read -r RAW_REA_PORT RAW_REA_SNI RAW_REA_SID <<< "$rd"
+        RAW_REA_PBK=$([ -f "/etc/sing-box/certs/reality_pub.txt" ] && cat /etc/sing-box/certs/reality_pub.txt | tr -d '[:space:]' || {
+            local priv=$(cat /etc/sing-box/certs/reality_priv.txt 2>/dev/null | tr -d '[:space:]')
+            [ -n "$priv" ] && /usr/bin/sing-box generate reality-keypair -private-key "$priv" 2>/dev/null | awk '/Pub/{print $NF}'
+        })
+    fi
     # 3. Argo 数据
     RAW_ARGO_DOMAIN=$(jq -r '..|objects|select(.tag=="vless-argo-in")|(.transport.host//.server_name)//empty' "$CFG" 2>/dev/null | head -n 1)
     # 4. SNI & 指纹
@@ -1003,11 +1003,11 @@ display_links() {
     [ -n "${RAW_IP4:-}" ] && LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${HY2_PARAM}#${hostname_tag}_Hy2_v4" && echo -e "\n\033[1;35m[IPv4 Hy2]\033[0m\n$LINK_V4" && FULL_CLIP="$LINK_V4"
     [[ "${RAW_IP6:-}" == *:* ]] && LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${HY2_PARAM}#${hostname_tag}_Hy2_v6" && echo -e "\n\033[1;36m[IPv6 Hy2]\033[0m\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
     # 2. VLESS Reality 节点
-	if [ -n "$RAW_REA_PORT" ]; then
-	    LINK_REA="vless://$RAW_PSK@$RAW_IP4:443?security=reality&sni=$RAW_REA_SNI&fp=chrome&pbk=$RAW_REA_PBK&sid=$RAW_REA_SID&type=tcp&flow=$RAW_REA_FLOW#${hostname_tag}_Reality"
-	    echo -e "\n\033[1;32m[VLESS Reality]\033[0m\n$LINK_REA"
-	    FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_REA"
-	fi
+    if [ -n "$RAW_REA_PORT" ]; then
+        LINK_REA="vless://$RAW_PSK@$RAW_IP4:$RAW_REA_PORT?security=reality&sni=$RAW_REA_SNI&fp=chrome&pbk=$RAW_REA_PBK&sid=$RAW_REA_SID&type=tcp&flow=xtls-rprx-vision#${hostname_tag}_Reality"
+        echo -e "\n\033[1;32m[VLESS Reality]\033[0m\n$LINK_REA"
+        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_REA"
+    fi
     # 3. Argo 隧道节点
     if [ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ]; then
         LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo"
@@ -1016,7 +1016,7 @@ display_links() {
     fi
     echo -e "\n\033[1;34m==========================================\033[0m"
     echo -e "\033[1;32m[安全增强]\033[0m 已启用 VLESS+Reality + Hysteria2 双栈协议"
-    [ -n "$RAW_ARGO_DOMAIN" ] && echo -e "\033[1;32m[隧道增强]\033[0m Argo 隧道已启用"
+    [ -n "$RAW_ARGO_DOMAIN" ] && echo -e "\033[1;32m[隧道增强]\033[0m Argo 隧道已开启 Multiplexing 多路复用加速"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
@@ -1177,8 +1177,8 @@ CPU_CORE=$(get_cpu_core); export CPU_CORE
 get_network_info; echo -e "-----------------------------------------------"
 echo -e "\033[1;36m[配置]\033[0m 请设置 Hysteria2 端口"
 PORT_HY2=$(prompt_for_port)
-#echo -e "\033[1;36m[配置]\033[0m 请设置 VLESS-Reality 端口"
-#PORT_REALITY=$(prompt_for_port); echo -e "-----------------------------------------------"
+echo -e "\033[1;36m[配置]\033[0m 请设置 VLESS-Reality 端口"
+PORT_REALITY=$(prompt_for_port); echo -e "-----------------------------------------------"
 setup_argo_logic; export ARGO_DOMAIN ARGO_TOKEN USE_EXTERNAL_ARGO; echo -e "-----------------------------------------------"
 optimize_system
 install_singbox "install"
