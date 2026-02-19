@@ -760,9 +760,10 @@ create_config() {
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    local dns_srv='{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}'
-    [ "$mem_total" -ge 100 ] && timeout="40s" && dns_srv='{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"tag":"google-doh","address":"https://8.8.8.8/dns-query","detour":"direct-out"}'
-    [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
+	local dns_tag="google"; local dns_srv='{"tag":"google","type":"udp","server":"8.8.4.4","server_port":53},{"tag":"cloudflare","type":"udp","server":"1.1.1.1","server_port":53}'
+    [ "$mem_total" -ge 100 ] && timeout="40s" && dns_tag="google-doh" && \
+    dns_srv='{"tag":"google-doh","type":"https","server":"8.8.8.8","server_port":443,"path":"/dns-query"},{"tag":"cloudflare-doh","type":"https","server":"1.1.1.1","server_port":443,"path":"/dns-query"}'
+	[ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
 
     # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ] || [ "$PORT_HY2" == "current" ]; then
@@ -774,24 +775,24 @@ create_config() {
         [ -z "$PORT_REALITY" ] && PORT_REALITY=$((PORT_HY2 + 3))
     fi
 
-    # 2. PSK 与 REALITY 密钥处理 (深度持久化)
-    local p_key=""; local pub_key=""; local s_id=""
-    if [ -f /etc/sing-box/config.json ]; then
-        [ -z "$PSK" ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-        p_key=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.private_key // empty' /etc/sing-box/config.json 2>/dev/null | head -n1)
-        s_id=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.short_id[0] // empty' /etc/sing-box/config.json 2>/dev/null | head -n1)
-    fi
-    # 兜底生成 PSK
-    [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
-    [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
-    # 兜底生成 Reality 密钥
-    if [ -z "$p_key" ]; then
-        local keypair=$(/usr/bin/sing-box generate reality-keypair)
-        p_key=$(echo "$keypair" | awk '/Private key:/{print $3}')
-        pub_key=$(echo "$keypair" | awk '/Public key:/{print $3}')
-        s_id=$(openssl rand -hex 8)
-        [ -n "$pub_key" ] && echo "$pub_key" > /etc/sing-box/certs/reality_pub.txt
-    fi
+	# 2. PSK 与密钥处理 (深度持久化)
+	local p_key="" s_id="" c_p="/etc/sing-box/certs/reality_priv.txt"
+	mkdir -p /etc/sing-box/certs
+	[ -f /etc/sing-box/config.json ] && {
+	    [ -z "$PSK" ] && PSK=$(jq -r '..|objects|select(.type=="hysteria2")|.users[0].password//empty' /etc/sing-box/config.json | head -1)
+	    p_key=$(jq -r '..|objects|select(.tag=="vless-reality-in")|.tls.reality.private_key//empty' /etc/sing-box/config.json | head -1)
+	    s_id=$(jq -r '..|objects|select(.tag=="vless-reality-in")|.tls.reality.short_id[0]//empty' /etc/sing-box/config.json | head -1)
+	}
+	# 救火读取：增加 tr 过滤确保 Base64 纯净
+	[ -z "$p_key" ] && [ -f "$c_p" ] && p_key=$(cat "$c_p" | tr -d '[:space:]')
+	[ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
+	# 密钥生成：使用 $NF 规避冒号空格坑，s_id 默认补齐
+	if [ -z "$p_key" ]; then
+	    local kp=$(/usr/bin/sing-box generate reality-keypair)
+	    p_key=$(echo "$kp" | awk '/Priv/{print $NF}'); s_id=$(openssl rand -hex 8)
+	    echo "$(echo "$kp" | awk '/Pub/{print $NF}')" > /etc/sing-box/certs/reality_pub.txt
+	fi
+	[ -n "$p_key" ] && echo "$p_key" > "$c_p" && chmod 600 "$c_p"
 
     # 构造 Hysteria2 Inbound
     local HY2_IN=$(printf '{
@@ -819,7 +820,7 @@ create_config() {
       }
     }' "$PORT_REALITY" "$PSK" "$TLS_DOMAIN" "$TLS_DOMAIN" "$p_key" "$s_id")
 
-    # 构造 Argo Inbound (包含 Mux + 0-RTT)
+    # 构造 Argo Inbound
     local ARGO_IN=""
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
         local MUX_JSON=', "multiplex": { "enabled": true, "padding": true }'
@@ -828,7 +829,7 @@ create_config() {
             ARGO_IN=$(printf ',{
               "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "%s", "max_early_data": 2048 }
+              "transport": { "type": "httpupgrade", "host": "%s" }
               %s
             }' "$PSK" "$A_DOMAIN" "$MUX_JSON")
         else
@@ -837,7 +838,7 @@ create_config() {
               "type": "vless", "tag": "vless-argo-in", "server_name": "%s",
               "cloudflare": { "enabled": true, "tunnel": { "token": "%s" } },
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "%s", "max_early_data": 2048 }
+              "transport": { "type": "httpupgrade", "host": "%s" }
               %s
             }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN" "$MUX_JSON")
         fi
@@ -847,9 +848,9 @@ create_config() {
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": { "servers":[$dns_srv], "strategy":"$ds", "independent_cache":true, "disable_cache":false, "disable_expire":false },
+  "dns": { "servers": [$dns_srv], "rules": [ { "outbound": "any", "server": "$dns_tag" } ], "strategy": "${ds:-prefer_ipv4}" },
   "inbounds": [ $HY2_IN $REALITY_IN $ARGO_IN ],
-  "outbounds": [ { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" } ]
+  "outbounds": [ { "type": "direct", "tag": "direct-out", "domain_strategy": "${ds:-prefer_ipv4}" } ]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
@@ -979,12 +980,14 @@ get_env_data() {
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$d"
     # 2. 提取 Reality 核心数据
     local rd=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | "\(.listen_port) \(.tls.server_name) \(.tls.reality.short_id[0])"' "$CFG" 2>/dev/null | head -n 1)
-    if [ -n "$rd" ]; then
-        read -r RAW_REA_PORT RAW_REA_SNI RAW_REA_SID <<< "$rd"
-        RAW_REA_PBK=$([ -f "/etc/sing-box/certs/reality_pub.txt" ] && cat "/etc/sing-box/certs/reality_pub.txt" | tr -d '\n\r ')
-    fi
+	if [ -n "$rd" ]; then
+	    read -r RAW_REA_PORT RAW_REA_SNI RAW_REA_SID <<< "$rd"
+	    RAW_REA_PBK=$([ -f "/etc/sing-box/certs/reality_pub.txt" ] && cat "/etc/sing-box/certs/reality_pub.txt" | tr -d '[:space:]')
+	    [ -z "$RAW_REA_PBK" ] && [ -f "/etc/sing-box/certs/reality_priv.txt" ] && \
+	    RAW_REA_PBK=$(/usr/bin/sing-box generate reality-keypair -private-key $(cat /etc/sing-box/certs/reality_priv.txt | tr -d '[:space:]') 2>/dev/null | awk '/Pub/{print $NF}')
+	fi
     # 3. 提取 Argo 域名
-    RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // empty' "$CFG" 2>/dev/null)
+    RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // .server_name // empty' "$CFG" 2>/dev/null | head -n 1)
     # 4. 提取 Hy2 的 SNI 与指纹
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
     [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
@@ -992,7 +995,7 @@ get_env_data() {
     RAW_FP=$([ -f "$F_P" ] && cat "$F_P" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
     # 5. 读取 ECH 并进行 URL 编码
     if [ -f "/etc/sing-box/certs/ech.pub" ]; then
-        local r=$(grep -v "ECH" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
+        local r=$(grep -v "ECH" "/etc/sing-box/certs/ech.pub" | tr -d '[:space:]')
         RAW_ECH=$(echo "$r" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g' | sed 's/%%/%/g')
     fi
 }
