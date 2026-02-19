@@ -846,7 +846,7 @@ create_config() {
 {
   "log": { "level": "fatal", "timestamp": true },
   "dns": { "servers":[$dns_srv], "strategy":"$ds", "independent_cache":true, "disable_cache":false, "disable_expire":false },
-  "inbounds": [ $HY2_IN $ARGO_IN ],
+  "inbounds": [ $HY2_IN $REALITY_IN $ARGO_IN ],
   "outbounds": [ { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" } ]
 }
 EOF
