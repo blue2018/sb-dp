@@ -1019,7 +1019,7 @@ display_links() {
     fi
     # 3. Argo 隧道节点
     if [ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ]; then
-        LINK_ARGO="vless://$RAW_PSK@www.visa.com:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo"
+        LINK_ARGO="vless://$RAW_PSK@www.visa.cn:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo"
         echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
     fi
