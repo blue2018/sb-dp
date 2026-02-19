@@ -784,7 +784,7 @@ create_config() {
             ARGO_IN=$(printf ',{
               "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "%s" }
+              "transport": { "type": "httpupgrade", "host": "%s", "max_early_data": 2048 }
               %s
             }' "$PSK" "$A_DOMAIN" "$MUX_JSON")
         else
@@ -793,7 +793,7 @@ create_config() {
               "type": "vless", "tag": "vless-argo-in", "server_name": "%s",
               "cloudflare": { "enabled": true, "tunnel": { "token": "%s" } },
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "%s" }
+              "transport": { "type": "httpupgrade", "host": "%s", "max_early_data": 2048 }
               %s
             }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN" "$MUX_JSON")
         fi
