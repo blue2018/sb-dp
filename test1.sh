@@ -726,9 +726,13 @@ create_config() {
     [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
 
     # 端口和 PSK (密码) 确定逻辑
-    if [ -z "$PORT_HY2" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.. | objects | select(.type == "hysteria2") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-        else PORT_HY2=$(printf "\n" | prompt_for_port | awk '{print $1}'); fi
+    if [ -z "$PORT_HY2" ] || [ "$PORT_HY2" == "current" ]; then
+        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.. | objects | select(.type == "hysteria2") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1); fi
+        [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port | awk '{print $1}')
+    fi
+    if [ -z "$PORT_REALITY" ] || [ "$PORT_REALITY" == "current" ]; then
+        if [ -f /etc/sing-box/config.json ]; then PORT_REALITY=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1); fi
+        [ -z "$PORT_REALITY" ] && PORT_REALITY=$((PORT_HY2 + 3))
     fi
     [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
