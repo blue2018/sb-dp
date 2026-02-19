@@ -566,18 +566,19 @@ optimize_system() {
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW} Mbps"
     info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
 	
-	# 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
-    local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
+    # 阶段三： BBR 探测与调度器锁定 (动态适配小鸡环境)
+    local tcp_cca="cubic"; local qdisc_algo="fq_codel" 
+    modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
     local avail=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "cubic")
     if [ ! -w "/proc/sys/net/ipv4/tcp_congestion_control" ]; then
         tcp_cca=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "cubic")
-        warn "内核参数已锁定 (Read-Only)，维持系统默认算法: $tcp_cca"
-    elif [[ "$avail" =~ "bbr3" ]]; then tcp_cca="bbr3"; echo "bbr3" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null && succ "检测到 BBRv3，激活极致响应模式"
-    elif [[ "$avail" =~ "bbr2" ]]; then tcp_cca="bbr2"; echo "bbr2" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null && succ "检测到 BBRv2，激活平衡加速模式"
-    elif [[ "$avail" =~ "bbr" ]]; then tcp_cca="bbr"; echo "bbr" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null && info "检测到 BBRv1，激活标准加速模式"
-    else warn "内核不支持 BBR，切换至高兼容 Cubic 模式"; fi
-    [ -w "/proc/sys/net/core/default_qdisc" ] && sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
-    if sysctl net.core.default_qdisc 2>/dev/null | grep -q "fq"; then info "FQ 调度器已就绪"; else info "准备激活 FQ 调度器..."; fi
+        warn "内核参数已锁定，维持系统默认算法: $tcp_cca"
+    elif [[ "$avail" =~ "bbr3" ]]; then tcp_cca="bbr3"; qdisc_algo="fq"; succ "检测到 BBRv3，激活极致响应模式"
+    elif [[ "$avail" =~ "bbr2" ]]; then tcp_cca="bbr2"; qdisc_algo="fq"; succ "检测到 BBRv2，激活平衡加速模式"
+    elif [[ "$avail" =~ "bbr" ]]; then tcp_cca="bbr"; qdisc_algo="fq"; info "检测到 BBRv1，激活标准加速模式"
+    else qdisc_algo="fq_codel"; warn "内核不支持 BBR，切换至高兼容 fq_codel 流量整形模式"; fi
+    [ -w "/proc/sys/net/core/default_qdisc" ] && sysctl -w net.core.default_qdisc=$qdisc_algo >/dev/null 2>&1
+    info "网络调度器已切换为: $qdisc_algo"
 	
     # 阶段四： 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
     local SYSCTL_FILE="/etc/sysctl.d/99-sing-box.conf"
@@ -605,7 +606,7 @@ net.core.dev_weight = 64                   # CPU 单次收包权重
 net.core.busy_read = $busy_poll_val        # 繁忙轮询 (降低收包延迟)
 net.core.busy_poll = $busy_poll_val        # 繁忙轮询 (针对UDP优化)
 net.core.somaxconn = 8192                  # 监听队列上限
-net.core.default_qdisc = fq                # BBR必备调度规则
+net.core.default_qdisc = $qdisc_algo       # BBR必备调度规则
 net.core.netdev_budget = $net_bgt          # 调度预算 (单次轮询处理包数)
 net.core.netdev_budget_usecs = $net_usc    # 调度时长 (单次轮询微秒上限)
 net.core.netdev_tstamp_prequeue = 0        # 禁用时间戳预处理 (降延迟)
@@ -623,6 +624,8 @@ net.ipv4.tcp_wmem = 4096 65536 $tcp_rmem_max   # TCP 写缓存动态范围
 
 # --- 协议栈深度调优 (Hy2 传输核心) ---
 net.ipv4.tcp_congestion_control = $tcp_cca # 拥塞算法 (BBR/Cubic)
+net.ipv4.tcp_ecn = 1                       # 开启显式拥塞通知
+net.ipv4.tcp_ecn_fallback = 1              # ECN 不兼容时自动回退
 net.ipv4.tcp_no_metrics_save = 1           # 实时探测不记忆旧值
 net.ipv4.tcp_fastopen = 3                  # 开启 TCP 快开 (降首包延迟)
 net.ipv4.tcp_notsent_lowat = 16384         # 限制发送队列 (防延迟抖动)
@@ -634,10 +637,6 @@ net.ipv4.tcp_limit_output_bytes = $([ "$mem_total" -ge 200 ] && echo "262144" ||
 net.ipv4.udp_gro_enabled = 1               # UDP 分段聚合 (降CPU负载)
 net.ipv4.udp_early_demux = 1               # UDP 早期路由优化
 net.ipv4.udp_l4_early_demux = 1            # UDP 四层早期分流
-
-# --- BBRv3 / ECN 联动 ---
-net.ipv4.tcp_ecn = 1                       # 开启显式拥塞通知
-net.ipv4.tcp_ecn_fallback = 1              # ECN 不兼容时自动回退
 $(if [[ "$tcp_cca" == "bbr3" ]]; then echo "net.ipv4.tcp_ecn = 2"; echo "net.ipv4.tcp_reflect_tos = 1"; fi)
 
 # === 四、 连接跟踪与超时管理 (及低内存保护) ===
