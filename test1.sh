@@ -786,7 +786,7 @@ create_config() {
       "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
       "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
       "tls": {
-        "enabled": true, "server_name": "%s", "utls": { "enabled": true, "fingerprint": "chrome" },
+        "enabled": true, "server_name": "%s",
         "reality": {
           "enabled": true, "handshake": { "server": "%s", "server_port": 443 },
           "private_key": "%s", "short_id": ["%s"]
