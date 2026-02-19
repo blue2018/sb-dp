@@ -760,8 +760,8 @@ create_config() {
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
-    local dns_srv='{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}'
-    [ "$mem_total" -ge 100 ] && timeout="40s" && dns_srv='{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"tag":"google-doh","address":"https://8.8.8.8/dns-query","detour":"direct-out"}'
+	local dns_tag="google";	local dns_srv='{"tag":"google","address":"8.8.4.4"},{"tag":"cloudflare","address":"1.1.1.1"}'
+    [ "$mem_total" -ge 100 ] && timeout="40s" && dns_tag="google-doh" && dns_srv='{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query"},{"tag":"google-doh","address":"https://8.8.8.8/dns-query"}'
     [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
 
     # 1. 端口确定逻辑
@@ -776,20 +776,23 @@ create_config() {
 
     # 2. PSK 与 REALITY 密钥处理 (深度持久化)
     local p_key=""; local pub_key=""; local s_id=""
+    # 优先从现有 JSON 配置读取
     if [ -f /etc/sing-box/config.json ]; then
         [ -z "$PSK" ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
         p_key=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.private_key // empty' /etc/sing-box/config.json 2>/dev/null | head -n1)
         s_id=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.short_id[0] // empty' /etc/sing-box/config.json 2>/dev/null | head -n1)
     fi
+    [ -z "$p_key" ] && [ -f /etc/sing-box/certs/reality_priv.txt ] && p_key=$(cat /etc/sing-box/certs/reality_priv.txt)
     # 兜底生成 PSK
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
-    # 兜底生成 Reality 密钥
+    # 兜底生成 Reality 密钥对
     if [ -z "$p_key" ]; then
         local keypair=$(/usr/bin/sing-box generate reality-keypair)
         p_key=$(echo "$keypair" | awk '/Private key:/{print $3}')
         pub_key=$(echo "$keypair" | awk '/Public key:/{print $3}')
-        s_id=$(openssl rand -hex 8)
+        [ -z "$s_id" ] && s_id=$(openssl rand -hex 8)
+        [ -n "$p_key" ] && echo "$p_key" > /etc/sing-box/certs/reality_priv.txt
         [ -n "$pub_key" ] && echo "$pub_key" > /etc/sing-box/certs/reality_pub.txt
     fi
 
@@ -819,7 +822,7 @@ create_config() {
       }
     }' "$PORT_REALITY" "$PSK" "$TLS_DOMAIN" "$TLS_DOMAIN" "$p_key" "$s_id")
 
-    # 构造 Argo Inbound (包含 Mux + 0-RTT)
+    # 构造 Argo Inbound
     local ARGO_IN=""
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
         local MUX_JSON=', "multiplex": { "enabled": true, "padding": true }'
@@ -828,7 +831,7 @@ create_config() {
             ARGO_IN=$(printf ',{
               "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "%s", "max_early_data": 2048 }
+              "transport": { "type": "httpupgrade", "host": "%s" }
               %s
             }' "$PSK" "$A_DOMAIN" "$MUX_JSON")
         else
@@ -837,7 +840,7 @@ create_config() {
               "type": "vless", "tag": "vless-argo-in", "server_name": "%s",
               "cloudflare": { "enabled": true, "tunnel": { "token": "%s" } },
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "%s", "max_early_data": 2048 }
+              "transport": { "type": "httpupgrade", "host": "%s" }
               %s
             }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN" "$MUX_JSON")
         fi
@@ -848,6 +851,7 @@ create_config() {
 {
   "log": { "level": "fatal", "timestamp": true },
   "dns": { "servers":[$dns_srv], "strategy":"$ds", "independent_cache":true, "disable_cache":false, "disable_expire":false },
+  "dns": { "servers": [$dns_srv], "rules": [ { "outbound": "any", "server": "$dns_tag" } ], "strategy": "$ds" },
   "inbounds": [ $HY2_IN $REALITY_IN $ARGO_IN ],
   "outbounds": [ { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" } ]
 }
