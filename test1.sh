@@ -1168,7 +1168,6 @@ PORT_HY2=$(prompt_for_port)
 echo -e "\033[1;36m[配置]\033[0m 请设置 VLESS-Reality 端口"
 PORT_REALITY=$(prompt_for_port); echo -e "-----------------------------------------------"
 setup_argo_logic; export ARGO_DOMAIN ARGO_TOKEN USE_EXTERNAL_ARGO; echo -e "-----------------------------------------------"
-select_argo_ip
 optimize_system
 install_singbox "install"
 generate_cert
