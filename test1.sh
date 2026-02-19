@@ -795,7 +795,7 @@ create_config() {
           "enabled": true, "handshake": { "server": "%s", "server_port": 443 }, "private_key": "%s", "short_id": ["%s"]
         }
       }
-    }' "$PORT_REALITY" "$PSK" "$REALITY_DEST" "$REALITY_DEST" "$p_key" "$s_id")
+    }' "443" "$PSK" "$REALITY_DEST" "$REALITY_DEST" "$p_key" "$s_id")
 
     # 构造 Argo Inbound (动态适配内核能力)
 	local ARGO_IN=""
@@ -1004,7 +1004,7 @@ display_links() {
     [[ "${RAW_IP6:-}" == *:* ]] && LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${HY2_PARAM}#${hostname_tag}_Hy2_v6" && echo -e "\n\033[1;36m[IPv6 Hy2]\033[0m\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
     # 2. VLESS Reality 节点
 	if [ -n "$RAW_REA_PORT" ]; then
-	    LINK_REA="vless://$RAW_PSK@$RAW_IP4:$RAW_REA_PORT?security=reality&sni=$RAW_REA_SNI&fp=chrome&pbk=$RAW_REA_PBK&sid=$RAW_REA_SID&type=tcp&flow=$RAW_REA_FLOW#${hostname_tag}_Reality"
+	    LINK_REA="vless://$RAW_PSK@$RAW_IP4:443?security=reality&sni=$RAW_REA_SNI&fp=chrome&pbk=$RAW_REA_PBK&sid=$RAW_REA_SID&type=tcp&flow=$RAW_REA_FLOW#${hostname_tag}_Reality"
 	    echo -e "\n\033[1;32m[VLESS Reality]\033[0m\n$LINK_REA"
 	    FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_REA"
 	fi
