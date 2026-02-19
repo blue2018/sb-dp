@@ -6,7 +6,7 @@ set -euo pipefail
 # ==========================================
 SBOX_ARCH="";            OS_DISPLAY="";          SBOX_CORE="/etc/sing-box/core_script.sh";    ARGO_DOMAIN=""; ARGO_TOKEN=""
 SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测";        USE_EXTERNAL_ARGO="false"
-SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM="";      USER_PORT="";   PORT_REALITY=""
+SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM="";      PORT_HY2="";   PORT_REALITY=""
 VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_ECH=""
 VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
@@ -1161,7 +1161,7 @@ setup_argo_logic; export ARGO_DOMAIN ARGO_TOKEN USE_EXTERNAL_ARGO; echo -e "----
 optimize_system
 install_singbox "install"
 generate_cert
-create_config "$USER_PORT" "$PORT_REALITY"
+create_config "$PORT_HY2" "$PORT_REALITY"
 verify_config || exit 1
 get_env_data
 create_sb_tool
