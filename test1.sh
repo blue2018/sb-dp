@@ -975,18 +975,27 @@ display_links() {
     local LINK_V4="" LINK_V6="" LINK_REA="" LINK_ARGO="" FULL_CLIP="" hostname_tag="$(hostname)"
     # 数据准备 (通过 get_env_data 获取精准数据)
     get_env_data
-    local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" s_text="\033[1;33moffline\033[0m" p_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
     local HY2_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
-    # 状态检测
+	local p_hy2_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" p_rea_text="\033[1;33m${RAW_REA_PORT:-"关闭"}\033[0m" s_text="\033[1;33moffline\033[0m" 
+    local hy2_icon="\033[1;31m[✖]\033[0m" rea_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
+    # 状态检测 (区分 UDP 与 TCP)，参数: $1=IP, $2=Port, $3=Mode(tcp/udp)
+    _do_probe_v2() {
+        [ -z "$1" ] || [ -z "$2" ] && return
+        local mode_flag="-u"; [ "$3" == "tcp" ] && mode_flag=""
+        (nc -z $mode_flag -w 1 "$1" "$2" || { sleep 0.3; nc -z $mode_flag -w 1 "$1" "$2"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"
+    }
+    # 进程状态检测
     pgrep sing-box >/dev/null 2>&1 && { [ "${USE_EXTERNAL_ARGO:-false}" != "true" ] || pgrep cloudflared >/dev/null 2>&1; } && s_text="\033[1;33monline\033[0m" && s_icon="\033[1;32m[✔]\033[0m"
-    _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 1 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
+    # 执行并行端口扫描
     if command -v nc >/dev/null 2>&1; then
-        _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 &
-        local t=0; while [ $t -lt 10 ] && pgrep -f "nc -z -u" >/dev/null 2>&1; do sleep 0.3; t=$((t+1)); done
-        [[ "$(cat /tmp/sb_v4_res 2>/dev/null)" == "OK" || "$(cat /tmp/sb_v6_res 2>/dev/null)" == "OK" ]] && p_icon="\033[1;32m[✔]\033[0m"
+        _do_probe_v2 "${RAW_IP4:-}" "$RAW_PORT" "udp" > /tmp/sb_hy2_res 2>&1 &
+        [ -n "$RAW_REA_PORT" ] && _do_probe_v2 "${RAW_IP4:-}" "$RAW_REA_PORT" "tcp" > /tmp/sb_rea_res 2>&1 &
+        local t=0; while [ $t -lt 10 ] && pgrep -f "nc -z" >/dev/null 2>&1; do sleep 0.3; t=$((t+1)); done
+        [ "$(cat /tmp/sb_hy2_res 2>/dev/null)" == "OK" ] && hy2_icon="\033[1;32m[✔]\033[0m"
+        [ "$(cat /tmp/sb_rea_res 2>/dev/null)" == "OK" ] && rea_icon="\033[1;32m[✔]\033[0m"
     fi
-
-    echo -e "\n\033[1;32m[节点信息]\033[0m >>> Hy2端口: $p_text $p_icon | 服务状态: $s_text $s_icon"
+    echo -e "\n\033[1;32m[节点信息]\033[0m >>> Hy2端口: $p_hy2_text $hy2_icon | Reality端口: $p_rea_text $rea_icon | 服务状态: $s_text $s_icon"
+	
     # 1. Hysteria2 节点 (IPv4/IPv6)
     [ -n "${RAW_IP4:-}" ] && LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${HY2_PARAM}#${hostname_tag}_Hy2_v4" && echo -e "\n\033[1;35m[IPv4 Hy2]\033[0m\n$LINK_V4" && FULL_CLIP="$LINK_V4"
     [[ "${RAW_IP6:-}" == *:* ]] && LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${HY2_PARAM}#${hostname_tag}_Hy2_v6" && echo -e "\n\033[1;36m[IPv6 Hy2]\033[0m\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
@@ -998,7 +1007,7 @@ display_links() {
     fi
     # 3. Argo 隧道节点
     if [ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ]; then
-        LINK_ARGO="vless://$RAW_PSK@www.visa.cn:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo"
+        LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo"
         echo -e "\n\033[1;33m[VLESS HttpUpgrade Argo]\033[0m\n$LINK_ARGO"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
     fi
