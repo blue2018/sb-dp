@@ -823,15 +823,13 @@ create_config() {
     # 构造 Argo Inbound
     local ARGO_IN=""
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
-        local MUX_JSON=', "multiplex": { "enabled": true, "padding": true }'
         if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
 		    # 外部模式：必须指定 listen 为 127.0.0.1，防止外部扫描到该端口
             ARGO_IN=$(printf ',{
               "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
               "transport": { "type": "httpupgrade", "host": "%s" }
-              %s
-            }' "$PSK" "$A_DOMAIN" "$MUX_JSON")
+            }' "$PSK" "$A_DOMAIN")
         else
 		    # 内建模式：内核自带 argo 驱动，不需要 listen 端口，它是主动连接 CF 的
             ARGO_IN=$(printf ',{
@@ -839,8 +837,7 @@ create_config() {
               "cloudflare": { "enabled": true, "tunnel": { "token": "%s" } },
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
               "transport": { "type": "httpupgrade", "host": "%s" }
-              %s
-            }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN" "$MUX_JSON")
+            }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN")
         fi
     fi
     
