@@ -4,10 +4,10 @@ set -euo pipefail
 # ==========================================
 # 基础变量声明与环境准备
 # ==========================================
-SBOX_ARCH="";            OS_DISPLAY="";          SBOX_CORE="/etc/sing-box/core_script.sh";    ARGO_DOMAIN=""
-SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测"; ARGO_TOKEN=""
-SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM="";      USER_PORT=""
-VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_ECH=""; USE_EXTERNAL_ARGO="false"
+SBOX_ARCH="";            OS_DISPLAY="";          SBOX_CORE="/etc/sing-box/core_script.sh";    ARGO_DOMAIN=""; ARGO_TOKEN=""
+SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测";        USE_EXTERNAL_ARGO="false"
+SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM="";      USER_PORT="";   PORT_REALITY=""
+VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_ECH=""
 VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
 TLS_DOMAIN_POOL=("www.bing.com" "www.microsoft.com" "itunes.apple.com" "www.icloud.com" "www.visa.com" "www.cisco.com")
@@ -716,7 +716,7 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local PORT_HY2="${1:-}"; local A_DOMAIN="${ARGO_DOMAIN:-}"; local A_TOKEN="${ARGO_TOKEN:-}"; local cur_bw="${VAR_HY2_BW:-200}"
+    local PORT_HY2="${1:-}"; local PORT_REALITY="${2:-}"; local A_DOMAIN="${ARGO_DOMAIN:-}"; local A_TOKEN="${ARGO_TOKEN:-}"; local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
@@ -767,13 +767,13 @@ create_config() {
       "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
       "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
       "tls": {
-        "enabled": true, "server_name": "www.microsoft.com",
+        "enabled": true, "server_name": "%s",
         "reality": {
           "enabled": true, "handshake": { "server": "www.microsoft.com", "server_port": 443 },
           "private_key": "%s", "short_id": ["%s"]
         }
       }
-    }' "$((PORT_HY2 + 1))" "$PSK" "$p_key" "$s_id")
+    }' "$PORT_REALITY" "$PSK" "$A_DOMAIN" "$rand_sni" "$p_key" "$s_id")
 
     # 3. 构造 Argo Inbound (黑科技：加入 Mux 多路复用)
     local ARGO_IN=""
@@ -1127,12 +1127,15 @@ detect_os
 install_dependencies
 CPU_CORE=$(get_cpu_core); export CPU_CORE
 get_network_info; echo -e "-----------------------------------------------"
-USER_PORT=$(prompt_for_port); echo -e "-----------------------------------------------"
+echo -e "\033[1;36m[配置]\033[0m 请设置 Hysteria2 端口"
+PORT_HY2=$(prompt_for_port)
+echo -e "\033[1;36m[配置]\033[0m 请设置 VLESS-Reality 端口"
+PORT_REALITY=$(prompt_for_port); echo -e "-----------------------------------------------"
 setup_argo_logic; export ARGO_DOMAIN ARGO_TOKEN USE_EXTERNAL_ARGO; echo -e "-----------------------------------------------"
 optimize_system
 install_singbox "install"
 generate_cert
-create_config "$USER_PORT"
+create_config "$USER_PORT" "$PORT_REALITY"
 verify_config || exit 1
 get_env_data
 create_sb_tool
