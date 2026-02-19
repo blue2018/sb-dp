@@ -119,7 +119,7 @@ setup_argo_logic() {
     echo -e "\033[1;32m[可选配置]\033[0m\nVLESS + HttpUpgrade + Argo: CF隧道转发\n-----------------------------------------------" >&2
     echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车跳过可选配置): " >&2; read -r argo_d
     if [ -z "$argo_d" ]; then ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2
-    elif [ "$mem_total" -lt 200 ] && ! /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
+    elif [ "$mem_total" -lt 150 ] && ! /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
         ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"
         echo -e "\033[1;33m[跳过]\033[0m 内存不足 200M 且内核不支持内建 Argo，为保系统稳定已自动跳过" >&2
     else
@@ -881,7 +881,7 @@ EOF
 	# --- 双进程外部 Argo 拉起逻辑 ---
     if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
         pkill -9 cloudflared >/dev/null 2>&1
-        GOGC=20 nohup /usr/local/bin/cloudflared tunnel --no-autoupdate run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
+        GOGC=30 nohup /usr/local/bin/cloudflared tunnel --no-autoupdate run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
     fi
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
