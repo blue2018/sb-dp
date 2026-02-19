@@ -943,32 +943,32 @@ EOF
 # 信息展示模块
 # ==========================================
 get_env_data() {
-    local CFG="/etc/sing-box/config.json"; RAW_ECH=""
+    local CFG="/etc/sing-box/config.json" RAW_ECH=""
     [ ! -f "$CFG" ] && return 1
-    # 1. 提取 Hy2 核心数据
-    local d=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CFG" 2>/dev/null | head -n 1)
+    # 1. Hy2 数据
+    local d=$(jq -r '..|objects|select(.type=="hysteria2")|(.users[0].password+" "+(.listen_port|tostring)+" "+.tls.certificate_path)//empty' "$CFG" 2>/dev/null | head -n 1)
     [ -z "$d" ] && return 1
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$d"
-    # 2. 提取 Reality 核心数据
-    local rd=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | "\(.listen_port) \(.tls.server_name) \(.tls.reality.short_id[0])"' "$CFG" 2>/dev/null | head -n 1)
-	if [ -n "$rd" ]; then
-	    read -r RAW_REA_PORT RAW_REA_SNI RAW_REA_SID <<< "$rd"
-	    RAW_REA_PBK=$([ -f "/etc/sing-box/certs/reality_pub.txt" ] && cat "/etc/sing-box/certs/reality_pub.txt" | tr -d '[:space:]')
-	    [ -z "$RAW_REA_PBK" ] && [ -f "/etc/sing-box/certs/reality_priv.txt" ] && \
-	    RAW_REA_PBK=$(/usr/bin/sing-box generate reality-keypair -private-key $(cat /etc/sing-box/certs/reality_priv.txt | tr -d '[:space:]') 2>/dev/null | awk '/Pub/{print $NF}')
-	fi
-    # 3. 提取 Argo 域名
-    RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // .server_name // empty' "$CFG" 2>/dev/null | head -n 1)
-    # 4. 提取 Hy2 的 SNI 与指纹
-    RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
-    [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
-    local F_P="/etc/sing-box/certs/cert_fingerprint.txt"
-    RAW_FP=$([ -f "$F_P" ] && cat "$F_P" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
-    # 5. 读取 ECH 并进行 URL 编码
-    if [ -f "/etc/sing-box/certs/ech.pub" ]; then
-        local r=$(grep -v "ECH" "/etc/sing-box/certs/ech.pub" | tr -d '[:space:]')
-        RAW_ECH=$(echo "$r" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g' | sed 's/%%/%/g')
+    # 2. Reality 数据
+    local rd=$(jq -r '..|objects|select(.tag=="vless-reality-in")|((.listen_port|tostring)+" "+.tls.server_name+" "+.tls.reality.short_id[0])//empty' "$CFG" 2>/dev/null | head -n 1)
+    if [ -n "$rd" ]; then
+        read -r RAW_REA_PORT RAW_REA_SNI RAW_REA_SID <<< "$rd"
+        RAW_REA_PBK=$([ -f "/etc/sing-box/certs/reality_pub.txt" ] && cat /etc/sing-box/certs/reality_pub.txt | tr -d '[:space:]' || {
+            local priv=$(cat /etc/sing-box/certs/reality_priv.txt 2>/dev/null | tr -d '[:space:]')
+            [ -n "$priv" ] && /usr/bin/sing-box generate reality-keypair -private-key "$priv" 2>/dev/null | awk '/Pub/{print $NF}'
+        })
     fi
+    # 3. Argo 数据
+    RAW_ARGO_DOMAIN=$(jq -r '..|objects|select(.tag=="vless-argo-in")|(.transport.host//.server_name)//empty' "$CFG" 2>/dev/null | head -n 1)
+    # 4. SNI & 指纹
+    if [ -f "$CERT_PATH" ]; then
+        RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed -n 's/.*CN=\([^,]*\).*/\1/p')
+        [ -z "$RAW_SNI" ] && RAW_SNI="$TLS_DOMAIN"
+        local F_P="/etc/sing-box/certs/cert_fingerprint.txt"
+        RAW_FP=$([ -f "$F_P" ] && cat "$F_P" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//;s/://g' | tr '[:upper:]' '[:lower:]')
+    fi
+    # 5. ECH 编码
+    [ -f "/etc/sing-box/certs/ech.pub" ] && RAW_ECH=$(grep -v "ECH" "/etc/sing-box/certs/ech.pub" | tr -d '[:space:]' | sed 's/+/%%2B/g;s/\//%%2F/g;s/=/%%3D/g;s/%%/%/g')
 }
 
 display_links() {
