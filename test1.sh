@@ -759,7 +759,7 @@ create_config() {
     [ "$mem_total" -ge 100 ] && timeout="40s" && dns_srv='{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"tag":"google-doh","address":"https://8.8.8.8/dns-query","detour":"direct-out"}'
     [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
 
-    # 端口和 PSK (密码) 确定逻辑
+    # 1. 端口确定逻辑
     if [ -z "$PORT_HY2" ] || [ "$PORT_HY2" == "current" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.. | objects | select(.type == "hysteria2") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1); fi
         [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port | awk '{print $1}')
@@ -768,16 +768,18 @@ create_config() {
         if [ -f /etc/sing-box/config.json ]; then PORT_REALITY=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1); fi
         [ -z "$PORT_REALITY" ] && PORT_REALITY=$((PORT_HY2 + 3))
     fi
-    [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
-    [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
-    [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
 
-    # --- REALITY 密钥处理 (防止重启变密钥) ---
+    # 2. PSK 与 REALITY 密钥处理 (深度持久化)
     local p_key=""; local pub_key=""; local s_id=""
     if [ -f /etc/sing-box/config.json ]; then
-        p_key=$(jq -r '.. | objects | select(.reality != null) | .reality.private_key' /etc/sing-box/config.json 2>/dev/null | head -n1)
-        s_id=$(jq -r '.. | objects | select(.reality != null) | .reality.short_id[0]' /etc/sing-box/config.json 2>/dev/null | head -n1)
+        [ -z "$PSK" ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+        p_key=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.private_key // empty' /etc/sing-box/config.json 2>/dev/null | head -n1)
+        s_id=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.short_id[0] // empty' /etc/sing-box/config.json 2>/dev/null | head -n1)
     fi
+    # 兜底生成 PSK
+    [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
+    [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
+    # 兜底生成 Reality 密钥
     if [ -z "$p_key" ]; then
         local keypair=$(/usr/bin/sing-box generate reality-keypair)
         p_key=$(echo "$keypair" | awk '/Private key:/{print $3}')
@@ -786,7 +788,7 @@ create_config() {
         [ -n "$pub_key" ] && echo "$pub_key" > /etc/sing-box/certs/reality_pub.txt
     fi
 
-    # 1. 构造 Hysteria2 Inbound (主力)
+    # 构造 Hysteria2 Inbound
     local HY2_IN=$(printf '{
       "type": "hysteria2", "tag": "hy2-in", "listen": "::", "listen_port": %s, "users": [ { "password": "%s" } ],
       "ignore_client_bandwidth": false, "up_mbps": %s, "down_mbps": %s, "udp_timeout": "%s", "udp_fragment": true,
@@ -799,8 +801,7 @@ create_config() {
       "masquerade": "https://%s"
     }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN" "$TLS_DOMAIN")
 
-    # 2. 构造 VLESS REALITY Inbound (新增黑科技：TCP 侧备用)
-    # 使用 Hy2 端口 + 1，借用微软域名实现 0 证书特征
+    # 构造 VLESS REALITY Inbound
     local REALITY_IN=$(printf ',{
       "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
       "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
@@ -811,9 +812,9 @@ create_config() {
           "private_key": "%s", "short_id": ["%s"]
         }
       }
-    }' "$PORT_REALITY" "$PSK" "$A_DOMAIN" "$A_DOMAIN" "$p_key" "$s_id")
+    }' "$PORT_REALITY" "$PSK" "$TLS_DOMAIN" "$TLS_DOMAIN" "$p_key" "$s_id")
 
-    # 3. 构造 Argo Inbound (黑科技：加入 Mux 多路复用)
+    # 构造 Argo Inbound (包含 Mux + 0-RTT)
     local ARGO_IN=""
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
         local MUX_JSON=', "multiplex": { "enabled": true, "padding": true }'
@@ -836,7 +837,7 @@ create_config() {
             }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN" "$MUX_JSON")
         fi
     fi
-	
+    
     # 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
