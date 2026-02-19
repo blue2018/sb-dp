@@ -191,6 +191,26 @@ generate_cert() {
     unset USER_SNI
 }
 
+select_argo_ip() {
+    [ -z "$ARGO_DOMAIN" ] && return
+    info "正在为 Argo 隧道优选最佳接入点 (CF IP Selection)..."
+    # 扩展节点池：包含部分针对亚太优化的 Anycast IP
+    local nodes=("104.16.160.1" "172.67.13.1" "104.21.70.1" "162.159.192.1" "108.162.192.1")
+    local best_ip=""; local tmp_file="/tmp/cf_nodes"
+    rm -f "$tmp_file"
+    # 并发测速 (nc 检测 443 端口连通性)
+    for ip in "${nodes[@]}"; do
+        (nc -z -w 2 "$ip" 443 && echo "$ip" >> "$tmp_file") &
+    done
+    wait
+    best_ip=$(head -n 1 "$tmp_file" 2>/dev/null || echo "104.16.160.1")
+    # 修改 hosts 强制指向优选 IP，cloudflared 默认会连接 *.v2.argotunnel.com，这里锁定其接入点
+    sed -i '/argotunnel.com/d' /etc/hosts
+    echo "$best_ip region1.v2.argotunnel.com" >> /etc/hosts
+    echo "$best_ip region2.v2.argotunnel.com" >> /etc/hosts
+    succ "Argo 黑科技已锁定优选接入点: $best_ip"
+}
+
 # 获取公网IP(高效稳定探测)
 get_network_info() {
     info "获取网络信息..."; RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
@@ -1158,6 +1178,7 @@ PORT_HY2=$(prompt_for_port)
 echo -e "\033[1;36m[配置]\033[0m 请设置 VLESS-Reality 端口"
 PORT_REALITY=$(prompt_for_port); echo -e "-----------------------------------------------"
 setup_argo_logic; export ARGO_DOMAIN ARGO_TOKEN USE_EXTERNAL_ARGO; echo -e "-----------------------------------------------"
+select_argo_ip
 optimize_system
 install_singbox "install"
 generate_cert
