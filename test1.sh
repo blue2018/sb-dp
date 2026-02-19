@@ -158,7 +158,7 @@ select_argo_ip() {
         grep -v "argotunnel.com" /etc/hosts > /etc/hosts.tmp 2>/dev/null
         echo "$best_ip region1.v2.argotunnel.com" >> /etc/hosts.tmp
         echo "$best_ip region2.v2.argotunnel.com" >> /etc/hosts.tmp
-        if cat /etc/hosts.tmp > /etc/hosts 2>/dev/null; then succ "Argo 黑科技已锁定优选接入点: $best_ip"
+        if cat /etc/hosts.tmp > /etc/hosts 2>/dev/null; then succ "Argo 已锁定优选接入点: $best_ip"
         else warn "hosts 文件锁定，优选接入点尝试失败"; fi
         rm -f /etc/hosts.tmp
     fi
