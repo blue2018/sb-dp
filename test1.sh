@@ -1133,7 +1133,7 @@ while true; do
            else info "配置未作变更" && rm -f "$f.bak"; fi
            read -r -p $'\n按回车键返回菜单...' ;;
         3) 
-           echo -e "\n\033[1;34m端口重置管理\033[0m\n1. 重置 Hysteria2\n2. 重置 VLESS-Reality\n3. 取消"
+           echo -e "\n\033[1;34m端口重置管理\033[0m\n1. 重置 Hysteria2\n2. 重置 VLESS-Reality\n3. 返回主菜单"
            read -r -p "请选择: " opt
            case "$opt" in
                1) source "$SBOX_CORE" --reset-port "$(prompt_for_port)" "current" ;;
