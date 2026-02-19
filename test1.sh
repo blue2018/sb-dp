@@ -782,17 +782,17 @@ create_config() {
     }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN" "$TLS_DOMAIN")
 
     # 构造 VLESS REALITY Inbound
+	local REALITY_DEST=$(pick_tls_domain)
     local REALITY_IN=$(printf ',{
       "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
       "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
       "tls": {
         "enabled": true, "server_name": "%s",
         "reality": {
-          "enabled": true, "handshake": { "server": "%s", "server_port": 443 },
-          "private_key": "%s", "short_id": ["%s"]
+          "enabled": true, "handshake": { "server": "%s", "server_port": 443 }, "private_key": "%s", "short_id": ["%s"]
         }
       }
-    }' "$PORT_REALITY" "$PSK" "$TLS_DOMAIN" "$TLS_DOMAIN" "$p_key" "$s_id")
+    }' "$PORT_REALITY" "$PSK" "$REALITY_DEST" "$REALITY_DEST" "$p_key" "$s_id")
 
     # 构造 Argo Inbound (动态适配内核能力)
 	local ARGO_IN=""
@@ -999,7 +999,7 @@ display_links() {
     # 3. Argo 隧道节点
     if [ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ]; then
         LINK_ARGO="vless://$RAW_PSK@www.visa.cn:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo"
-        echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO"
+        echo -e "\n\033[1;33m[VLESS HttpUpgrade Argo]\033[0m\n$LINK_ARGO"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
     fi
     echo -e "\n\033[1;34m==========================================\033[0m"
