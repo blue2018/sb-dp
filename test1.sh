@@ -734,10 +734,23 @@ create_config() {
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
 
-    # 构造 Hysteria2 Inbound (使用 printf 确保变量安全填入)
+    # --- REALITY 密钥处理 (防止重启变密钥) ---
+    local p_key=""; local pub_key=""; local s_id=""
+    if [ -f /etc/sing-box/config.json ]; then
+        p_key=$(jq -r '.. | objects | select(.reality != null) | .reality.private_key' /etc/sing-box/config.json 2>/dev/null | head -n1)
+        s_id=$(jq -r '.. | objects | select(.reality != null) | .reality.short_id[0]' /etc/sing-box/config.json 2>/dev/null | head -n1)
+    fi
+    if [ -z "$p_key" ]; then
+        local keypair=$(/usr/bin/sing-box generate reality-keypair)
+        p_key=$(echo "$keypair" | awk '/Private key:/{print $3}')
+        pub_key=$(echo "$keypair" | awk '/Public key:/{print $3}')
+        s_id=$(openssl rand -hex 8)
+        [ -n "$pub_key" ] && echo "$pub_key" > /etc/sing-box/certs/reality_pub.txt
+    fi
+
+    # 1. 构造 Hysteria2 Inbound (主力)
     local HY2_IN=$(printf '{
-      "type": "hysteria2", "tag": "hy2-in", "listen": "::", "listen_port": %s,
-      "users": [ { "password": "%s" } ],
+      "type": "hysteria2", "tag": "hy2-in", "listen": "::", "listen_port": %s, "users": [ { "password": "%s" } ],
       "ignore_client_bandwidth": false, "up_mbps": %s, "down_mbps": %s, "udp_timeout": "%s", "udp_fragment": true,
       "tls": {
         "enabled": true, "server_name": "%s", "alpn": ["h3"], "min_version": "1.3", 
@@ -748,16 +761,32 @@ create_config() {
       "masquerade": "https://%s"
     }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN" "$TLS_DOMAIN")
 
-    # 构造 Argo Inbound (动态适配内核能力)
-	local ARGO_IN=""
+    # 2. 构造 VLESS REALITY Inbound (新增黑科技：TCP 侧备用)
+    # 使用 Hy2 端口 + 1，借用微软域名实现 0 证书特征
+    local REALITY_IN=$(printf ',{
+      "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
+      "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
+      "tls": {
+        "enabled": true, "server_name": "www.microsoft.com",
+        "reality": {
+          "enabled": true, "handshake": { "server": "www.microsoft.com", "server_port": 443 },
+          "private_key": "%s", "short_id": ["%s"]
+        }
+      }
+    }' "$((PORT_HY2 + 1))" "$PSK" "$p_key" "$s_id")
+
+    # 3. 构造 Argo Inbound (黑科技：加入 Mux 多路复用)
+    local ARGO_IN=""
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
+        local MUX_JSON=', "multiplex": { "enabled": true, "padding": true }'
         if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
 		    # 外部模式：必须指定 listen 为 127.0.0.1，防止外部扫描到该端口
             ARGO_IN=$(printf ',{
               "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
               "transport": { "type": "httpupgrade", "host": "%s" }
-            }' "$PSK" "$A_DOMAIN")
+              %s
+            }' "$PSK" "$A_DOMAIN" "$MUX_JSON")
         else
 		    # 内建模式：内核自带 argo 驱动，不需要 listen 端口，它是主动连接 CF 的
             ARGO_IN=$(printf ',{
@@ -765,16 +794,17 @@ create_config() {
               "cloudflare": { "enabled": true, "tunnel": { "token": "%s" } },
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
               "transport": { "type": "httpupgrade", "host": "%s" }
-            }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN")
+              %s
+            }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN" "$MUX_JSON")
         fi
     fi
-    
+	
     # 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
   "dns": { "servers":[$dns_srv], "strategy":"$ds", "independent_cache":true, "disable_cache":false, "disable_expire":false },
-  "inbounds": [ $HY2_IN $ARGO_IN ],
+  "inbounds": [ $HY2_IN $REALITY_IN $ARGO_IN ],
   "outbounds": [ { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" } ]
 }
 EOF
