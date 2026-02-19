@@ -782,7 +782,7 @@ create_config() {
         p_key=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.private_key // empty' /etc/sing-box/config.json 2>/dev/null | head -n1)
         s_id=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.short_id[0] // empty' /etc/sing-box/config.json 2>/dev/null | head -n1)
     fi
-    [ -z "$p_key" ] && [ -f /etc/sing-box/certs/reality_priv.txt ] && p_key=$(cat /etc/sing-box/certs/reality_priv.txt)
+	[ -n "$p_key" ] && echo "$p_key" > /etc/sing-box/certs/reality_priv.txt && chmod 600 /etc/sing-box/certs/reality_priv.txt
     # 兜底生成 PSK
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
     [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
