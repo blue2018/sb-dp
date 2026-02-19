@@ -987,7 +987,7 @@ get_env_data() {
         RAW_REA_PBK=$(/usr/bin/sing-box generate reality-keypair -private-key $(cat /etc/sing-box/certs/reality_priv.txt) 2>/dev/null | awk '/Public key:/{print $3}')
     fi
     # 3. 提取 Argo 域名
-    RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // empty' "$CFG" 2>/dev/null)
+    RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // .server_name // empty' "$CFG" 2>/dev/null | head -n 1)
     # 4. 提取 Hy2 的 SNI 与指纹
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
     [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
