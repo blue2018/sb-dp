@@ -781,10 +781,10 @@ create_config() {
       "tls": {
         "enabled": true, "server_name": "%s",
         "reality": {
-          "enabled": true, "handshake": { "server": "%s", "server_port": 443 }, "private_key": "%s", "short_id": [""]
+          "enabled": true, "handshake": { "server": "%s", "server_port": 443 }, "private_key": "%s", "short_id": ["%s"]
         }
       }
-    }' "$PORT_REALITY" "$PSK" "www.ebay.com" "www.ebay.com" "$p_key")
+    }' "$PORT_REALITY" "$PSK" "www.ebay.com" "www.ebay.com" "$p_key" "${s_id:-a9aebdb4f9e42621}")
     INBOUNDS_JSON="$INBOUNDS_JSON, $REALITY_IN"
 
     # Argo Inbound (内建/外部双模式)
@@ -816,7 +816,7 @@ create_config() {
   "dns": { "servers":[$dns_srv], "strategy":"$ds", "independent_cache":true, "disable_cache":false, "disable_expire":false },
   "inbounds": [ $INBOUNDS_JSON ],
   "outbounds": [ 
-    { "type": "direct", "tag": "direct-out" }
+    { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }
   ]
 }
 EOF
