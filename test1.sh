@@ -114,6 +114,25 @@ prompt_for_port() {
     done
 }
 
+# 获取并校验 Reality 端口 (不能与 Hy2 相同)
+prompt_for_reality_port() {
+    local hy2_port="${1:-}" p
+    while :; do
+        read -r -p "请输入 VLESS+Reality 端口 [1025-65535] (回车随机生成): " p
+        if [ -z "$p" ]; then
+            p=$(printf "\n" | prompt_for_port | awk '{print $1}')
+        elif [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
+            :
+        else
+            echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字" >&2
+            continue
+        fi
+        [ -n "$hy2_port" ] && [ "$p" = "$hy2_port" ] && { echo -e "\033[1;33m[WARN]\033[0m Reality 端口不能与 Hy2 端口相同" >&2; continue; }
+        echo -e "\033[1;32m[INFO]\033[0m Reality 使用端口: $p" >&2
+        echo "$p"; return 0
+    done
+}
+
 # 创建 Argo 隧道
 setup_argo_logic() {
     local argo_d argo_t mem_total=$(probe_memory_total); : ${mem_total:=64}
@@ -775,6 +794,8 @@ create_config() {
         local reality_pool=("www.microsoft.com" "www.apple.com" "www.ebay.com" "www.cloudflare.com")
         REALITY_DEST=${reality_pool[$RANDOM % ${#reality_pool[@]}]}
     fi
+
+
     [ -z "$REALITY_PRIV" ] && [ -f /etc/sing-box/certs/reality_priv.txt ] && REALITY_PRIV=$(tr -d '[:space:]' < /etc/sing-box/certs/reality_priv.txt)
     if [ -z "$REALITY_PRIV" ]; then
         local kp=$(/usr/bin/sing-box generate reality-keypair 2>/dev/null)
@@ -1058,7 +1079,7 @@ RAW_REA_PORT='${RAW_REA_PORT:-}'; RAW_REA_SNI='${RAW_REA_SNI:-}'
 RAW_REA_SID='${RAW_REA_SID:-}'; RAW_REA_PBK='${RAW_REA_PBK:-}'
 EOF
     # 导出函数
-    local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port
+    local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port prompt_for_reality_port
         get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard
         optimize_system install_singbox create_config setup_service apply_firewall service_ctrl info err warn succ
         apply_userspace_adaptive_profile apply_nic_core_boost verify_config
