@@ -89,15 +89,16 @@ get_cpu_core() {
 
 # 获取并校验端口 (范围：1025-65535)
 prompt_for_port() {
-    local p rand
+    local prompt="${1:-请输入端口 [1025-65535] (回车随机生成): }" forbidden="${2:-}" p rand info_text="${3:-使用端口}"
     while :; do
-        read -r -p "请输入端口 [1025-65535] (回车随机生成): " p
+        read -r -p "$prompt" p
         if [ -z "$p" ]; then
             if command -v shuf >/dev/null 2>&1; then p=$(shuf -i 1025-65535 -n 1)
             elif [ -r /dev/urandom ] && command -v od >/dev/null 2>&1; then rand=$(od -An -N2 -tu2 /dev/urandom | tr -d ' '); p=$((1025 + rand % 64511))
             else p=$((1025 + RANDOM % 64511)); fi
         fi
         if [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
+            [ -n "$forbidden" ] && [ "$p" = "$forbidden" ] && { echo -e "\033[1;33m[WARN]\033[0m 端口 $p 与已选端口冲突，请更换或回车随机" >&2; p=""; continue; }
             local occupied=""
             if command -v ss >/dev/null 2>&1; then occupied=$(ss -tunlp | grep -w ":$p")
             elif command -v netstat >/dev/null 2>&1; then occupied=$(netstat -tunlp | grep -w ":$p")
@@ -107,7 +108,7 @@ prompt_for_port() {
                 echo -e "\033[1;33m[WARN]\033[0m 端口 $p 已被占用，请更换端口或直接回车重新生成" >&2
                 p=""; continue
             fi
-            echo -e "\033[1;32m[INFO]\033[0m 使用端口: $p" >&2
+            echo -e "\033[1;32m[INFO]\033[0m ${info_text}: $p" >&2
             echo "$p"; return 0
         else echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字" >&2; fi
     done
@@ -755,6 +756,8 @@ create_config() {
     [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
 
     # 端口和 PSK (密码) 确定逻辑
+    [ "$PORT_HY2" = "current" ] && PORT_HY2=""
+    [ "$PORT_REALITY" = "current" ] && PORT_REALITY=""
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.. | objects | select(.type == "hysteria2") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1)
         else PORT_HY2=$(printf "\n" | prompt_for_port | awk '{print $1}'); fi
@@ -781,12 +784,18 @@ create_config() {
       "masquerade": "https://%s"
     }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN" "$TLS_DOMAIN")
 
-    local REALITY_DEST="www.microsoft.com"
-    local REALITY_PRIV="" REALITY_SID=""
+    local REALITY_DEST="" REALITY_PRIV="" REALITY_SID=""
     [ -f /etc/sing-box/config.json ] && {
+        REALITY_DEST=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.server_name // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
         REALITY_PRIV=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.private_key // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
         REALITY_SID=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.short_id[0] // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     }
+    if [ -z "$REALITY_DEST" ]; then
+        local reality_pool=("www.microsoft.com" "www.apple.com" "www.ebay.com" "www.cloudflare.com")
+        REALITY_DEST=${reality_pool[$RANDOM % ${#reality_pool[@]}]}
+    fi
+
+
     [ -z "$REALITY_PRIV" ] && [ -f /etc/sing-box/certs/reality_priv.txt ] && REALITY_PRIV=$(tr -d '[:space:]' < /etc/sing-box/certs/reality_priv.txt)
     if [ -z "$REALITY_PRIV" ]; then
         local kp=$(/usr/bin/sing-box generate reality-keypair 2>/dev/null)
@@ -992,13 +1001,15 @@ display_links() {
 
     # 状态检测：单行流式判断，兼容双进程模式
     pgrep sing-box >/dev/null 2>&1 && { [ "${USE_EXTERNAL_ARGO:-false}" != "true" ] || pgrep cloudflared >/dev/null 2>&1; } && s_text="\033[1;33monline\033[0m" && s_icon="\033[1;32m[✔]\033[0m"
-    # 双重 nc 探测逻辑
-    _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 1 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
-    
+    # 轻量端口探测 (只等待本次子进程，避免被系统其他 nc 进程拖慢)
+    _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.2; nc -z -u -w 1 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
+
     if command -v nc >/dev/null 2>&1; then
-        _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 &
-        # 替代 wait：硬超时保险，防止 nc 进程在某些路由下挂起导致脚本不往走
-        local t=0; while [ $t -lt 10 ] && pgrep -f "nc -z -u" >/dev/null 2>&1; do sleep 0.3; t=$((t+1)); done
+        local p4="" p6=""
+        _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & p4=$!
+        _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 & p6=$!
+        [ -n "$p4" ] && wait "$p4" 2>/dev/null || true
+        [ -n "$p6" ] && wait "$p6" 2>/dev/null || true
         [[ "$(cat /tmp/sb_v4_res 2>/dev/null)" == "OK" || "$(cat /tmp/sb_v6_res 2>/dev/null)" == "OK" ]] && p_icon="\033[1;32m[✔]\033[0m"
     fi
 
@@ -1085,10 +1096,15 @@ if [[ "${1:-}" == "--detect-only" ]]; then :
 elif [[ "${1:-}" == "--show-only" ]]; then
     get_env_data; echo -e "\n\033[1;34m==========================================\033[0m"
     display_system_status; display_links
-elif [[ "${1:-}" == "--reset-port" ]]; then
+elif [[ "${1:-}" == "--reset-port-hy2" ]]; then
     f="/etc/sing-box/config.json"; cp "$f" "$f.bak"
-    create_config "$2"
-    if verify_config; then service_ctrl restart && succ "端口已重置并生效" && get_env_data && display_links && rm -f "$f.bak"
+    create_config "$2" "current"
+    if verify_config; then service_ctrl restart && succ "Hy2 端口已重置并生效" && get_env_data && display_links && rm -f "$f.bak"
+    else mv "$f.bak" "$f" && service_ctrl restart && err "已回滚至旧配置"; fi
+elif [[ "${1:-}" == "--reset-port-reality" ]]; then
+    f="/etc/sing-box/config.json"; cp "$f" "$f.bak"
+    create_config "current" "$2"
+    if verify_config; then service_ctrl restart && succ "Reality 端口已重置并生效" && get_env_data && display_links && rm -f "$f.bak"
     else mv "$f.bak" "$f" && service_ctrl restart && err "已回滚至旧配置"; fi
 elif [[ "${1:-}" == "--update-kernel" ]]; then
     if install_singbox "update"; then
@@ -1136,7 +1152,19 @@ while true; do
                else warn "检测到语法错误，正在尝试回滚..."; mv "$f.bak" "$f" && service_ctrl restart && info "配置已还原，请再次尝试修改"; fi
            else info "配置未作变更" && rm -f "$f.bak"; fi
            read -r -p $'\n按回车键返回菜单...' ;;
-        3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
+        3) while true; do
+               echo "--- 端口重置 ---"
+               echo "1. 重置 Hy2 端口"
+               echo "2. 重置 Reality 端口"
+               echo "0. 返回主菜单"
+               read -r -p "请选择 [0-2]: " rp
+               case "${rp:-}" in
+                   1) source "$SBOX_CORE" --reset-port-hy2 "$(prompt_for_port "请输入 Hy2 新端口 [1025-65535] (回车随机生成): " "" "使用端口")"; read -r -p $'\n按回车键返回菜单...' ; break ;;
+                   2) c_hy2=$(jq -r '.. | objects | select(.tag == "hy2-in") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1); source "$SBOX_CORE" --reset-port-reality "$(prompt_for_port "请输入 Reality 新端口 [1025-65535] (回车随机生成): " "$c_hy2" "Reality 使用端口")"; read -r -p $'\n按回车键返回菜单...' ; break ;;
+                   0) break ;;
+                   *) echo -e "\033[1;31m输入错误，请重新选择\033[0m" ;;
+               esac
+           done ;;
         4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
 		6) read -r -p "是否确定卸载？(默认N) [y/N]: " cf
@@ -1168,8 +1196,8 @@ detect_os
 install_dependencies
 CPU_CORE=$(get_cpu_core); export CPU_CORE
 get_network_info; echo -e "-----------------------------------------------"
-USER_PORT=$(prompt_for_port); echo -e "-----------------------------------------------"
-USER_REALITY_PORT=$(prompt_for_reality_port "$USER_PORT"); echo -e "-----------------------------------------------"
+USER_PORT=$(prompt_for_port "请输入 Hy2 端口 [1025-65535] (回车随机生成): " "" "使用端口"); echo -e "-----------------------------------------------"
+USER_REALITY_PORT=$(prompt_for_port "请输入 VLESS+Reality 端口 [1025-65535] (回车随机生成): " "$USER_PORT" "Reality 使用端口"); echo -e "-----------------------------------------------"
 setup_argo_logic; export ARGO_DOMAIN ARGO_TOKEN USE_EXTERNAL_ARGO; echo -e "-----------------------------------------------"
 optimize_system
 install_singbox "install"
