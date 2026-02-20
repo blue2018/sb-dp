@@ -446,30 +446,17 @@ verify_config() {
     fi
 }
 
-#防火墙开放端口
+# 防火墙开放端口
 apply_firewall() {
-    # 提取端口
-    local p_hy2=$(jq -r '.. | objects | select(.type == "hysteria2") | .listen_port' /etc/sing-box/config.json 2>/dev/null)
-    local p_rea=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .listen_port' /etc/sing-box/config.json 2>/dev/null)
-    [ -z "$p_hy2" ] && [ -z "$p_rea" ] && return 0
-    {   # 1. 放行 Hysteria2 (UDP)
-        if [ -n "$p_hy2" ]; then
-            if command -v ufw >/dev/null 2>&1; then ufw allow "$p_hy2"/udp >/dev/null 2>&1
-            elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$p_hy2"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
-            elif command -v iptables >/dev/null 2>&1; then
-                iptables -I INPUT -p udp --dport "$p_hy2" -j ACCEPT >/dev/null 2>&1
-                command -v ip6tables >/dev/null 2>&1 && ip6tables -I INPUT -p udp --dport "$p_hy2" -j ACCEPT >/dev/null 2>&1
-            fi
-        fi
-        # 2. 放行 Reality (TCP)
-        if [ -n "$p_rea" ]; then
-            if command -v ufw >/dev/null 2>&1; then ufw allow "$p_rea"/tcp >/dev/null 2>&1
-            elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$p_rea"/tcp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
-            elif command -v iptables >/dev/null 2>&1; then
-                iptables -I INPUT -p tcp --dport "$p_rea" -j ACCEPT >/dev/null 2>&1
-                command -v ip6tables >/dev/null 2>&1 && ip6tables -I INPUT -p tcp --dport "$p_rea" -j ACCEPT >/dev/null 2>&1
-            fi
-        fi    } || true
+    local p_hy2=$(jq -r '..|objects|select(.tag=="hy2-in")|.listen_port//empty' /etc/sing-box/config.json 2>/dev/null)
+    local p_rea=$(jq -r '..|objects|select(.tag=="vless-reality-in")|.listen_port//empty' /etc/sing-box/config.json 2>/dev/null)
+    _add_rule() { [ -n "$1" ] && iptables -I INPUT -p "$2" --dport "$1" -j ACCEPT 2>/dev/null; }
+    _add_rule "$p_hy2" "udp"
+    _add_rule "$p_rea" "tcp"
+    command -v ip6tables >/dev/null 2>&1 && {
+        [ -n "$p_hy2" ] && ip6tables -I INPUT -p udp --dport "$p_hy2" -j ACCEPT 2>/dev/null
+        [ -n "$p_rea" ] && ip6tables -I INPUT -p tcp --dport "$p_rea" -j ACCEPT 2>/dev/null
+    } || true
 }
 	
 # "全功能调度器"
