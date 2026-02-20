@@ -499,7 +499,7 @@ optimize_system() {
         SBOX_OPTIMIZE_LEVEL="256M 增强版"
     elif [ "$mem_total" -ge 100 ]; then
         VAR_HY2_BW="200"; max_udp_mb=$((mem_total * 50 / 100))
-        SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="80"
+        SBOX_GOLIMIT="$((mem_total * 70 / 100))MiB"; SBOX_GOGC="70"
         SBOX_MEM_HIGH="$((mem_total * 80 / 100))M"; SBOX_MEM_MAX="$((mem_total * 90 / 100))M"
         VAR_SYSTEMD_NICE="-8"; VAR_SYSTEMD_IOSCHED="best-effort"; tcp_rmem_max=4194304
         swappiness_val=10; busy_poll_val=0; ct_max=16384; ct_stream_to=30
