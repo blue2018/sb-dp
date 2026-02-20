@@ -758,24 +758,29 @@ create_config() {
       "masquerade": "https://%s"
     }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN" "$TLS_DOMAIN")
 
-    # 构造 Argo Inbound (动态适配内核能力)
-	local ARGO_IN=""
+   # 2. 构造 Argo Inbound (注入 Multiplex 核心黑科技)
+    local ARGO_IN=""
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
+        # 核心修改：在 inbound 中显式加入 multiplex 支持
+        local MUX_ST=' "multiplex": { "enabled": true, "padding": true } '
+        
         if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
-		    # 外部模式：必须指定 listen 为 127.0.0.1，防止外部扫描到该端口
+            # 外部模式
             ARGO_IN=$(printf ',{
               "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
-              "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "%s" }
-            }' "$PSK" "$A_DOMAIN")
+              "users": [ { "uuid": "%s" } ], "tls": { "enabled": false },
+              "transport": { "type": "httpupgrade", "host": "%s" },
+              %s
+            }' "$PSK" "$A_DOMAIN" "$MUX_ST")
         else
-		    # 内建模式：内核自带 argo 驱动，不需要 listen 端口，它是主动连接 CF 的
+            # 内建模式
             ARGO_IN=$(printf ',{
               "type": "vless", "tag": "vless-argo-in", "server_name": "%s",
               "cloudflare": { "enabled": true, "tunnel": { "token": "%s" } },
-              "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "%s" }
-            }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN")
+              "users": [ { "uuid": "%s" } ], "tls": { "enabled": false },
+              "transport": { "type": "httpupgrade", "host": "%s" },
+              %s
+            }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN" "$MUX_ST")
         fi
     fi
     
