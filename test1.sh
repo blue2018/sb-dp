@@ -762,7 +762,7 @@ create_config() {
     local ARGO_IN=""
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
         # 核心修改：在 inbound 中显式加入 multiplex 支持
-        local MUX_ST=' "multiplex": { "enabled": true, "padding": true } '
+        local MUX_ST=' "multiplex": { "enabled": true, "padding": false } '
         
         if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
             # 外部模式
