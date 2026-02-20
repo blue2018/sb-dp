@@ -113,6 +113,25 @@ prompt_for_port() {
     done
 }
 
+# 获取并校验 Reality 端口 (不能与 Hy2 相同)
+prompt_for_reality_port() {
+    local hy2_port="${1:-}" p
+    while :; do
+        read -r -p "请输入 VLESS+Reality 端口 [1025-65535] (回车随机生成): " p
+        if [ -z "$p" ]; then
+            p=$(printf "\n" | prompt_for_port | awk '{print $1}')
+        elif [[ "$p" =~ ^[0-9]+$ ]] && [ "$p" -ge 1025 ] && [ "$p" -le 65535 ]; then
+            :
+        else
+            echo -e "\033[1;31m[错误]\033[0m 端口无效，请输入1025-65535之间的数字" >&2
+            continue
+        fi
+        [ -n "$hy2_port" ] && [ "$p" = "$hy2_port" ] && { echo -e "\033[1;33m[WARN]\033[0m Reality 端口不能与 Hy2 端口相同" >&2; continue; }
+        echo -e "\033[1;32m[INFO]\033[0m Reality 使用端口: $p" >&2
+        echo "$p"; return 0
+    done
+}
+
 # 创建 Argo 隧道
 setup_argo_logic() {
     local argo_d argo_t mem_total=$(probe_memory_total); : ${mem_total:=64}
@@ -448,13 +467,22 @@ verify_config() {
 
 #防火墙开放端口
 apply_firewall() {
-    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    [ -z "$port" ] && return 0
-    {   if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
-        elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --list-ports | grep -q "$port/udp" || { firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --reload; } >/dev/null 2>&1
+    local p_hy2=$(jq -r '.. | objects | select(.tag == "hy2-in") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    local p_rea=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$p_hy2" ] && [ -z "$p_rea" ] && return 0
+    {   if command -v ufw >/dev/null 2>&1; then
+            [ -n "$p_hy2" ] && ufw allow "$p_hy2"/udp >/dev/null 2>&1
+            [ -n "$p_rea" ] && ufw allow "$p_rea"/tcp >/dev/null 2>&1
+        elif command -v firewall-cmd >/dev/null 2>&1; then
+            [ -n "$p_hy2" ] && { firewall-cmd --list-ports | grep -q "$p_hy2/udp" || { firewall-cmd --add-port="$p_hy2"/udp --permanent; firewall-cmd --reload; }; } >/dev/null 2>&1
+            [ -n "$p_rea" ] && { firewall-cmd --list-ports | grep -q "$p_rea/tcp" || { firewall-cmd --add-port="$p_rea"/tcp --permanent; firewall-cmd --reload; }; } >/dev/null 2>&1
         elif command -v iptables >/dev/null 2>&1; then
-            iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
-            command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
+            [ -n "$p_hy2" ] && { iptables -D INPUT -p udp --dport "$p_hy2" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p udp --dport "$p_hy2" -j ACCEPT >/dev/null 2>&1; }
+            [ -n "$p_rea" ] && { iptables -D INPUT -p tcp --dport "$p_rea" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p tcp --dport "$p_rea" -j ACCEPT >/dev/null 2>&1; }
+            command -v ip6tables >/dev/null 2>&1 && {
+                [ -n "$p_hy2" ] && { ip6tables -D INPUT -p udp --dport "$p_hy2" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p udp --dport "$p_hy2" -j ACCEPT >/dev/null 2>&1; }
+                [ -n "$p_rea" ] && { ip6tables -D INPUT -p tcp --dport "$p_rea" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p tcp --dport "$p_rea" -j ACCEPT >/dev/null 2>&1; }
+            }
         fi    } || true
 }
 	
@@ -717,8 +745,8 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local PORT_HY2="${1:-}"; local A_DOMAIN="${ARGO_DOMAIN:-}"; local A_TOKEN="${ARGO_TOKEN:-}"; local cur_bw="${VAR_HY2_BW:-200}"
-    mkdir -p /etc/sing-box
+    local PORT_HY2="${1:-}"; local PORT_REALITY="${2:-}"; local A_DOMAIN="${ARGO_DOMAIN:-}"; local A_TOKEN="${ARGO_TOKEN:-}"; local cur_bw="${VAR_HY2_BW:-200}"
+    mkdir -p /etc/sing-box /etc/sing-box/certs
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
@@ -730,6 +758,10 @@ create_config() {
     if [ -z "$PORT_HY2" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.. | objects | select(.type == "hysteria2") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1)
         else PORT_HY2=$(printf "\n" | prompt_for_port | awk '{print $1}'); fi
+    fi
+    if [ -z "$PORT_REALITY" ]; then
+        if [ -f /etc/sing-box/config.json ]; then PORT_REALITY=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+        else PORT_REALITY=$((PORT_HY2 + 3)); fi
     fi
     [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
     [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
@@ -748,6 +780,31 @@ create_config() {
       },
       "masquerade": "https://%s"
     }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN" "$TLS_DOMAIN")
+
+    local REALITY_DEST="www.microsoft.com"
+    local REALITY_PRIV="" REALITY_SID=""
+    [ -f /etc/sing-box/config.json ] && {
+        REALITY_PRIV=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.private_key // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+        REALITY_SID=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .tls.reality.short_id[0] // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    }
+    [ -z "$REALITY_PRIV" ] && [ -f /etc/sing-box/certs/reality_priv.txt ] && REALITY_PRIV=$(tr -d '[:space:]' < /etc/sing-box/certs/reality_priv.txt)
+    if [ -z "$REALITY_PRIV" ]; then
+        local kp=$(/usr/bin/sing-box generate reality-keypair 2>/dev/null)
+        REALITY_PRIV=$(echo "$kp" | awk '/Priv/{print $NF}')
+        echo "$(echo "$kp" | awk '/Pub/{print $NF}')" > /etc/sing-box/certs/reality_pub.txt
+    fi
+    [ -z "$REALITY_SID" ] && REALITY_SID=$(openssl rand -hex 8)
+    [ -n "$REALITY_PRIV" ] && { echo "$REALITY_PRIV" > /etc/sing-box/certs/reality_priv.txt; chmod 600 /etc/sing-box/certs/reality_priv.txt; }
+    local REALITY_IN=$(printf ',{
+      "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
+      "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
+      "tls": {
+        "enabled": true, "server_name": "%s", "alpn": ["h2", "http/1.1"],
+        "reality": {
+          "enabled": true, "handshake": { "server": "%s", "server_port": 443 }, "private_key": "%s", "short_id": ["%s"]
+        }
+      }
+    }' "$PORT_REALITY" "$PSK" "$REALITY_DEST" "$REALITY_DEST" "$REALITY_PRIV" "$REALITY_SID")
 
     # 构造 Argo Inbound (动态适配内核能力)
 	local ARGO_IN=""
@@ -775,7 +832,7 @@ create_config() {
 {
   "log": { "level": "fatal", "timestamp": true },
   "dns": { "servers":[$dns_srv], "strategy":"$ds", "independent_cache":true, "disable_cache":false, "disable_expire":false },
-  "inbounds": [ $HY2_IN $ARGO_IN ],
+  "inbounds": [ $HY2_IN $REALITY_IN $ARGO_IN ],
   "outbounds": [ { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" } ]
 }
 EOF
@@ -906,6 +963,12 @@ get_env_data() {
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$d"
     # 提取 Argo 域名 (通过 transport.host 确保兼容单/双进程模式)
     RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // empty' "$CFG" 2>/dev/null)
+    local rd=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | "\(.listen_port) \(.tls.server_name) \(.tls.reality.short_id[0])"' "$CFG" 2>/dev/null | head -n 1)
+    read -r RAW_REA_PORT RAW_REA_SNI RAW_REA_SID <<< "$rd"
+    RAW_REA_PBK=$([ -f "/etc/sing-box/certs/reality_pub.txt" ] && tr -d '[:space:]' < /etc/sing-box/certs/reality_pub.txt)
+    if [ -z "$RAW_REA_PBK" ] && [ -f "/etc/sing-box/certs/reality_priv.txt" ]; then
+        RAW_REA_PBK=$(/usr/bin/sing-box generate reality-keypair -private-key "$(tr -d '[:space:]' < /etc/sing-box/certs/reality_priv.txt)" 2>/dev/null | awk '/Pub/{print $NF}')
+    fi
     # 提取 SNI 与 指纹
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
     [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
@@ -919,7 +982,7 @@ get_env_data() {
 }
 
 display_links() {
-    local LINK_V4="" LINK_V6="" LINK_ARGO="" FULL_CLIP="" hostname_tag="$(hostname)"
+    local LINK_V4="" LINK_V6="" LINK_REA="" LINK_ARGO="" FULL_CLIP="" hostname_tag="$(hostname)"
     # 精准提取：解决多 inbound 下端口拼接导致的卡死问题
     local RAW_PORT=$(grep -oE '"listen_port":[[:space:]]*[0-9]+' /etc/sing-box/config.json | head -n 1 | grep -oE '[0-9]+')
     local RAW_PSK=$(grep -oE '"password":[[:space:]]*"[^"]+"' /etc/sing-box/config.json | head -n 1 | cut -d'"' -f4)
@@ -943,6 +1006,11 @@ display_links() {
     # 链接生成：紧凑排列
     [ -n "${RAW_IP4:-}" ] && LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v4" && echo -e "\n\033[1;35m[IPv4 节点]\033[0m\n$LINK_V4" && FULL_CLIP="$LINK_V4"
     [[ "${RAW_IP6:-}" == *:* ]] && LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v6" && echo -e "\n\033[1;36m[IPv6 节点]\033[0m\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
+    if [ -n "$RAW_REA_PORT" ] && [ -n "$RAW_REA_PBK" ] && [ -n "${RAW_IP4:-}" ]; then
+        LINK_REA="vless://$RAW_PSK@$RAW_IP4:$RAW_REA_PORT?security=reality&sni=$RAW_REA_SNI&fp=chrome&pbk=$RAW_REA_PBK&sid=$RAW_REA_SID&type=tcp&flow=xtls-rprx-vision#${hostname_tag}_Reality"
+        echo -e "\n\033[1;32m[VLESS Reality]\033[0m\n$LINK_REA"
+        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_REA"
+    fi
     [ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ] && LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo" && echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
 
     echo -e "\n\033[1;34m==========================================\033[0m"
@@ -996,9 +1064,11 @@ RAW_SNI='${RAW_SNI:-$TLS_DOMAIN}'; RAW_ECH='${RAW_ECH:-}'
 RAW_IP4='${RAW_IP4:-}'; RAW_IP6='${RAW_IP6:-}'; IS_V6_OK='${IS_V6_OK:-false}'
 ARGO_DOMAIN='${ARGO_DOMAIN:-}'; ARGO_TOKEN='${ARGO_TOKEN:-}'
 USE_EXTERNAL_ARGO='${USE_EXTERNAL_ARGO:-false}'
+RAW_REA_PORT='${RAW_REA_PORT:-}'; RAW_REA_SNI='${RAW_REA_SNI:-}'
+RAW_REA_SID='${RAW_REA_SID:-}'; RAW_REA_PBK='${RAW_REA_PBK:-}'
 EOF
     # 导出函数
-    local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port
+    local funcs=(probe_network_rtt probe_memory_total apply_initcwnd_optimization prompt_for_port prompt_for_reality_port
         get_cpu_core get_env_data display_links display_system_status detect_os copy_to_clipboard
         optimize_system install_singbox create_config setup_service apply_firewall service_ctrl info err warn succ
         apply_userspace_adaptive_profile apply_nic_core_boost verify_config
@@ -1099,11 +1169,12 @@ install_dependencies
 CPU_CORE=$(get_cpu_core); export CPU_CORE
 get_network_info; echo -e "-----------------------------------------------"
 USER_PORT=$(prompt_for_port); echo -e "-----------------------------------------------"
+USER_REALITY_PORT=$(prompt_for_reality_port "$USER_PORT"); echo -e "-----------------------------------------------"
 setup_argo_logic; export ARGO_DOMAIN ARGO_TOKEN USE_EXTERNAL_ARGO; echo -e "-----------------------------------------------"
 optimize_system
 install_singbox "install"
 generate_cert
-create_config "$USER_PORT"
+create_config "$USER_PORT" "$USER_REALITY_PORT"
 verify_config || exit 1
 get_env_data
 create_sb_tool
