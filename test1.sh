@@ -780,14 +780,14 @@ create_config() {
     # Reality Inbound
     #local cc=$(curl -sL --max-time 3 "http://ip-api.com/line?fields=countryCode" | tr '[:upper:]' '[:lower:]' | head -n 1)
     #local REALITY_DEST="www.google.${cc:-com}"
-	local REALITY_DEST="www.ebay.com"
+	#local REALITY_DEST="www.ebay.com"
     local REALITY_IN=$(printf '{  
       "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
       "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
       "tls": {
-        "enabled": true, "server_name": "%s",
+        "enabled": true, "server_name": "www.ebay.com",
         "reality": {
-          "enabled": true, "handshake": { "server": "%s", "server_port": 443 }, "private_key": "%s", "short_id": ["%s"]
+          "enabled": true, "handshake": { "server": "www.ebay.com", "server_port": 443 }, "private_key": "%s", "short_id": ["%s"]
         }
       }
     }' "$PORT_REALITY" "$PSK" "$REALITY_DEST" "$REALITY_DEST" "$p_key" "${s_id:-a9aebdb4f9e42621}")
