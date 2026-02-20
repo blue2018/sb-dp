@@ -773,7 +773,7 @@ create_config() {
     INBOUNDS_JSON="$HY2_IN"
 
     # Reality Inbound
-    local DOMAINS=("www.microsoft.com" "www.apple.com" "www.ebay.com" "www.icloud.com" "www.lovelive-anime.jp" "www.nvidia.com" "www.amd.com")
+    local DOMAINS=("www.microsoft.com" "www.apple.com" "www.ebay.com" "www.icloud.com" "www.paypal.com" "www.nvidia.com" "www.amd.com")
 	local REALITY_DEST=${DOMAINS[$RANDOM % ${#DOMAINS[@]}]}
     local REALITY_IN=$(printf '{
       "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
