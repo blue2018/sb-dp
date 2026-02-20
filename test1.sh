@@ -785,12 +785,12 @@ create_config() {
       "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
       "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
       "tls": {
-        "enabled": true, "server_name": "www.ebay.com",
+        "enabled": true, "server_name": "%s",
         "reality": {
-          "enabled": true, "handshake": { "server": "www.ebay.com", "server_port": 443 }, "private_key": "%s", "short_id": ["%s"]
+          "enabled": true, "handshake": { "server": "%s", "server_port": 443 }, "private_key": "%s", "short_id": ["%s"]
         }
       }
-    }' "$PORT_REALITY" "$PSK" "$REALITY_DEST" "$REALITY_DEST" "$p_key" "${s_id:-a9aebdb4f9e42621}")
+    }' "$PORT_REALITY" "$PSK" "www.ebay.com" "www.ebay.com" "$p_key" "${s_id:-a9aebdb4f9e42621}")
     INBOUNDS_JSON="$INBOUNDS_JSON, $REALITY_IN"
 
     # Argo Inbound (维持内建/外部双模式)
