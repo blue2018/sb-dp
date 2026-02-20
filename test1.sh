@@ -1008,7 +1008,7 @@ display_links() {
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
     fi
     echo -e "\n\033[1;34m==========================================\033[0m"
-    echo -e "\033[1;32m[安全增强]\033[0m 已启用 VLESS+Reality + Hysteria2 双栈协议"
+    echo -e "\033[1;32m[安全增强]\033[0m 已启用 Hysteria2 + VLESS+Reality 双栈协议"
     [ -n "$RAW_ARGO_DOMAIN" ] && echo -e "\033[1;32m[隧道增强]\033[0m Argo 隧道已开启"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
