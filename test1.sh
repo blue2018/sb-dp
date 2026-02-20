@@ -568,16 +568,18 @@ optimize_system() {
     info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
 	
     # 阶段三： BBR 探测与调度器锁定 (动态适配小鸡环境)
-    local tcp_cca="cubic"; local qdisc_algo="fq_codel" 
+    local tcp_cca="cubic"; local qdisc_algo="fq_codel"
+    local tcp_ecn_val="0" tcp_limit_output_bytes="524288"
     modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
     local avail=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "cubic")
     if [ ! -w "/proc/sys/net/ipv4/tcp_congestion_control" ]; then
         tcp_cca=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "cubic")
         warn "内核参数已锁定，维持系统默认算法: $tcp_cca"
-    elif [[ "$avail" =~ "bbr3" ]]; then tcp_cca="bbr3"; qdisc_algo="fq"; succ "检测到 BBRv3，激活极致响应模式"
-    elif [[ "$avail" =~ "bbr2" ]]; then tcp_cca="bbr2"; qdisc_algo="fq"; succ "检测到 BBRv2，激活平衡加速模式"
-    elif [[ "$avail" =~ "bbr" ]]; then tcp_cca="bbr"; qdisc_algo="fq"; info "检测到 BBRv1，激活标准加速模式"
+    elif [[ "$avail" =~ "bbr3" ]]; then tcp_cca="bbr3"; qdisc_algo="fq"; tcp_ecn_val="2"; tcp_limit_output_bytes="1048576"; succ "检测到 BBRv3，激活极致响应模式"
+    elif [[ "$avail" =~ "bbr2" ]]; then tcp_cca="bbr2"; qdisc_algo="fq"; tcp_ecn_val="0"; tcp_limit_output_bytes="1048576"; succ "检测到 BBRv2，激活平衡加速模式"
+    elif [[ "$avail" =~ "bbr" ]]; then tcp_cca="bbr"; qdisc_algo="fq"; tcp_ecn_val="0"; tcp_limit_output_bytes="1048576"; info "检测到 BBRv1，激活标准加速模式"
     else qdisc_algo="fq_codel"; warn "内核不支持 BBR，切换至高兼容 fq_codel 流量整形模式"; fi
+    [ "$rtt_avg" -ge 180 ] && [ "$tcp_limit_output_bytes" -lt 1048576 ] && tcp_limit_output_bytes="1048576"
     [ -w "/proc/sys/net/core/default_qdisc" ] && sysctl -w net.core.default_qdisc=$qdisc_algo >/dev/null 2>&1
     info "网络调度器已切换为: $qdisc_algo"
 	
@@ -625,7 +627,7 @@ net.ipv4.tcp_wmem = 4096 65536 $tcp_rmem_max   # TCP 写缓存动态范围
 
 # --- 协议栈深度调优 (Hy2 传输核心) ---
 net.ipv4.tcp_congestion_control = $tcp_cca # 拥塞算法 (BBR/Cubic)
-net.ipv4.tcp_ecn = 1                       # 开启显式拥塞通知
+net.ipv4.tcp_ecn = $tcp_ecn_val            # ECN 策略：BBRv3=2，其它默认关闭提升兼容性
 net.ipv4.tcp_ecn_fallback = 1              # ECN 不兼容时自动回退
 net.ipv4.tcp_no_metrics_save = 1           # 实时探测不记忆旧值
 net.ipv4.tcp_fastopen = 3                  # 开启 TCP 快开 (降首包延迟)
@@ -634,11 +636,11 @@ net.ipv4.tcp_mtu_probing = 1               # MTU自动探测 (防UDP黑洞)
 net.ipv4.ip_no_pmtu_disc = 0               # 启用路径MTU探测 (寻找最优包大小)
 net.ipv4.tcp_frto = 2                      # 丢包环境重传判断优化
 net.ipv4.tcp_slow_start_after_idle = 0     # 闲置后慢启动开关
-net.ipv4.tcp_limit_output_bytes = $([ "$mem_total" -ge 200 ] && echo "262144" || echo "131072") # 限制TCP连接占用发送队列
+net.ipv4.tcp_limit_output_bytes = $tcp_limit_output_bytes # 适当放宽发送队列，避免高RTT吞吐被压制
 net.ipv4.udp_gro_enabled = 1               # UDP 分段聚合 (降CPU负载)
 net.ipv4.udp_early_demux = 1               # UDP 早期路由优化
 net.ipv4.udp_l4_early_demux = 1            # UDP 四层早期分流
-$(if [[ "$tcp_cca" == "bbr3" ]]; then echo "net.ipv4.tcp_ecn = 2"; echo "net.ipv4.tcp_reflect_tos = 1"; fi)
+$(if [[ "$tcp_cca" == "bbr3" ]]; then echo "net.ipv4.tcp_reflect_tos = 1"; fi)
 
 # === 四、 连接跟踪与超时管理 (及低内存保护) ===
 net.netfilter.nf_conntrack_max = $ct_max   # 连接跟踪上限
@@ -773,8 +775,8 @@ create_config() {
     INBOUNDS_JSON="$HY2_IN"
 
     # Reality Inbound
-    local DOMAINS=("www.microsoft.com" "www.apple.com" "www.ebay.com" "www.icloud.com" "www.lovelive-anime.jp" "www.nvidia.com" "www.amd.com")
-	local REALITY_DEST=${DOMAINS[$RANDOM % ${#DOMAINS[@]}]}
+    # Reality 伪装目标优先稳定大站，降低随机命中低质量握手目标的概率
+    local REALITY_DEST="www.microsoft.com"
     local REALITY_IN=$(printf '{
       "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
       "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
@@ -997,7 +999,7 @@ display_links() {
     [[ "${RAW_IP6:-}" == *:* ]] && LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${HY2_PARAM}#${hostname_tag}_Hy2_v6" && echo -e "\n\033[1;36m[IPv6 Hy2]\033[0m\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
     # 2. VLESS Reality 节点
     if [ -n "$RAW_REA_PORT" ]; then
-        LINK_REA="vless://$RAW_PSK@$RAW_IP4:$RAW_REA_PORT?security=reality&sni=$RAW_REA_SNI&fp=chrome&pbk=$RAW_REA_PBK&sid=$RAW_REA_SID&type=tcp&flow=xtls-rprx-vision#${hostname_tag}_Reality"
+        LINK_REA="vless://$RAW_PSK@$RAW_IP4:$RAW_REA_PORT?security=reality&sni=$RAW_REA_SNI&fp=chrome&pbk=$RAW_REA_PBK&sid=$RAW_REA_SID&type=tcp&flow=xtls-rprx-vision&encryption=none#${hostname_tag}_Reality"
         echo -e "\n\033[1;32m[VLESS Reality]\033[0m\n$LINK_REA"
         FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_REA"
     fi
