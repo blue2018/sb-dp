@@ -778,9 +778,10 @@ create_config() {
     INBOUNDS_JSON="$HY2_IN"
 
     # Reality Inbound
-    local cc=$(curl -sL --max-time 3 "http://ip-api.com/line?fields=countryCode" | tr '[:upper:]' '[:lower:]' | head -n 1)
-    local REALITY_DEST="www.google.${cc:-com}"
-    local REALITY_IN=$(printf '{
+    #local cc=$(curl -sL --max-time 3 "http://ip-api.com/line?fields=countryCode" | tr '[:upper:]' '[:lower:]' | head -n 1)
+    #local REALITY_DEST="www.google.${cc:-com}"
+	local REALITY_DEST="www.ebay.com"
+    local REALITY_IN=$(printf '{  
       "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
       "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
       "tls": {
