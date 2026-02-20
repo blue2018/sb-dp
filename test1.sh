@@ -8,7 +8,7 @@ SBOX_ARCH="";            OS_DISPLAY="";          SBOX_CORE="/etc/sing-box/core_s
 SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测"; ARGO_TOKEN=""
 SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM="";      USER_PORT=""
 VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_ECH=""; USE_EXTERNAL_ARGO="false"
-VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""; ARGO_QUICK_MODE="false"
+VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
 TLS_DOMAIN_POOL=("www.bing.com" "www.microsoft.com" "itunes.apple.com" "www.icloud.com" "www.ebay.com" "www.paypal.com")
 pick_tls_domain() { echo "${TLS_DOMAIN_POOL[$RANDOM % ${#TLS_DOMAIN_POOL[@]}]}"; }
@@ -118,26 +118,22 @@ setup_argo_logic() {
     local argo_d argo_t mem_total=$(probe_memory_total); : ${mem_total:=64}
     echo -e "\033[1;32m[可选配置]\033[0m\nVLESS + HttpUpgrade + Argo: CF隧道转发\n-----------------------------------------------" >&2
     echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车跳过可选配置): " >&2; read -r argo_d
-    if [ -z "$argo_d" ]; then ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"; ARGO_QUICK_MODE="false"; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2
+    if [ -z "$argo_d" ]; then ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2
     elif [ "$mem_total" -lt 150 ] && ! /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
-        ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"; ARGO_QUICK_MODE="false"
+        ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"
         echo -e "\033[1;33m[跳过]\033[0m 内存不足 200M 且内核不支持内建 Argo，为保系统稳定已自动跳过" >&2
     else
         while :; do
-            echo -ne "请输入 Argo 隧道的 Token (留空启用 Quick Tunnel): " >&2; read -r argo_t
-            ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"; ARGO_QUICK_MODE="false"
-            if /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare" && [ -n "$argo_t" ]; then
-                USE_EXTERNAL_ARGO="false"
-                echo -e "\033[1;32m[INFO]\033[0m 检测到内核支持内建 Argo，开启单进程模式" >&2
+            echo -ne "请输入 Argo 隧道的 Token: " >&2; read -r argo_t
+            if [ -z "$argo_t" ]; then echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2; continue; fi
+            ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"
+            if /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
+                USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 检测到内核支持内建 Argo，开启单进程模式" >&2
+            elif [ -f "/usr/local/bin/cloudflared" ]; then
+                USE_EXTERNAL_ARGO="true"; echo -e "\033[1;33m[INFO]\033[0m 已存在外部客户端，跳过下载" >&2
             else
-                [ -z "$argo_t" ] && { ARGO_QUICK_MODE="true"; echo -e "\033[1;33m[INFO]\033[0m 已启用 Quick Tunnel（自动分配 trycloudflare 域名）" >&2; }
                 USE_EXTERNAL_ARGO="true"; echo -ne "\033[1;32m[INFO]\033[0m 下载官方 cloudflared... " >&2
-                if [ -f "/usr/local/bin/cloudflared" ]; then
-                    echo -e "\033[1;33m[已存在]\033[0m" >&2
-                else
-                    local cf_arch="amd64"; case "$(uname -m)" in x86_64) cf_arch="amd64" ;; aarch64) cf_arch="arm64" ;; armv7l) cf_arch="arm" ;; i386|i686) cf_arch="386" ;; esac
-                    wget -qO /usr/local/bin/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}" && chmod +x /usr/local/bin/cloudflared && echo -e "\033[1;32m[完成]\033[0m" >&2 || { echo -e "\033[1;31m[失败]\033[0m" >&2; exit 1; }
-                fi
+                wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x /usr/local/bin/cloudflared && echo -e "\033[1;32m[完成]\033[0m" >&2 || { echo -e "\033[1;31m[失败]\033[0m" >&2; exit 1; }
             fi; break
         done
     fi
@@ -755,22 +751,14 @@ create_config() {
 
     # 构造 Argo Inbound (动态适配内核能力)
 	local ARGO_IN=""
-    if [ -n "$A_DOMAIN" ] && { [ -n "$A_TOKEN" ] || [ "${ARGO_QUICK_MODE:-false}" = "true" ]; }; then
+    if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
         if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
 		    # 外部模式：必须指定 listen 为 127.0.0.1，防止外部扫描到该端口
-            if [ "${ARGO_QUICK_MODE:-false}" = "true" ]; then
-                ARGO_IN=$(printf ',{
-              "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
-              "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade" }
-            }' "$PSK")
-            else
-                ARGO_IN=$(printf ',{
+            ARGO_IN=$(printf ',{
               "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
               "transport": { "type": "httpupgrade", "host": "%s" }
             }' "$PSK" "$A_DOMAIN")
-            fi
         else
 		    # 内建模式：内核自带 argo 驱动，不需要 listen 端口，它是主动连接 CF 的
             ARGO_IN=$(printf ',{
@@ -894,20 +882,6 @@ EOF
     if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
         pkill -9 cloudflared >/dev/null 2>&1
         GOGC=30 nohup /usr/local/bin/cloudflared tunnel --protocol http2 --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
-    elif [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ "${ARGO_QUICK_MODE:-false}" = "true" ]; then
-        pkill -9 cloudflared >/dev/null 2>&1
-        local qlog="/tmp/cloudflared-quick.log"
-        : > "$qlog"
-        nohup /usr/local/bin/cloudflared tunnel --url http://127.0.0.1:8001 --no-autoupdate >"$qlog" 2>&1 &
-        for _ in {1..40}; do
-            local qdomain=$(sed -n 's#.*https://\([^ ]*\.trycloudflare\.com\).*#\1#p' "$qlog" | head -n 1)
-            if [ -n "$qdomain" ]; then
-                ARGO_DOMAIN="$qdomain"
-                echo "$qdomain" > /etc/sing-box/argo_domain.txt
-                break
-            fi
-            sleep 0.5
-        done
     fi
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
@@ -932,7 +906,6 @@ get_env_data() {
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$d"
     # 提取 Argo 域名 (通过 transport.host 确保兼容单/双进程模式)
     RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // empty' "$CFG" 2>/dev/null)
-    [ -z "$RAW_ARGO_DOMAIN" ] && [ -f /etc/sing-box/argo_domain.txt ] && RAW_ARGO_DOMAIN=$(sed -n '1p' /etc/sing-box/argo_domain.txt)
     # 提取 SNI 与 指纹
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
     [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
