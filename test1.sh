@@ -446,21 +446,30 @@ verify_config() {
     fi
 }
 
-# 防火墙开放端口
+#防火墙开放端口
 apply_firewall() {
-    # 1. 提取端口并执行规则 (Hy2 使用 UDP, Reality 使用 TCP)
-    local p_hy2=$(jq -r '..|objects|select(.tag=="hy2-in")|.listen_port//empty' /etc/sing-box/config.json 2>/dev/null)
-    local p_rea=$(jq -r '..|objects|select(.tag=="vless-reality-in")|.listen_port//empty' /etc/sing-box/config.json 2>/dev/null)
-    # 2. 核心写入规则 (封装为单行以节省空间)
-    _add_rule() { [ -n "$1" ] && iptables -I INPUT -p "$2" --dport "$1" -j ACCEPT 2>/dev/null; }
-    # 3. 执行放行 (即便 Permission denied 也会静默继续)
-    _add_rule "$p_hy2" "udp"
-    _add_rule "$p_rea" "tcp"
-    # 4. 如果系统支持 IPv6 则同步操作
-    command -v ip6tables >/dev/null 2>&1 && {
-        [ -n "$p_hy2" ] && ip6tables -I INPUT -p udp --dport "$p_hy2" -j ACCEPT 2>/dev/null
-        [ -n "$p_rea" ] && ip6tables -I INPUT -p tcp --dport "$p_rea" -j ACCEPT 2>/dev/null
-    } || true
+    # 提取端口
+    local p_hy2=$(jq -r '.. | objects | select(.type == "hysteria2") | .listen_port' /etc/sing-box/config.json 2>/dev/null)
+    local p_rea=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .listen_port' /etc/sing-box/config.json 2>/dev/null)
+    [ -z "$p_hy2" ] && [ -z "$p_rea" ] && return 0
+    {   # 1. 放行 Hysteria2 (UDP)
+        if [ -n "$p_hy2" ]; then
+            if command -v ufw >/dev/null 2>&1; then ufw allow "$p_hy2"/udp >/dev/null 2>&1
+            elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$p_hy2"/udp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
+            elif command -v iptables >/dev/null 2>&1; then
+                iptables -I INPUT -p udp --dport "$p_hy2" -j ACCEPT >/dev/null 2>&1
+                command -v ip6tables >/dev/null 2>&1 && ip6tables -I INPUT -p udp --dport "$p_hy2" -j ACCEPT >/dev/null 2>&1
+            fi
+        fi
+        # 2. 放行 Reality (TCP)
+        if [ -n "$p_rea" ]; then
+            if command -v ufw >/dev/null 2>&1; then ufw allow "$p_rea"/tcp >/dev/null 2>&1
+            elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --add-port="$p_rea"/tcp --permanent >/dev/null 2>&1; firewall-cmd --reload >/dev/null 2>&1
+            elif command -v iptables >/dev/null 2>&1; then
+                iptables -I INPUT -p tcp --dport "$p_rea" -j ACCEPT >/dev/null 2>&1
+                command -v ip6tables >/dev/null 2>&1 && ip6tables -I INPUT -p tcp --dport "$p_rea" -j ACCEPT >/dev/null 2>&1
+            fi
+        fi    } || true
 }
 	
 # "全功能调度器"
@@ -725,13 +734,12 @@ create_config() {
     mkdir -p /etc/sing-box/certs
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
-    # --- 找回内存适配 DNS 逻辑 ---
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     local dns_srv='{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}'
     [ "$mem_total" -ge 100 ] && timeout="40s" && dns_srv='{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"tag":"google-doh","address":"https://8.8.8.8/dns-query","detour":"direct-out"}'
     [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
 
-    # 1. 端口确定逻辑
+    # 1. 端口确定逻辑 (保持不变)
     if [ -z "$PORT_HY2" ] || [ "$PORT_HY2" == "current" ]; then
         if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.. | objects | select(.type == "hysteria2") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1); fi
         [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port | awk '{print $1}')
@@ -789,19 +797,21 @@ create_config() {
           "enabled": true, "handshake": { "server": "%s", "server_port": 443 }, "private_key": "%s", "short_id": ["%s"]
         }
       }
-    }' "$PORT_REALITY" "$PSK" "$REALITY_DEST" "$REALITY_DEST" "$p_key" "${s_id:-a9aebdb4f9e42621}")
+    }' "$PORT_REALITY" "$PSK" "www.ebay.com" "www.ebay.com" "$p_key" "${s_id:-a9aebdb4f9e42621}")
     INBOUNDS_JSON="$INBOUNDS_JSON, $REALITY_IN"
 
-    # Argo Inbound (维持内建/外部双模式)
+    # Argo Inbound (内建/外部双模式)
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
         local ARGO_IN=""
         if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
+		    # 外部模式：必须指定 listen 为 127.0.0.1，防止外部扫描到该端口
             ARGO_IN=$(printf '{
               "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
               "transport": { "type": "httpupgrade", "host": "%s" }
             }' "$PSK" "$A_DOMAIN")
         else
+		    # 内建模式：内核自带 argo 驱动，不需要 listen 端口，它是主动连接 CF 的
             ARGO_IN=$(printf '{
               "type": "vless", "tag": "vless-argo-in", "server_name": "%s",
               "cloudflare": { "enabled": true, "tunnel": { "token": "%s" } },
@@ -1012,7 +1022,7 @@ display_links() {
     fi
     echo -e "\n\033[1;34m==========================================\033[0m"
     echo -e "\033[1;32m[安全增强]\033[0m 已启用 VLESS+Reality + Hysteria2 双栈协议"
-    [ -n "$RAW_ARGO_DOMAIN" ] && echo -e "\033[1;32m[隧道增强]\033[0m Argo 隧道已启用"
+    [ -n "$RAW_ARGO_DOMAIN" ] && echo -e "\033[1;32m[隧道增强]\033[0m Argo 隧道已开启 Multiplexing 多路复用加速"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
@@ -1172,7 +1182,7 @@ install_dependencies
 CPU_CORE=$(get_cpu_core); export CPU_CORE
 get_network_info; echo -e "-----------------------------------------------"
 echo -e "\033[1;36m[配置]\033[0m 请设置 Hysteria2 端口"
-PORT_HY2=$(prompt_for_port)
+PORT_HY2=$(prompt_for_port); echo -e "-----------------------------------------------"
 echo -e "\033[1;36m[配置]\033[0m 请设置 VLESS-Reality 端口"
 PORT_REALITY=$(prompt_for_port); echo -e "-----------------------------------------------"
 setup_argo_logic; export ARGO_DOMAIN ARGO_TOKEN USE_EXTERNAL_ARGO; echo -e "-----------------------------------------------"
