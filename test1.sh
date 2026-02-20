@@ -4,13 +4,13 @@ set -euo pipefail
 # ==========================================
 # 基础变量声明与环境准备
 # ==========================================
-SBOX_ARCH="";            OS_DISPLAY="";          SBOX_CORE="/etc/sing-box/core_script.sh";    ARGO_DOMAIN=""; ARGO_TOKEN=""
-SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测";        USE_EXTERNAL_ARGO="false"
-SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM="";      PORT_HY2="";   PORT_REALITY=""
-VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_ECH=""
+SBOX_ARCH="";            OS_DISPLAY="";          SBOX_CORE="/etc/sing-box/core_script.sh";    ARGO_DOMAIN=""
+SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测"; ARGO_TOKEN=""
+SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM="";      USER_PORT=""
+VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_ECH=""; USE_EXTERNAL_ARGO="false"
 VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
-TLS_DOMAIN_POOL=("www.bing.com" "www.microsoft.com" "itunes.apple.com" "www.icloud.com" "www.visa.com" "www.cisco.com")
+TLS_DOMAIN_POOL=("www.bing.com" "www.microsoft.com" "itunes.apple.com" "www.icloud.com" "www.ebay.com" "www.paypal.com")
 pick_tls_domain() { echo "${TLS_DOMAIN_POOL[$RANDOM % ${#TLS_DOMAIN_POOL[@]}]}"; }
 TLS_DOMAIN="$(pick_tls_domain)"
 
@@ -446,17 +446,16 @@ verify_config() {
     fi
 }
 
-# 防火墙开放端口
+#防火墙开放端口
 apply_firewall() {
-    local p_hy2=$(jq -r '..|objects|select(.tag=="hy2-in")|.listen_port//empty' /etc/sing-box/config.json 2>/dev/null)
-    local p_rea=$(jq -r '..|objects|select(.tag=="vless-reality-in")|.listen_port//empty' /etc/sing-box/config.json 2>/dev/null)
-    _add_rule() { [ -n "$1" ] && iptables -I INPUT -p "$2" --dport "$1" -j ACCEPT 2>/dev/null; }
-    _add_rule "$p_hy2" "udp"
-    _add_rule "$p_rea" "tcp"
-    command -v ip6tables >/dev/null 2>&1 && {
-        [ -n "$p_hy2" ] && ip6tables -I INPUT -p udp --dport "$p_hy2" -j ACCEPT 2>/dev/null
-        [ -n "$p_rea" ] && ip6tables -I INPUT -p tcp --dport "$p_rea" -j ACCEPT 2>/dev/null
-    } || true
+    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
+    [ -z "$port" ] && return 0
+    {   if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
+        elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --list-ports | grep -q "$port/udp" || { firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --reload; } >/dev/null 2>&1
+        elif command -v iptables >/dev/null 2>&1; then
+            iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
+            command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
+        fi    } || true
 }
 	
 # "全功能调度器"
@@ -567,21 +566,18 @@ optimize_system() {
     info "优化定档: $SBOX_OPTIMIZE_LEVEL | 带宽: ${VAR_HY2_BW} Mbps"
     info "网络蓄水池 (dyn_buf): $(( dyn_buf / 1024 / 1024 )) MB"
 	
-    # 阶段三： BBR 探测与调度器锁定 (动态适配小鸡环境)
-    local tcp_cca="cubic"; local qdisc_algo="fq_codel"
-    local tcp_ecn_val="0" tcp_limit_output_bytes="524288"
-    modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
+	# 阶段三： BBR 探测与内核锐化 (递进式锁定最强算法)
+    local tcp_cca="cubic"; modprobe tcp_bbr tcp_bbr2 tcp_bbr3 >/dev/null 2>&1 || true
     local avail=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "cubic")
     if [ ! -w "/proc/sys/net/ipv4/tcp_congestion_control" ]; then
         tcp_cca=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "cubic")
-        warn "内核参数已锁定，维持系统默认算法: $tcp_cca"
-    elif [[ "$avail" =~ "bbr3" ]]; then tcp_cca="bbr3"; qdisc_algo="fq"; tcp_ecn_val="2"; tcp_limit_output_bytes="1048576"; succ "检测到 BBRv3，激活极致响应模式"
-    elif [[ "$avail" =~ "bbr2" ]]; then tcp_cca="bbr2"; qdisc_algo="fq"; tcp_ecn_val="0"; tcp_limit_output_bytes="1048576"; succ "检测到 BBRv2，激活平衡加速模式"
-    elif [[ "$avail" =~ "bbr" ]]; then tcp_cca="bbr"; qdisc_algo="fq"; tcp_ecn_val="0"; tcp_limit_output_bytes="1048576"; info "检测到 BBRv1，激活标准加速模式"
-    else qdisc_algo="fq_codel"; warn "内核不支持 BBR，切换至高兼容 fq_codel 流量整形模式"; fi
-    [ "$rtt_avg" -ge 180 ] && [ "$tcp_limit_output_bytes" -lt 1048576 ] && tcp_limit_output_bytes="1048576"
-    [ -w "/proc/sys/net/core/default_qdisc" ] && sysctl -w net.core.default_qdisc=$qdisc_algo >/dev/null 2>&1
-    info "网络调度器已切换为: $qdisc_algo"
+        warn "内核参数已锁定 (Read-Only)，维持系统默认算法: $tcp_cca"
+    elif [[ "$avail" =~ "bbr3" ]]; then tcp_cca="bbr3"; echo "bbr3" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null && succ "检测到 BBRv3，激活极致响应模式"
+    elif [[ "$avail" =~ "bbr2" ]]; then tcp_cca="bbr2"; echo "bbr2" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null && succ "检测到 BBRv2，激活平衡加速模式"
+    elif [[ "$avail" =~ "bbr" ]]; then tcp_cca="bbr"; echo "bbr" > /proc/sys/net/ipv4/tcp_congestion_control 2>/dev/null && info "检测到 BBRv1，激活标准加速模式"
+    else warn "内核不支持 BBR，切换至高兼容 Cubic 模式"; fi
+    [ -w "/proc/sys/net/core/default_qdisc" ] && sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
+    if sysctl net.core.default_qdisc 2>/dev/null | grep -q "fq"; then info "FQ 调度器已就绪"; else info "准备激活 FQ 调度器..."; fi
 	
     # 阶段四： 写入 Sysctl 配置到 /etc/sysctl.d/99-sing-box.conf（避免覆盖 /etc/sysctl.conf）
     local SYSCTL_FILE="/etc/sysctl.d/99-sing-box.conf"
@@ -609,7 +605,7 @@ net.core.dev_weight = 64                   # CPU 单次收包权重
 net.core.busy_read = $busy_poll_val        # 繁忙轮询 (降低收包延迟)
 net.core.busy_poll = $busy_poll_val        # 繁忙轮询 (针对UDP优化)
 net.core.somaxconn = 8192                  # 监听队列上限
-net.core.default_qdisc = $qdisc_algo       # BBR必备调度规则
+net.core.default_qdisc = fq                # BBR必备调度规则
 net.core.netdev_budget = $net_bgt          # 调度预算 (单次轮询处理包数)
 net.core.netdev_budget_usecs = $net_usc    # 调度时长 (单次轮询微秒上限)
 net.core.netdev_tstamp_prequeue = 0        # 禁用时间戳预处理 (降延迟)
@@ -627,8 +623,6 @@ net.ipv4.tcp_wmem = 4096 65536 $tcp_rmem_max   # TCP 写缓存动态范围
 
 # --- 协议栈深度调优 (Hy2 传输核心) ---
 net.ipv4.tcp_congestion_control = $tcp_cca # 拥塞算法 (BBR/Cubic)
-net.ipv4.tcp_ecn = $tcp_ecn_val            # ECN 策略：BBRv3=2，其它默认关闭提升兼容性
-net.ipv4.tcp_ecn_fallback = 1              # ECN 不兼容时自动回退
 net.ipv4.tcp_no_metrics_save = 1           # 实时探测不记忆旧值
 net.ipv4.tcp_fastopen = 3                  # 开启 TCP 快开 (降首包延迟)
 net.ipv4.tcp_notsent_lowat = 16384         # 限制发送队列 (防延迟抖动)
@@ -636,11 +630,15 @@ net.ipv4.tcp_mtu_probing = 1               # MTU自动探测 (防UDP黑洞)
 net.ipv4.ip_no_pmtu_disc = 0               # 启用路径MTU探测 (寻找最优包大小)
 net.ipv4.tcp_frto = 2                      # 丢包环境重传判断优化
 net.ipv4.tcp_slow_start_after_idle = 0     # 闲置后慢启动开关
-net.ipv4.tcp_limit_output_bytes = $tcp_limit_output_bytes # 适当放宽发送队列，避免高RTT吞吐被压制
+net.ipv4.tcp_limit_output_bytes = $([ "$mem_total" -ge 200 ] && echo "262144" || echo "131072") # 限制TCP连接占用发送队列
 net.ipv4.udp_gro_enabled = 1               # UDP 分段聚合 (降CPU负载)
 net.ipv4.udp_early_demux = 1               # UDP 早期路由优化
 net.ipv4.udp_l4_early_demux = 1            # UDP 四层早期分流
-$(if [[ "$tcp_cca" == "bbr3" ]]; then echo "net.ipv4.tcp_reflect_tos = 1"; fi)
+
+# --- BBRv3 / ECN 联动 ---
+net.ipv4.tcp_ecn = 1                       # 开启显式拥塞通知
+net.ipv4.tcp_ecn_fallback = 1              # ECN 不兼容时自动回退
+$(if [[ "$tcp_cca" == "bbr3" ]]; then echo "net.ipv4.tcp_ecn = 2"; echo "net.ipv4.tcp_reflect_tos = 1"; fi)
 
 # === 四、 连接跟踪与超时管理 (及低内存保护) ===
 net.netfilter.nf_conntrack_max = $ct_max   # 连接跟踪上限
@@ -719,8 +717,8 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local PORT_HY2="${1:-}"; local PORT_REALITY="${2:-}"; local A_DOMAIN="${ARGO_DOMAIN:-}"; local A_TOKEN="${ARGO_TOKEN:-}"; local cur_bw="${VAR_HY2_BW:-200}"
-    mkdir -p /etc/sing-box/certs
+    local PORT_HY2="${1:-}"; local A_DOMAIN="${ARGO_DOMAIN:-}"; local A_TOKEN="${ARGO_TOKEN:-}"; local cur_bw="${VAR_HY2_BW:-200}"
+    mkdir -p /etc/sing-box
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
@@ -728,98 +726,57 @@ create_config() {
     [ "$mem_total" -ge 100 ] && timeout="40s" && dns_srv='{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"tag":"google-doh","address":"https://8.8.8.8/dns-query","detour":"direct-out"}'
     [ "$mem_total" -ge 200 ] && timeout="60s"; [ "$mem_total" -ge 450 ] && timeout="80s"
 
-    # 1. 端口确定逻辑 (保持不变)
-    if [ -z "$PORT_HY2" ] || [ "$PORT_HY2" == "current" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.. | objects | select(.type == "hysteria2") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1); fi
-        [ -z "$PORT_HY2" ] && PORT_HY2=$(printf "\n" | prompt_for_port | awk '{print $1}')
+    # 端口和 PSK (密码) 确定逻辑
+    if [ -z "$PORT_HY2" ]; then
+        if [ -f /etc/sing-box/config.json ]; then PORT_HY2=$(jq -r '.. | objects | select(.type == "hysteria2") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+        else PORT_HY2=$(printf "\n" | prompt_for_port | awk '{print $1}'); fi
     fi
-    if [ -z "$PORT_REALITY" ] || [ "$PORT_REALITY" == "current" ]; then
-        if [ -f /etc/sing-box/config.json ]; then PORT_REALITY=$(jq -r '.. | objects | select(.tag == "vless-reality-in") | .listen_port' /etc/sing-box/config.json 2>/dev/null | head -n 1); fi
-        [ -z "$PORT_REALITY" ] && PORT_REALITY=$((PORT_HY2 + 3))
-    fi
+    [ -f /etc/sing-box/config.json ] && PSK=$(jq -r '.. | objects | select(.type == "hysteria2") | .users[0].password // empty' /etc/sing-box/config.json 2>/dev/null | head -n 1)
+    [ -z "$PSK" ] && [ -f /proc/sys/kernel/random/uuid ] && PSK=$(cat /proc/sys/kernel/random/uuid | tr -d '\n')
+    [ -z "$PSK" ] && { local s=$(openssl rand -hex 16); PSK="${s:0:8}-${s:8:4}-${s:12:4}-${s:16:4}-${s:20:12}"; }
 
-    # 2. PSK 与密钥处理
-    local p_key="" s_id="" c_p="/etc/sing-box/certs/reality_priv.txt"
-	mkdir -p /etc/sing-box/certs
-    [ -f /etc/sing-box/config.json ] && {
-        PSK=$(jq -r '..|objects|select(.type=="hysteria2")|.users[0].password//empty' /etc/sing-box/config.json | head -1)
-        p_key=$(jq -r '..|objects|select(.tag=="vless-reality-in")|.tls.reality.private_key//empty' /etc/sing-box/config.json | head -1)
-        s_id=$(jq -r '..|objects|select(.tag=="vless-reality-in")|.tls.reality.short_id[0]//empty' /etc/sing-box/config.json | head -1)
-    }
-    [ -z "$p_key" ] && [ -f "$c_p" ] && p_key=$(cat "$c_p" | tr -d '[:space:]')
-    [ -z "$PSK" ] && PSK=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 | sed 's/^\(........\)\(....\)\(....\)\(....\)\(............\)$/\1-\2-\3-\4-\5/')
-    if [ -z "$p_key" ]; then
-        local kp=$(/usr/bin/sing-box generate reality-keypair)
-        p_key=$(echo "$kp" | awk '/Priv/{print $NF}'); s_id=$(openssl rand -hex 8)
-		echo "$(echo "$kp" | awk '/Pub/{print $NF}')" > /etc/sing-box/certs/reality_pub.txt
-    fi
-    [ -n "$p_key" ] && echo "$p_key" > "$c_p" && chmod 600 "$c_p"
-    # 3. Hysteria2 证书救火逻辑
-    if [ ! -f "/etc/sing-box/certs/fullchain.pem" ]; then
-        openssl req -x509 -nodes -newkey rsa:2048 -keyout /etc/sing-box/certs/privkey.pem -out /etc/sing-box/certs/fullchain.pem -subj "/CN=${TLS_DOMAIN:-www.microsoft.com}" -days 3650 >/dev/null 2>&1
-    fi
-
-    # 4. 构造 Inbounds (采用标准逗号拼接逻辑)
-    local INBOUNDS_JSON=""
-    # --- Hy2 完整逻辑 ---
+    # 构造 Hysteria2 Inbound (使用 printf 确保变量安全填入)
     local HY2_IN=$(printf '{
-      "type": "hysteria2", "tag": "hy2-in", "listen": "::", "listen_port": %s, "users": [ { "password": "%s" } ],
+      "type": "hysteria2", "tag": "hy2-in", "listen": "::", "listen_port": %s,
+      "users": [ { "password": "%s" } ],
       "ignore_client_bandwidth": false, "up_mbps": %s, "down_mbps": %s, "udp_timeout": "%s", "udp_fragment": true,
       "tls": {
         "enabled": true, "server_name": "%s", "alpn": ["h3"], "min_version": "1.3", 
         "certificate_path": "/etc/sing-box/certs/fullchain.pem", 
-        "key_path": "/etc/sing-box/certs/privkey.pem"
+        "key_path": "/etc/sing-box/certs/privkey.pem",
+        "ech": { "enabled": true, "key_path": "/etc/sing-box/certs/ech.key" }
       },
       "masquerade": "https://%s"
-    }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "${TLS_DOMAIN:-www.microsoft.com}" "${TLS_DOMAIN:-www.microsoft.com}")
-    INBOUNDS_JSON="$HY2_IN"
+    }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN" "$TLS_DOMAIN")
 
-    # Reality Inbound
-    # Reality 伪装目标优先稳定大站，降低随机命中低质量握手目标的概率
-    local REALITY_DEST="www.microsoft.com"
-    local REALITY_IN=$(printf '{
-      "type": "vless", "tag": "vless-reality-in", "listen": "::", "listen_port": %s,
-      "users": [ { "uuid": "%s", "flow": "xtls-rprx-vision" } ],
-      "tls": {
-        "enabled": true, "server_name": "%s",
-        "reality": {
-          "enabled": true, "handshake": { "server": "%s", "server_port": 443 }, "private_key": "%s", "short_id": ["%s"]
-        }
-      }
-    }' "$PORT_REALITY" "$PSK" "$REALITY_DEST" "$REALITY_DEST" "$p_key" "${s_id:-a9aebdb4f9e42621}")
-    INBOUNDS_JSON="$INBOUNDS_JSON, $REALITY_IN"
-
-    # Argo Inbound (内建/外部双模式)
+    # 构造 Argo Inbound (动态适配内核能力)
+	local ARGO_IN=""
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
-        local ARGO_IN=""
         if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
 		    # 外部模式：必须指定 listen 为 127.0.0.1，防止外部扫描到该端口
-            ARGO_IN=$(printf '{
+            ARGO_IN=$(printf ',{
               "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
               "transport": { "type": "httpupgrade", "host": "%s" }
             }' "$PSK" "$A_DOMAIN")
         else
 		    # 内建模式：内核自带 argo 驱动，不需要 listen 端口，它是主动连接 CF 的
-            ARGO_IN=$(printf '{
+            ARGO_IN=$(printf ',{
               "type": "vless", "tag": "vless-argo-in", "server_name": "%s",
               "cloudflare": { "enabled": true, "tunnel": { "token": "%s" } },
               "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
               "transport": { "type": "httpupgrade", "host": "%s" }
             }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN")
         fi
-        INBOUNDS_JSON="$INBOUNDS_JSON, $ARGO_IN"
     fi
-
-    # 5. 写入 Sing-box 配置文件
+    
+    # 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
-  "log": { "level": "info", "timestamp": true },
+  "log": { "level": "fatal", "timestamp": true },
   "dns": { "servers":[$dns_srv], "strategy":"$ds", "independent_cache":true, "disable_cache":false, "disable_expire":false },
-  "inbounds": [ $INBOUNDS_JSON ],
-  "outbounds": [ 
-    { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" }
-  ]
+  "inbounds": [ $HY2_IN $ARGO_IN ],
+  "outbounds": [ { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" } ]
 }
 EOF
     chmod 600 "/etc/sing-box/config.json"
@@ -941,77 +898,56 @@ EOF
 # 信息展示模块
 # ==========================================
 get_env_data() {
-    local CFG="/etc/sing-box/config.json" RAW_ECH=""
+    local CFG="/etc/sing-box/config.json"; RAW_ECH=""
     [ ! -f "$CFG" ] && return 1
-    # 1. Hy2 数据
-    local d=$(jq -r '..|objects|select(.type=="hysteria2")|(.users[0].password+" "+(.listen_port|tostring)+" "+.tls.certificate_path)//empty' "$CFG" 2>/dev/null | head -n 1)
+    # 提取 Hy2 核心数据
+    local d=$(jq -r '.. | objects | select(.type == "hysteria2") | "\(.users[0].password) \(.listen_port) \(.tls.certificate_path)"' "$CFG" 2>/dev/null | head -n 1)
     [ -z "$d" ] && return 1
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$d"
-    # 2. Reality 数据
-    local rd=$(jq -r '..|objects|select(.tag=="vless-reality-in")|((.listen_port|tostring)+" "+.tls.server_name+" "+.tls.reality.short_id[0])//empty' "$CFG" 2>/dev/null | head -n 1)
-    if [ -n "$rd" ]; then
-        read -r RAW_REA_PORT RAW_REA_SNI RAW_REA_SID <<< "$rd"
-        RAW_REA_PBK=$([ -f "/etc/sing-box/certs/reality_pub.txt" ] && cat /etc/sing-box/certs/reality_pub.txt | tr -d '[:space:]' || {
-            local priv=$(cat /etc/sing-box/certs/reality_priv.txt 2>/dev/null | tr -d '[:space:]')
-            [ -n "$priv" ] && /usr/bin/sing-box generate reality-keypair -private-key "$priv" 2>/dev/null | awk '/Pub/{print $NF}'
-        })
+    # 提取 Argo 域名 (通过 transport.host 确保兼容单/双进程模式)
+    RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // empty' "$CFG" 2>/dev/null)
+    # 提取 SNI 与 指纹
+    RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
+    [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
+    local F_P="/etc/sing-box/certs/cert_fingerprint.txt"
+    RAW_FP=$([ -f "$F_P" ] && cat "$F_P" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]')
+    # 读取 ECH 并进行 URL 编码
+    if [ -f "/etc/sing-box/certs/ech.pub" ]; then
+        local r=$(grep -v "ECH" "/etc/sing-box/certs/ech.pub" | tr -d '\n\r ')
+        RAW_ECH=$(echo "$r" | sed 's/+/%%2B/g; s/\//%%2F/g; s/=/%%3D/g' | sed 's/%%/%/g')
     fi
-    # 3. Argo 数据
-    RAW_ARGO_DOMAIN=$(jq -r '..|objects|select(.tag=="vless-argo-in")|(.transport.host//.server_name)//empty' "$CFG" 2>/dev/null | head -n 1)
-    # 4. SNI & 指纹
-    if [ -f "$CERT_PATH" ]; then
-        RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed -n 's/.*CN=\([^,]*\).*/\1/p')
-        [ -z "$RAW_SNI" ] && RAW_SNI="$TLS_DOMAIN"
-        local F_P="/etc/sing-box/certs/cert_fingerprint.txt"
-        RAW_FP=$([ -f "$F_P" ] && cat "$F_P" || openssl x509 -in "$CERT_PATH" -noout -sha256 -fingerprint 2>/dev/null | sed 's/.*=//;s/://g' | tr '[:upper:]' '[:lower:]')
-    fi
-    # 5. ECH 编码
-    [ -f "/etc/sing-box/certs/ech.pub" ] && RAW_ECH=$(grep -v "ECH" "/etc/sing-box/certs/ech.pub" | tr -d '[:space:]' | sed 's/+/%%2B/g;s/\//%%2F/g;s/=/%%3D/g;s/%%/%/g')
 }
 
 display_links() {
-    local LINK_V4="" LINK_V6="" LINK_REA="" LINK_ARGO="" FULL_CLIP="" hostname_tag="$(hostname)"
-    # 数据准备 (通过 get_env_data 获取精准数据)
-    get_env_data
-    local HY2_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
-	local p_hy2_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" p_rea_text="\033[1;33m${RAW_REA_PORT:-"关闭"}\033[0m" s_text="\033[1;33moffline\033[0m" 
-    local hy2_icon="\033[1;31m[✖]\033[0m" rea_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
-    # 状态检测 (区分 UDP 与 TCP)，参数: $1=IP, $2=Port, $3=Mode(tcp/udp)
-    _do_probe_v2() {
-        [ -z "$1" ] || [ -z "$2" ] && return
-        local mode_flag="-u"; [ "$3" == "tcp" ] && mode_flag=""
-        (nc -z $mode_flag -w 1 "$1" "$2" || { sleep 0.3; nc -z $mode_flag -w 1 "$1" "$2"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"
-    }
-    # 进程状态检测
+    local LINK_V4="" LINK_V6="" LINK_ARGO="" FULL_CLIP="" hostname_tag="$(hostname)"
+    # 精准提取：解决多 inbound 下端口拼接导致的卡死问题
+    local RAW_PORT=$(grep -oE '"listen_port":[[:space:]]*[0-9]+' /etc/sing-box/config.json | head -n 1 | grep -oE '[0-9]+')
+    local RAW_PSK=$(grep -oE '"password":[[:space:]]*"[^"]+"' /etc/sing-box/config.json | head -n 1 | cut -d'"' -f4)
+    local RAW_SNI=$(grep -oE '"server_name":[[:space:]]*"[^"]+"' /etc/sing-box/config.json | head -n 1 | cut -d'"' -f4)
+    local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
+    local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" s_text="\033[1;33moffline\033[0m" p_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
+
+    # 状态检测：单行流式判断，兼容双进程模式
     pgrep sing-box >/dev/null 2>&1 && { [ "${USE_EXTERNAL_ARGO:-false}" != "true" ] || pgrep cloudflared >/dev/null 2>&1; } && s_text="\033[1;33monline\033[0m" && s_icon="\033[1;32m[✔]\033[0m"
-    # 执行并行端口扫描
+    # 双重 nc 探测逻辑
+    _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 1 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
+    
     if command -v nc >/dev/null 2>&1; then
-        _do_probe_v2 "${RAW_IP4:-}" "$RAW_PORT" "udp" > /tmp/sb_hy2_res 2>&1 &
-        [ -n "$RAW_REA_PORT" ] && _do_probe_v2 "${RAW_IP4:-}" "$RAW_REA_PORT" "tcp" > /tmp/sb_rea_res 2>&1 &
-        local t=0; while [ $t -lt 10 ] && pgrep -f "nc -z" >/dev/null 2>&1; do sleep 0.3; t=$((t+1)); done
-        [ "$(cat /tmp/sb_hy2_res 2>/dev/null)" == "OK" ] && hy2_icon="\033[1;32m[✔]\033[0m"
-        [ "$(cat /tmp/sb_rea_res 2>/dev/null)" == "OK" ] && rea_icon="\033[1;32m[✔]\033[0m"
+        _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 &
+        # 替代 wait：硬超时保险，防止 nc 进程在某些路由下挂起导致脚本不往走
+        local t=0; while [ $t -lt 10 ] && pgrep -f "nc -z -u" >/dev/null 2>&1; do sleep 0.3; t=$((t+1)); done
+        [[ "$(cat /tmp/sb_v4_res 2>/dev/null)" == "OK" || "$(cat /tmp/sb_v6_res 2>/dev/null)" == "OK" ]] && p_icon="\033[1;32m[✔]\033[0m"
     fi
-    echo -e "\n\033[1;32m[节点信息]\033[0m >>> Hy2端口: $p_hy2_text $hy2_icon | Reality端口: $p_rea_text $rea_icon | 服务状态: $s_text $s_icon"
-	
-    # 1. Hysteria2 节点 (IPv4/IPv6)
-    [ -n "${RAW_IP4:-}" ] && LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${HY2_PARAM}#${hostname_tag}_Hy2_v4" && echo -e "\n\033[1;35m[IPv4 Hy2]\033[0m\n$LINK_V4" && FULL_CLIP="$LINK_V4"
-    [[ "${RAW_IP6:-}" == *:* ]] && LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${HY2_PARAM}#${hostname_tag}_Hy2_v6" && echo -e "\n\033[1;36m[IPv6 Hy2]\033[0m\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
-    # 2. VLESS Reality 节点
-    if [ -n "$RAW_REA_PORT" ]; then
-        LINK_REA="vless://$RAW_PSK@$RAW_IP4:$RAW_REA_PORT?security=reality&sni=$RAW_REA_SNI&fp=chrome&pbk=$RAW_REA_PBK&sid=$RAW_REA_SID&type=tcp&flow=xtls-rprx-vision&encryption=none#${hostname_tag}_Reality"
-        echo -e "\n\033[1;32m[VLESS Reality]\033[0m\n$LINK_REA"
-        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_REA"
-    fi
-    # 3. Argo 隧道节点
-    if [ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ]; then
-        LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo"
-        echo -e "\n\033[1;33m[VLESS HttpUpgrade Argo]\033[0m\n$LINK_ARGO"
-        FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
-    fi
+
+    echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon | 服务: $s_text $s_icon"
+    # 链接生成：紧凑排列
+    [ -n "${RAW_IP4:-}" ] && LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v4" && echo -e "\n\033[1;35m[IPv4 节点]\033[0m\n$LINK_V4" && FULL_CLIP="$LINK_V4"
+    [[ "${RAW_IP6:-}" == *:* ]] && LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v6" && echo -e "\n\033[1;36m[IPv6 节点]\033[0m\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
+    [ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ] && LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo" && echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
+
     echo -e "\n\033[1;34m==========================================\033[0m"
-    echo -e "\033[1;32m[安全增强]\033[0m 已启用 Hysteria2 + VLESS+Reality 双栈协议"
-    [ -n "$RAW_ARGO_DOMAIN" ] && echo -e "\033[1;32m[隧道增强]\033[0m Argo 隧道已开启"
+    echo -e "\033[1;32m[安全增强]\033[0m 流量已混入 $RAW_SNI 的 TLS 1.3 握手池"
+    [ -n "$RAW_ARGO_DOMAIN" ] && echo -e "\033[1;32m[隧道增强]\033[0m 已启用 Cloudflare Argo 反向转发"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
@@ -1081,7 +1017,7 @@ elif [[ "${1:-}" == "--show-only" ]]; then
     display_system_status; display_links
 elif [[ "${1:-}" == "--reset-port" ]]; then
     f="/etc/sing-box/config.json"; cp "$f" "$f.bak"
-    create_config "$2" "$3"
+    create_config "$2"
     if verify_config; then service_ctrl restart && succ "端口已重置并生效" && get_env_data && display_links && rm -f "$f.bak"
     else mv "$f.bak" "$f" && service_ctrl restart && err "已回滚至旧配置"; fi
 elif [[ "${1:-}" == "--update-kernel" ]]; then
@@ -1130,15 +1066,7 @@ while true; do
                else warn "检测到语法错误，正在尝试回滚..."; mv "$f.bak" "$f" && service_ctrl restart && info "配置已还原，请再次尝试修改"; fi
            else info "配置未作变更" && rm -f "$f.bak"; fi
            read -r -p $'\n按回车键返回菜单...' ;;
-        3) 
-           echo -e "\n\033[1;34m端口重置管理\033[0m\n1. 重置 Hysteria2\n2. 重置 VLESS-Reality\n3. 返回主菜单"
-           read -r -p "请选择: " opt
-           case "$opt" in
-               1) source "$SBOX_CORE" --reset-port "$(prompt_for_port)" "current" ;;
-               2) source "$SBOX_CORE" --reset-port "current" "$(prompt_for_port)" ;;
-               *) continue ;;
-           esac
-           read -r -p $'\n操作完成，按回车键返回...' ;;
+        3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
         4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
 		6) read -r -p "是否确定卸载？(默认N) [y/N]: " cf
@@ -1170,15 +1098,12 @@ detect_os
 install_dependencies
 CPU_CORE=$(get_cpu_core); export CPU_CORE
 get_network_info; echo -e "-----------------------------------------------"
-echo -e "\033[1;36m[配置]\033[0m 请设置 Hysteria2 端口"
-PORT_HY2=$(prompt_for_port); echo -e "-----------------------------------------------"
-echo -e "\033[1;36m[配置]\033[0m 请设置 VLESS-Reality 端口"
-PORT_REALITY=$(prompt_for_port); echo -e "-----------------------------------------------"
+USER_PORT=$(prompt_for_port); echo -e "-----------------------------------------------"
 setup_argo_logic; export ARGO_DOMAIN ARGO_TOKEN USE_EXTERNAL_ARGO; echo -e "-----------------------------------------------"
 optimize_system
 install_singbox "install"
 generate_cert
-create_config "$PORT_HY2" "$PORT_REALITY"
+create_config "$USER_PORT"
 verify_config || exit 1
 get_env_data
 create_sb_tool
