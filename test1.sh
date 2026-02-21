@@ -118,22 +118,22 @@ setup_argo_logic() {
     local argo_d argo_t mem_total=$(probe_memory_total); : ${mem_total:=64}
     echo -e "\033[1;32m[可选配置]\033[0m\nVLESS + HttpUpgrade + Argo: CF隧道转发\n-----------------------------------------------" >&2
     echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车跳过可选配置): " >&2; read -r argo_d
-    if [ -z "$argo_d" ]; then ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2
-    elif [ "$mem_total" -lt 150 ] && ! /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
+    if [ -z "$argo_d" ]; then
         ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"
-        echo -e "\033[1;33m[跳过]\033[0m 内存不足 200M 且内核不支持内建 Argo，为保系统稳定已自动跳过" >&2
+        echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2
+    elif [ "$mem_total" -lt 128 ]; then
+        ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"
+        echo -e "\033[1;33m[跳过]\033[0m 内存不足 128M，为保系统稳定已自动跳过 Argo 配置" >&2
     else
         while :; do
             echo -ne "请输入 Argo 隧道的 Token: " >&2; read -r argo_t
             if [ -z "$argo_t" ]; then echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2; continue; fi
-            ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"
-            if /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
-                USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 检测到内核支持内建 Argo，开启单进程模式" >&2
-            elif [ -f "/usr/local/bin/cloudflared" ]; then
-                USE_EXTERNAL_ARGO="true"; echo -e "\033[1;33m[INFO]\033[0m 已存在外部客户端，跳过下载" >&2
+            ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"; USE_EXTERNAL_ARGO="true"
+            if [ -f "/usr/local/bin/cloudflared" ]; then
+                echo -e "\033[1;33m[INFO]\033[0m 已存在 cloudflared，跳过下载" >&2
             else
-                USE_EXTERNAL_ARGO="true"; echo -ne "\033[1;32m[INFO]\033[0m 下载官方 cloudflared... " >&2
-                wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x /usr/local/bin/cloudflared && echo -e "\033[1;32m[完成]\033[0m" >&2 || { echo -e "\033[1;31m[失败]\033[0m" >&2; exit 1; }
+                echo -ne "\033[1;32m[INFO]\033[0m 下载官方 cloudflared... " >&2
+                wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${SBOX_ARCH} && chmod +x /usr/local/bin/cloudflared && echo -e "\033[1;32m[完成]\033[0m" >&2 || { echo -e "\033[1;31m[失败]\033[0m" >&2; exit 1; }
             fi; break
         done
     fi
@@ -749,25 +749,14 @@ create_config() {
       "masquerade": "https://%s"
     }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN" "$TLS_DOMAIN")
 
-    # 构造 Argo Inbound (动态适配内核能力)
-	local ARGO_IN=""
-    if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
-        if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
-		    # 外部模式：必须指定 listen 为 127.0.0.1，防止外部扫描到该端口
-            ARGO_IN=$(printf ',{
-              "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
-              "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "%s" }
-            }' "$PSK" "$A_DOMAIN")
-        else
-		    # 内建模式：内核自带 argo 驱动，不需要 listen 端口，它是主动连接 CF 的
-            ARGO_IN=$(printf ',{
-              "type": "vless", "tag": "vless-argo-in", "server_name": "%s",
-              "cloudflare": { "enabled": true, "tunnel": { "token": "%s" } },
-              "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "%s" }
-            }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN")
-        fi
+    # 构造 Argo Inbound
+    local ARGO_IN=""
+    if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
+        ARGO_IN=$(printf ',{
+          "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
+          "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
+          "transport": { "type": "httpupgrade", "host": "%s" }
+        }' "$PSK" "$A_DOMAIN")
     fi
     
     # 写入 Sing-box 配置文件
@@ -881,7 +870,7 @@ EOF
 	# --- 双进程外部 Argo 拉起逻辑 ---
     if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
         pkill -9 cloudflared >/dev/null 2>&1
-        GOGC=30 nohup /usr/local/bin/cloudflared tunnel --protocol http2 --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
+		GOGC=30 GOMEMLIMIT=20MiB nohup /usr/local/bin/cloudflared tunnel --protocol http2 --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
     fi
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
