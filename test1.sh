@@ -756,8 +756,7 @@ create_config() {
     local ARGO_IN="" ARGO_PATH="/$(openssl rand -hex 8)"
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
         ARGO_IN=$(printf ',{
-          "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
-          "sniff": false,
+          "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001, "sniff": false,
           "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
           "transport": { "type": "httpupgrade", "host": "%s", "path": "%s" }
         }' "$PSK" "$A_DOMAIN" "$ARGO_PATH")
