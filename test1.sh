@@ -753,13 +753,14 @@ create_config() {
     }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN" "$TLS_DOMAIN")
 
     # 构造 Argo Inbound
-    local ARGO_IN=""
+    local ARGO_IN="" ARGO_PATH="/$(openssl rand -hex 8)"
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
         ARGO_IN=$(printf ',{
           "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
+          "sniff": false,
           "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-          "transport": { "type": "httpupgrade", "host": "%s" }
-        }' "$PSK" "$A_DOMAIN")
+          "transport": { "type": "httpupgrade", "host": "%s", "path": "%s" }
+        }' "$PSK" "$A_DOMAIN" "$ARGO_PATH")
     fi
     
     # 写入 Sing-box 配置文件
