@@ -182,6 +182,7 @@ generate_cert() {
     sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
     sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
     rm -f "$TMP_ECH"
+	
     # 校验并提取指纹
     if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
@@ -201,7 +202,6 @@ get_network_info() {
         { curl $p -ksSfL --connect-timeout 1 --max-time 3 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}'; } || \
         { [ "$p" = "-4" ] && curl $p -ksSfL --connect-timeout 1 --max-time 2 "https://api.ipify.org" || curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://api6.ipify.org" ; } || \
           curl $p -ksSfL --connect-timeout 1 --max-time 2 "https://icanhazip.com" || echo ""; }
-		  
     # 2. 异步执行：并行探测
     _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
     # 3. 数据清洗 (融合版)：在主进程统一清洗数据
@@ -238,7 +238,6 @@ probe_network_rtt() {
         rtt_val="150"; echo -e "\033[1;33m[WARN]\033[0m 探测受阻，应用全球预估值: 150ms" >&2
     fi
     set -e
-    # 画像联动赋值
     real_rtt_factors=$(( rtt_val + 100 ))   # 延迟补偿：实测值 + 100ms (平衡握手开销)
 	# 丢包补偿：每 1% 丢包增加 5% 缓冲区冗余，最高 200%
     loss_compensation=$(( 100 + loss_val * 5 )); [ "$loss_compensation" -gt 200 ] && loss_compensation=200
@@ -392,7 +391,6 @@ SINGBOX_UDP_SENDBUF=$buf
 VAR_HY2_BW=$VAR_HY2_BW
 EOF
     chmod 644 /etc/sing-box/env
-	
     # 4. CPU 亲和力 (仅多核且存在 taskset 时优化)
     [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1 && taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1
     info "Runtime → GOMAXPROCS: $GOMAXPROCS 核 | 内存限额: $GOMEMLIMIT | GOGC: $GOGC | Buffer: $((buf/1024)) KB"
@@ -724,6 +722,7 @@ create_config() {
     mkdir -p /etc/sing-box
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
+	
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     local dns_srv='{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}'
     [ "$mem_total" -ge 100 ] && timeout="40s" && dns_srv='{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"tag":"google-doh","address":"https://8.8.8.8/dns-query","detour":"direct-out"}'
@@ -788,6 +787,7 @@ setup_service() {
     [ "$mem_total" -lt 200 ] && io_prio=7
     local final_nice="$cur_nice"
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
+	
     if ! renice "$cur_nice" $$ >/dev/null 2>&1; then
         warn "当前环境禁止高优先级调度，已自动回退至默认权重 (Nice 0)"
         final_nice=0
@@ -870,7 +870,7 @@ EOF
     done
     # 异步补课逻辑。在进程确认拉起后，从脚本主体执行一次优化，这样既保证了优化生效，又不会因为优化脚本运行时间长而导致服务启动超时
     ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 &
-	# --- 双进程外部 Argo 拉起逻辑 ---
+	# 双进程外部 Argo 拉起逻辑
     if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
 	    pkill -9 cloudflared >/dev/null 2>&1 || true
 	    local cf_memlimit; [ "${mem_total:-64}" -ge 256 ] && cf_memlimit="35MiB" || cf_memlimit="20MiB"
@@ -952,6 +952,7 @@ display_system_status() {
     local CWND_LBL=$(echo "$ROUTE_DEF" | grep -q "initcwnd" && echo "(已优化)" || echo "(默认)")
     local SBOX_PID=$(pgrep sing-box | head -n1)
     local NI_VAL="(未探测)"; local NI_LBL=""
+	
     if [ -n "$SBOX_PID" ] && [ -f "/proc/$SBOX_PID/stat" ]; then
         NI_VAL=$(cat "/proc/$SBOX_PID/stat" | awk '{print $19}')
         [ "$NI_VAL" -lt 0 ] && NI_LBL="(进程优先)" || { [ "$NI_VAL" -gt 0 ] && NI_LBL="(低优先级)" || NI_LBL="(默认)"; }
