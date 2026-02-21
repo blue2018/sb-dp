@@ -756,7 +756,7 @@ create_config() {
     local ARGO_IN="" ARGO_PATH="/$(openssl rand -hex 8)"
     if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
         ARGO_IN=$(printf ',{
-          "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001, "sniff": false,
+          "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
           "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
           "transport": { "type": "httpupgrade", "host": "%s", "path": "%s" }
         }' "$PSK" "$A_DOMAIN" "$ARGO_PATH")
@@ -862,19 +862,22 @@ EOF
 		(systemctl restart sing-box >/dev/null 2>&1 || true) &
     fi
     set +e     # 关闭 set -e，这是防止脚本在 pidof 失败时直接退出的关键核心
-	for i in {1..60}; do
-	    pid=$(pgrep -x "sing-box" 2>/dev/null | head -n 1)
-	    [ -z "${pid}" ] && pid=$(pgrep -f "sing-box run" | awk '{print $1}' | head -n 1)
-	    [ -n "${pid}" ] && [ -e "/proc/${pid}" ] && break
-	    sleep 0.5
-	done
+	for i in {1..40}; do
+        pid=$(pgrep -x "sing-box" 2>/dev/null | head -n 1)
+        [ -z "${pid}" ] && pid=$(pgrep -f "sing-box run" | awk '{print $1}' | head -n 1)
+        [ -n "${pid}" ] && [ -e "/proc/${pid}" ] && break
+        sleep 0.3
+    done
     # 异步补课逻辑。在进程确认拉起后，从脚本主体执行一次优化，这样既保证了优化生效，又不会因为优化脚本运行时间长而导致服务启动超时
     ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 &
 	# --- 双进程外部 Argo 拉起逻辑 ---
     if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
-        pkill -9 cloudflared >/dev/null 2>&1
-        GOGC=30 nohup /usr/local/bin/cloudflared tunnel --protocol http2 --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
-    fi
+	    pkill -9 cloudflared >/dev/null 2>&1 || true
+	    local cf_memlimit; [ "${mem_total:-64}" -ge 256 ] && cf_memlimit="35MiB" || cf_memlimit="20MiB"
+	    GOGC=30 GOMEMLIMIT=${cf_memlimit} GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
+	        --protocol auto --edge-ip-version auto --no-autoupdate --heartbeat-interval 8s --heartbeat-count 2 \
+	        run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
+	fi
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
