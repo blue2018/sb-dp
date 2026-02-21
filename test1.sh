@@ -862,12 +862,12 @@ EOF
 		(systemctl restart sing-box >/dev/null 2>&1 || true) &
     fi
     set +e     # 关闭 set -e，这是防止脚本在 pidof 失败时直接退出的关键核心
-    for i in {1..40}; do
-        pid=$(pgrep -x "sing-box" 2>/dev/null | head -n 1)  
-        [ -z "${pid}" ] && pid=$(pgrep -f "sing-box run" | awk '{print $1}' | head -n 1)
-        [ -n "${pid}" ] && [ -e "/proc/${pid}" ] && break
-        sleep 0.3
-    done
+	for i in {1..60}; do
+	    pid=$(pgrep -x "sing-box" 2>/dev/null | head -n 1)
+	    [ -z "${pid}" ] && pid=$(pgrep -f "sing-box run" | awk '{print $1}' | head -n 1)
+	    [ -n "${pid}" ] && [ -e "/proc/${pid}" ] && break
+	    sleep 0.5
+	done
     # 异步补课逻辑。在进程确认拉起后，从脚本主体执行一次优化，这样既保证了优化生效，又不会因为优化脚本运行时间长而导致服务启动超时
     ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 &
 	# --- 双进程外部 Argo 拉起逻辑 ---
