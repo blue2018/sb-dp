@@ -925,7 +925,6 @@ display_links() {
 
     # 状态检测：单行流式判断，兼容双进程模式
     pgrep sing-box >/dev/null 2>&1 && { [ "${USE_EXTERNAL_ARGO:-false}" != "true" ] || pgrep cloudflared >/dev/null 2>&1; } && s_text="\033[1;33monline\033[0m" && s_icon="\033[1;32m[✔]\033[0m"
-    # 双重 nc 探测逻辑
     _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 1 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
     
     if command -v nc >/dev/null 2>&1; then
