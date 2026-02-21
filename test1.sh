@@ -766,7 +766,7 @@ create_config() {
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": { "servers":[$dns_srv], "strategy":"$ds", "independent_cache":true, "disable_cache":false, "disable_expire":false },
+  "dns": { "servers":[$dns_srv], "strategy":"$ds", "independent_cache":true },
   "inbounds": [ $HY2_IN $ARGO_IN ],
   "outbounds": [ { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" } ]
 }
