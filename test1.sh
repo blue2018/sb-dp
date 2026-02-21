@@ -115,7 +115,7 @@ prompt_for_port() {
 
 # 创建 Argo 隧道
 setup_argo_logic() {
-    local argo_d argo_t mem_total=$(probe_memory_total) cf_arch=""; : ${mem_total:=64}
+    local argo_d argo_t mem_total=$(probe_memory_total); : ${mem_total:=64}
     echo -e "\033[1;32m[可选配置]\033[0m\nVLESS + HttpUpgrade + Argo: CF隧道转发\n-----------------------------------------------" >&2
     echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车跳过可选配置): " >&2; read -r argo_d
     if [ -z "$argo_d" ]; then ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2
@@ -133,16 +133,7 @@ setup_argo_logic() {
                 USE_EXTERNAL_ARGO="true"; echo -e "\033[1;33m[INFO]\033[0m 已存在外部客户端，跳过下载" >&2
             else
                 USE_EXTERNAL_ARGO="true"; echo -ne "\033[1;32m[INFO]\033[0m 下载官方 cloudflared... " >&2
-                case "$(uname -m)" in
-                    x86_64) cf_arch="amd64" ;;
-                    aarch64|arm64) cf_arch="arm64" ;;
-                    armv7l) cf_arch="arm" ;;
-                    *) cf_arch="amd64" ;;
-                esac
-                curl -fsSL --connect-timeout 10 --retry 3 --retry-delay 1 \
-                    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cf_arch}" \
-                    -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared \
-                    && echo -e "\033[1;32m[完成]\033[0m" >&2 || { echo -e "\033[1;31m[失败]\033[0m" >&2; exit 1; }
+                wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x /usr/local/bin/cloudflared && echo -e "\033[1;32m[完成]\033[0m" >&2 || { echo -e "\033[1;31m[失败]\033[0m" >&2; exit 1; }
             fi; break
         done
     fi
@@ -889,21 +880,8 @@ EOF
     ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 &
 	# --- 双进程外部 Argo 拉起逻辑 ---
     if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
-        local argo_proto="auto" argo_hb_interval="8s" argo_hb_count="2" argo_retries="3" argo_ha_conn="2"
-        [ "${mem_total:-64}" -ge 256 ] && argo_hb_interval="5s" && argo_hb_count="3"
-        [ "${mem_total:-64}" -ge 512 ] && argo_ha_conn="4"
-        [ "${CPU_CORE:-1}" -ge 4 ] && argo_ha_conn="6"
-        [ "${CPU_CORE:-1}" -ge 8 ] && argo_ha_conn="8"
         pkill -9 cloudflared >/dev/null 2>&1
-        GOGC=30 GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
-            --protocol "${argo_proto}" \
-            --edge-ip-version auto \
-            --retries "${argo_retries}" \
-            --ha-connections "${argo_ha_conn}" \
-            --heartbeat-interval "${argo_hb_interval}" \
-            --heartbeat-count "${argo_hb_count}" \
-            --no-autoupdate \
-            run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
+        GOGC=30 nohup /usr/local/bin/cloudflared tunnel --protocol http2 --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
     fi
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
