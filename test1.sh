@@ -869,8 +869,9 @@ EOF
     ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 &
 	# --- 双进程外部 Argo 拉起逻辑 ---
     if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
-        pkill -9 cloudflared >/dev/null 2>&1
-		GOGC=30 GOMEMLIMIT=20MiB nohup /usr/local/bin/cloudflared tunnel --protocol http2 --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
+    pkill -9 cloudflared >/dev/null 2>&1 || true
+    GOGC=30 GOMEMLIMIT=20MiB GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
+        --protocol auto --edge-ip-version auto --no-autoupdate --heartbeat-interval 8s --heartbeat-count 2 run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
     fi
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
