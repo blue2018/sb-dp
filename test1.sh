@@ -926,15 +926,13 @@ display_links() {
 
     # 状态检测
     pgrep sing-box >/dev/null 2>&1 && { [ "${USE_EXTERNAL_ARGO:-false}" != "true" ] || pgrep cloudflared >/dev/null 2>&1; } && s_text="\033[1;33monline\033[0m" && s_icon="\033[1;32m[✔]\033[0m"
-    _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.2; nc -z -u -w 1 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
-	if iptables -C INPUT -p udp --dport "${RAW_PORT}" -j ACCEPT >/dev/null 2>&1; then
-	    p_icon="\033[1;32m[✔]\033[0m"
-	elif command -v nc >/dev/null 2>&1; then
-	    local p4="" p6=""
-	    _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & p4=$!; _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 & p6=$!
-	    wait "$p4" "$p6" 2>/dev/null || true
-	    [[ "$(cat /tmp/sb_v4_res 2>/dev/null)" == "OK" || "$(cat /tmp/sb_v6_res 2>/dev/null)" == "OK" ]] && p_icon="\033[1;32m[✔]\033[0m"
-	fi
+    _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 1 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
+    if command -v nc >/dev/null 2>&1; then
+        _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 &
+        # 替代 wait：硬超时保险，防止 nc 进程在某些路由下挂起导致脚本不往走
+        local t=0; while [ $t -lt 10 ] && pgrep -f "nc -z -u" >/dev/null 2>&1; do sleep 0.3; t=$((t+1)); done
+        [[ "$(cat /tmp/sb_v4_res 2>/dev/null)" == "OK" || "$(cat /tmp/sb_v6_res 2>/dev/null)" == "OK" ]] && p_icon="\033[1;32m[✔]\033[0m"
+    fi
 
     echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon | 服务: $s_text $s_icon"
     [ -n "${RAW_IP4:-}" ] && LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v4" && echo -e "\n\033[1;35m[IPv4 节点]\033[0m\n$LINK_V4" && FULL_CLIP="$LINK_V4"
