@@ -196,7 +196,6 @@ generate_cert() {
 get_network_info() {
     info "获取网络信息..."; RAW_IP4=""; RAW_IP6=""; IS_V6_OK="false"; local t4="/tmp/.v4" t6="/tmp/.v6"
     rm -f "$t4" "$t6"
-	
     # 1. 探测函数：v4 用标准接口，v6 用专用 api6 接口，在无 v6 时会秒断，在有 v6 时极稳
     _f() { local p=$1
         { curl $p -ksSfL --connect-timeout 1 --max-time 3 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}'; } || \
@@ -820,8 +819,10 @@ EOF
         sync   # 确保环境文件与服务脚本落盘，防止启动瞬时读取失败
 		(rc-service sing-box restart >/dev/null 2>&1 || true) &
     else
-        local mem_config=""; local cpu_quota=$((real_c * 100))
-        local io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
+        local io_config=""; local mem_config=""; local cpu_quota=$((real_c * 100))
+        if chrt -f 1 true >/dev/null 2>&1 || ionice -c 2 -n 4 true >/dev/null 2>&1; then
+            io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
+        fi
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
@@ -934,7 +935,6 @@ display_links() {
     fi
 
     echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon | 服务: $s_text $s_icon"
-    # 链接生成：紧凑排列
     [ -n "${RAW_IP4:-}" ] && LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v4" && echo -e "\n\033[1;35m[IPv4 节点]\033[0m\n$LINK_V4" && FULL_CLIP="$LINK_V4"
     [[ "${RAW_IP6:-}" == *:* ]] && LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v6" && echo -e "\n\033[1;36m[IPv6 节点]\033[0m\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
 	[ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ] && LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&path=${RAW_ARGO_PATH:-/}&fp=chrome#${hostname_tag}_Argo" && echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
