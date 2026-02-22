@@ -796,8 +796,11 @@ EOF
         sync   # 确保环境文件与服务脚本落盘，防止启动瞬时读取失败
 		(rc-service sing-box restart >/dev/null 2>&1 || true) &
     else
-        local mem_config=""; local cpu_quota=$((real_c * 100))
-        local io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
+        local io_config=""; local ionice_class=2; local mem_config=""; local cpu_quota=$((real_c * 100))
+        [ "$io_class" = "realtime" ] && ionice_class=1
+        if ionice -c ${ionice_class} -n ${io_prio} true >/dev/null 2>&1; then
+            io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
+        fi
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
