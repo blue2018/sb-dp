@@ -238,7 +238,6 @@ probe_network_rtt() {
         rtt_val="150"; echo -e "\033[1;33m[WARN]\033[0m 探测受阻，应用全球预估值: 150ms" >&2
     fi
     set -e
-    # 画像联动赋值
     real_rtt_factors=$(( rtt_val + 100 ))   # 延迟补偿：实测值 + 100ms (平衡握手开销)
 	# 丢包补偿：每 1% 丢包增加 5% 缓冲区冗余，最高 200%
     loss_compensation=$(( 100 + loss_val * 5 )); [ "$loss_compensation" -gt 200 ] && loss_compensation=200
@@ -828,8 +827,11 @@ EOF
         sync   # 确保环境文件与服务脚本落盘，防止启动瞬时读取失败
 		(rc-service sing-box restart >/dev/null 2>&1 || true) &
     else
-        local mem_config=""; local cpu_quota=$((real_c * 100))
-        local io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
+        local io_config=""; local ionice_class=2; local mem_config=""; local cpu_quota=$((real_c * 100))
+        [ "$io_class" = "realtime" ] && ionice_class=1
+        if ionice -c ${ionice_class} -n ${io_prio} true >/dev/null 2>&1; then
+            io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
+        fi
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
@@ -878,7 +880,7 @@ EOF
     done
     # 异步补课逻辑。在进程确认拉起后，从脚本主体执行一次优化，这样既保证了优化生效，又不会因为优化脚本运行时间长而导致服务启动超时
     ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 &
-	# --- 双进程外部 Argo 拉起逻辑 ---
+	# 双进程外部 Argo 拉起逻辑
     if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
         pkill -9 cloudflared >/dev/null 2>&1
         GOGC=30 nohup /usr/local/bin/cloudflared tunnel --protocol http2 --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
@@ -929,9 +931,7 @@ display_links() {
 
     # 状态检测：单行流式判断，兼容双进程模式
     pgrep sing-box >/dev/null 2>&1 && { [ "${USE_EXTERNAL_ARGO:-false}" != "true" ] || pgrep cloudflared >/dev/null 2>&1; } && s_text="\033[1;33monline\033[0m" && s_icon="\033[1;32m[✔]\033[0m"
-    # 双重 nc 探测逻辑
     _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 1 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
-    
     if command -v nc >/dev/null 2>&1; then
         _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 &
         # 替代 wait：硬超时保险，防止 nc 进程在某些路由下挂起导致脚本不往走
