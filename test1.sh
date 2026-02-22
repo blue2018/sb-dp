@@ -32,7 +32,6 @@ copy_to_clipboard() {
 # 侦测系统类型
 detect_os() {
     if [ -f /etc/os-release ]; then . /etc/os-release; OS_DISPLAY="${PRETTY_NAME:-$ID}"; ID="${ID:-}"; ID_LIKE="${ID_LIKE:-}"; else OS_DISPLAY="Unknown Linux"; ID="unknown"; ID_LIKE=""; fi
-    # 增强判定逻辑
     if [ -f /etc/alpine-release ]; then OS="alpine"; elif [ -f /etc/debian_version ]; then OS="debian"; elif [ -f /etc/redhat-release ]; then OS="redhat"; else
         local COMBINED="${ID} ${ID_LIKE}"; case "$COMBINED" in *[Aa][Ll][Pp][Ii][Nn][Ee]*) OS="alpine" ;; *[Dd][Ee][Bb][Ii][Aa][Nn]*|*[Uu][Bb][Uu][Nn][Tt][Uu]*) OS="debian" ;; *[Cc][Ee][Nn][Tt][Oo][Ss]*|*[Rr][Hh][Ee][Ll]*|*[Ff][Ee][Dd][Oo][Rr][Aa]*) OS="redhat" ;; *) OS="unknown" ;; esac
     fi
@@ -819,8 +818,9 @@ EOF
         sync   # 确保环境文件与服务脚本落盘，防止启动瞬时读取失败
 		(rc-service sing-box restart >/dev/null 2>&1 || true) &
     else
-        local io_config=""; local mem_config=""; local cpu_quota=$((real_c * 100))
-        if ionice -c 2 -n 4 true >/dev/null 2>&1; then
+        local io_config=""; local ionice_class=2; local mem_config=""; local cpu_quota=$((real_c * 100))
+        [ "$io_class" = "realtime" ] && ionice_class=1
+        if ionice -c ${ionice_class} -n ${io_prio} true >/dev/null 2>&1; then
             io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
         fi
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
