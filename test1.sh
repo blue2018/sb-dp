@@ -926,11 +926,11 @@ display_links() {
 
     # 状态检测
     pgrep sing-box >/dev/null 2>&1 && { [ "${USE_EXTERNAL_ARGO:-false}" != "true" ] || pgrep cloudflared >/dev/null 2>&1; } && s_text="\033[1;33monline\033[0m" && s_icon="\033[1;32m[✔]\033[0m"
-    _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.2; nc -z -u -w 1 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
+    _do_probe_raw() { [ -z "$1" ] && return; nc -z -u -w 1 "$1" "$RAW_PORT" >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
     if command -v nc >/dev/null 2>&1; then
         local p4="" p6=""
-		_do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>/dev/null & p4=$!; _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>/dev/null & p6=$!
-		[ -n "$p4" ] && wait "$p4" 2>/dev/null || true; [ -n "$p6" ] && wait "$p6" 2>/dev/null || true
+        _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & p4=$!; _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 & p6=$!
+        wait "$p4" "$p6" 2>/dev/null || true
         [[ "$(cat /tmp/sb_v4_res 2>/dev/null)" == "OK" || "$(cat /tmp/sb_v6_res 2>/dev/null)" == "OK" ]] && p_icon="\033[1;32m[✔]\033[0m"
     fi
 
