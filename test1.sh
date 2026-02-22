@@ -820,7 +820,7 @@ EOF
 		(rc-service sing-box restart >/dev/null 2>&1 || true) &
     else
         local io_config=""; local mem_config=""; local cpu_quota=$((real_c * 100))
-        if chrt -f 1 true >/dev/null 2>&1 || ionice -c 2 -n 4 true >/dev/null 2>&1; then
+        if ionice -c 2 -n 4 true >/dev/null 2>&1; then
             io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
         fi
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
