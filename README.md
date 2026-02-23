@@ -6,7 +6,7 @@ Hy2：
 ```bash
 curl -fsSL -H "Cache-Control: no-cache" https://raw.githubusercontent.com/blue2018/sb-dp/refs/heads/main/hy2ech.sh -o /usr/local/bin/hy2ech.sh && chmod +x /usr/local/bin/hy2ech.sh && hy2ech.sh
 ```
-Hy2 / VLESS + HttpUpgrade + Argo：(testing)
+Hy2 / VLESS + HttpUpgrade + Argo：
 ```bash
 bash -c "$(curl -fsSL https://github.com/blue2018/sb-dp/raw/refs/heads/main/install-DualStack.sh)"
 ```
