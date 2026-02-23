@@ -5,9 +5,9 @@ set -euo pipefail
 # 基础变量声明与环境准备
 # ==========================================
 SBOX_ARCH="";            OS_DISPLAY="";          SBOX_CORE="/etc/sing-box/core_script.sh";    ARGO_DOMAIN=""
-SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测"; ARGO_TOKEN=""
-SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM="";      USER_PORT=""
-VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_ECH=""; USE_EXTERNAL_ARGO="false"
+SBOX_GOLIMIT="48MiB";    SBOX_GOGC="100";        SBOX_MEM_MAX="55M";     SBOX_OPTIMIZE_LEVEL="未检测";      ARGO_TOKEN=""
+SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF_MEM="";      HY2_PORT=""; ANYTLS_PORT=""
+VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_ECH="";  USE_EXTERNAL_ARGO="false"
 VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
 TLS_DOMAIN_POOL=("www.microsoft.com" "www.apple.com" "www.icloud.com" "outlook.office.com" "login.live.com" "www.ebay.com")
@@ -443,16 +443,27 @@ verify_config() {
     fi
 }
 
-#防火墙开放端口
+# 防火墙开放端口，HY2 端口(UDP) 和 AnyTLS 端口(TCP)
 apply_firewall() {
-    local port=$(jq -r '.inbounds[0].listen_port // empty' /etc/sing-box/config.json 2>/dev/null)
-    [ -z "$port" ] && return 0
-    {   if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/udp >/dev/null 2>&1
-        elif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --list-ports | grep -q "$port/udp" || { firewall-cmd --add-port="$port"/udp --permanent; firewall-cmd --reload; } >/dev/null 2>&1
+    local hy2_port=$(jq -r '.. | objects | select(.type == "hysteria2") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n1)
+    local atls_port=$(jq -r '.. | objects | select(.tag == "anytls-in") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n1)
+    _fw_allow() {
+        local port="$1" proto="$2"
+        [ -z "$port" ] && return 0
+        if command -v ufw >/dev/null 2>&1; then ufw allow "$port"/"$proto" >/dev/null 2>&1
+        elif command -v firewall-cmd >/dev/null 2>&1; then
+            firewall-cmd --list-ports | grep -q "$port/$proto" || { firewall-cmd --add-port="$port"/"$proto" --permanent; firewall-cmd --reload; } >/dev/null 2>&1
         elif command -v iptables >/dev/null 2>&1; then
-            iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; iptables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1
-            command -v ip6tables >/dev/null 2>&1 && { ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; ip6tables -I INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1; }
-        fi    } || true
+            iptables -D INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1
+            iptables -I INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1
+            command -v ip6tables >/dev/null 2>&1 && {
+                ip6tables -D INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1
+                ip6tables -I INPUT -p "$proto" --dport "$port" -j ACCEPT >/dev/null 2>&1
+            }
+        fi
+    } || true
+    _fw_allow "$hy2_port"  "udp"   # HY2 走 UDP
+    _fw_allow "$atls_port" "tcp"   # AnyTLS 走 TCP
 }
 	
 # "全功能调度器"
@@ -717,7 +728,7 @@ install_singbox() {
 # 配置文件生成
 # ==========================================
 create_config() {
-    local PORT_HY2="${1:-}"; local A_DOMAIN="${ARGO_DOMAIN:-}"; local A_TOKEN="${ARGO_TOKEN:-}"; local cur_bw="${VAR_HY2_BW:-200}"
+    local PORT_HY2="${1:-}"; local PORT_ATLS="${2:-}" local A_DOMAIN="${ARGO_DOMAIN:-}"; local A_TOKEN="${ARGO_TOKEN:-}"; local cur_bw="${VAR_HY2_BW:-200}"
     mkdir -p /etc/sing-box
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
@@ -759,13 +770,30 @@ create_config() {
           "transport": { "type": "httpupgrade", "host": "%s" }
         }' "$PSK" "$A_DOMAIN")
     fi
-    
+
+	# 构造 AnyTLS Inbound (VLESS + AnyTLS，复用证书与 PSK)
+    [ -z "$PORT_ATLS" ] && [ -f /etc/sing-box/config.json ] && \
+        PORT_ATLS=$(jq -r '.. | objects | select(.tag == "anytls-in") | .listen_port // empty' /etc/sing-box/config.json 2>/dev/null | head -n1)
+    local ANYTLS_IN=""
+    if [ -n "$PORT_ATLS" ]; then
+        ANYTLS_IN=$(printf ',{
+          "type": "anytls", "tag": "anytls-in", "listen": "::", "listen_port": %s,
+          "users": [ { "name": "default", "password": "%s" } ],
+          "tls": {
+            "enabled": true, "server_name": "%s", "min_version": "1.3",
+            "certificate_path": "/etc/sing-box/certs/fullchain.pem",
+            "key_path": "/etc/sing-box/certs/privkey.pem",
+            "ech": { "enabled": true, "key_path": "/etc/sing-box/certs/ech.key" }
+          }
+        }' "$PORT_ATLS" "$PSK" "$TLS_DOMAIN")
+    fi
+	
     # 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
   "dns": { "servers":[$dns_srv], "strategy":"$ds", "independent_cache":true },
-  "inbounds": [ $HY2_IN $ARGO_IN ],
+  "inbounds": [ $HY2_IN $ARGO_IN $ANYTLS_IN ],
   "outbounds": [ { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" } ]
 }
 EOF
@@ -903,6 +931,8 @@ get_env_data() {
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$d"
     # 提取 Argo 域名 (通过 transport.host 确保兼容单/双进程模式)
 	RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // empty' "$CFG" 2>/dev/null)
+	# 提取 AnyTLS 端口
+    RAW_ANYTLS_PORT=$(jq -r '.. | objects | select(.tag == "anytls-in") | .listen_port // empty' "$CFG" 2>/dev/null | head -n1)
     # 提取 SNI 与 指纹
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
     [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
@@ -938,6 +968,20 @@ display_links() {
     [ -n "${RAW_IP4:-}" ] && LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v4" && echo -e "\n\033[1;35m[IPv4 节点]\033[0m\n$LINK_V4" && FULL_CLIP="$LINK_V4"
     [[ "${RAW_IP6:-}" == *:* ]] && LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v6" && echo -e "\n\033[1;36m[IPv6 节点]\033[0m\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
 	[ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ] && LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo" && echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
+	# AnyTLS 节点链接 (IPv4 + IPv6，VLESS over AnyTLS)
+    local ATLS_PARAM="security=tls&type=anytls&sni=$RAW_SNI&insecure=1${RAW_FP:+&fp=$RAW_FP}"
+    if [ -n "${RAW_ANYTLS_PORT:-}" ] && [ "$RAW_ANYTLS_PORT" != "null" ]; then
+        [ -n "${RAW_IP4:-}" ] && {
+            local LINK_ATLS_V4="vless://$RAW_PSK@$RAW_IP4:$RAW_ANYTLS_PORT/?${ATLS_PARAM}#${hostname_tag}_AnyTLS_v4"
+            echo -e "\n\033[1;32m[AnyTLS IPv4]\033[0m\n$LINK_ATLS_V4"
+            FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ATLS_V4"
+        }
+        [[ "${RAW_IP6:-}" == *:* ]] && {
+            local LINK_ATLS_V6="vless://$RAW_PSK@[$RAW_IP6]:$RAW_ANYTLS_PORT/?${ATLS_PARAM}#${hostname_tag}_AnyTLS_v6"
+            echo -e "\n\033[1;34m[AnyTLS IPv6]\033[0m\n$LINK_ATLS_V6"
+            FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ATLS_V6"
+        }
+    fi
 	
     echo -e "\n\033[1;34m==========================================\033[0m"
     echo -e "\033[1;32m[安全增强]\033[0m 流量已混入 $RAW_SNI 的 TLS 1.3 握手池"
@@ -1012,8 +1056,13 @@ elif [[ "${1:-}" == "--show-only" ]]; then
     display_system_status; display_links
 elif [[ "${1:-}" == "--reset-port" ]]; then
     f="/etc/sing-box/config.json"; cp "$f" "$f.bak"
-    create_config "$2"
-    if verify_config; then service_ctrl restart && succ "端口已重置并生效" && get_env_data && display_links && rm -f "$f.bak"
+    if [[ "${2:-}" == "hy2" ]]; then
+        jq --argjson p "${3:-0}" '(.inbounds[] | select(.type == "hysteria2") | .listen_port) |= $p' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    elif [[ "${2:-}" == "anytls" ]]; then
+        jq --argjson p "${3:-0}" '(.inbounds[] | select(.tag == "anytls-in") | .listen_port) |= $p' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    fi
+    if verify_config; then
+        service_ctrl restart && succ "端口已重置并生效" && get_env_data && display_links && rm -f "$f.bak"
     else mv "$f.bak" "$f" && service_ctrl restart && err "已回滚至旧配置"; fi
 elif [[ "${1:-}" == "--update-kernel" ]]; then
     if install_singbox "update"; then
@@ -1061,7 +1110,18 @@ while true; do
                else warn "检测到语法错误，正在尝试回滚..."; mv "$f.bak" "$f" && service_ctrl restart && info "配置已还原，请再次尝试修改"; fi
            else info "配置未作变更" && rm -f "$f.bak"; fi
            read -r -p $'\n按回车键返回菜单...' ;;
-        3) source "$SBOX_CORE" --reset-port "$(prompt_for_port)"; read -r -p $'\n按回车键返回菜单...' ;;
+        3) while true; do
+               echo -e "\n\033[1;36m[重置端口]\033[0m 请选择协议："
+               echo "1. 重置 HY2 端口    2. 重置 AnyTLS 端口    0. 返回主菜单"
+               read -r -p "请选择 [0-2]: " sub
+               case "${sub:-}" in
+                   1) source "$SBOX_CORE" --reset-port hy2 "$(prompt_for_port)"; break ;;
+                   2) source "$SBOX_CORE" --reset-port anytls "$(prompt_for_port)"; break ;;
+                   0) break ;;
+                   *) echo -e "\033[1;31m输入有误，请重新输入\033[0m" ;;
+               esac
+           done
+           read -r -p $'\n按回车键返回菜单...' ;;
         4) source "$SBOX_CORE" --update-kernel; read -r -p $'\n按回车键返回菜单...' ;;
         5) service_ctrl restart && info "系统服务和优化参数已重载"; read -r -p $'\n按回车键返回菜单...' ;;
 		6) read -r -p "是否确定卸载？(默认N) [y/N]: " cf
@@ -1093,12 +1153,13 @@ detect_os
 install_dependencies
 CPU_CORE=$(get_cpu_core); export CPU_CORE
 get_network_info; echo -e "-----------------------------------------------"
-USER_PORT=$(prompt_for_port); echo -e "-----------------------------------------------"
+echo -e "\033[1;36m[HY2 端口]\033[0m"; HY2_PORT=$(prompt_for_port); echo -e "-----------------------------------------------"
+echo -e "\033[1;36m[AnyTLS 端口]\033[0m"; ANYTLS_PORT=$(prompt_for_port); echo -e "-----------------------------------------------"
 setup_argo_logic; export ARGO_DOMAIN ARGO_TOKEN USE_EXTERNAL_ARGO; echo -e "-----------------------------------------------"
 optimize_system
 install_singbox "install"
 generate_cert
-create_config "$USER_PORT"
+create_config "$HY2_PORT" "$ANYTLS_PORT"
 verify_config || exit 1
 get_env_data
 create_sb_tool
