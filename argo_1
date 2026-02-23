@@ -523,7 +523,7 @@ optimize_system() {
         [ "$dyn_buf" -gt 8388608 ] && dyn_buf=8388608   # 强制上限 8MB，维持高周转
         [ "$dyn_buf" -lt 4194304 ] && dyn_buf=4194304   # 保底 4MB
     else
-        [ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
+        [ "$mem_total" -ge 200 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
         [ "$dyn_buf" -lt 16777216 ] && dyn_buf=16777216
     fi
     [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864
