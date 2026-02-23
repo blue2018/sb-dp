@@ -10,7 +10,7 @@ SBOX_MEM_HIGH="42M";     CPU_CORE="1";           INITCWND_DONE="false";  VAR_DEF
 VAR_UDP_RMEM="";         VAR_UDP_WMEM="";        VAR_SYSTEMD_NICE="";    VAR_HY2_BW="200";    RAW_ECH=""; USE_EXTERNAL_ARGO="false"
 VAR_SYSTEMD_IOSCHED="";  SWAPPINESS_VAL="10";    BUSY_POLL_VAL="0";      VAR_BACKLOG="5000";  UDP_MEM_SCALE=""
 
-TLS_DOMAIN_POOL=("www.bing.com" "www.microsoft.com" "itunes.apple.com" "www.icloud.com" "www.ebay.com" "www.paypal.com")
+TLS_DOMAIN_POOL=("www.microsoft.com" "www.apple.com" "www.icloud.com" "outlook.office.com" "login.live.com" "www.ebay.com")
 pick_tls_domain() { echo "${TLS_DOMAIN_POOL[$RANDOM % ${#TLS_DOMAIN_POOL[@]}]}"; }
 TLS_DOMAIN="$(pick_tls_domain)"
 
@@ -32,7 +32,6 @@ copy_to_clipboard() {
 # 侦测系统类型
 detect_os() {
     if [ -f /etc/os-release ]; then . /etc/os-release; OS_DISPLAY="${PRETTY_NAME:-$ID}"; ID="${ID:-}"; ID_LIKE="${ID_LIKE:-}"; else OS_DISPLAY="Unknown Linux"; ID="unknown"; ID_LIKE=""; fi
-    # 增强判定逻辑
     if [ -f /etc/alpine-release ]; then OS="alpine"; elif [ -f /etc/debian_version ]; then OS="debian"; elif [ -f /etc/redhat-release ]; then OS="redhat"; else
         local COMBINED="${ID} ${ID_LIKE}"; case "$COMBINED" in *[Aa][Ll][Pp][Ii][Nn][Ee]*) OS="alpine" ;; *[Dd][Ee][Bb][Ii][Aa][Nn]*|*[Uu][Bb][Uu][Nn][Tt][Uu]*) OS="debian" ;; *[Cc][Ee][Nn][Tt][Oo][Ss]*|*[Rr][Hh][Ee][Ll]*|*[Ff][Ee][Dd][Oo][Rr][Aa]*) OS="redhat" ;; *) OS="unknown" ;; esac
     fi
@@ -116,24 +115,24 @@ prompt_for_port() {
 # 创建 Argo 隧道
 setup_argo_logic() {
     local argo_d argo_t mem_total=$(probe_memory_total); : ${mem_total:=64}
-    echo -e "\033[1;32m[可选配置]\033[0m\nVLESS + HttpUpgrade + Argo: CF隧道转发\n-----------------------------------------------" >&2
+    echo -e "\033[1;32m[可选配置]\033[0m\nVLESS + HttpUpgrade + Argo: CF 隧道转发\n-----------------------------------------------" >&2
     echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车跳过可选配置): " >&2; read -r argo_d
-    if [ -z "$argo_d" ]; then ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2
-    elif [ "$mem_total" -lt 150 ] && ! /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
+    if [ -z "$argo_d" ]; then
         ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"
-        echo -e "\033[1;33m[跳过]\033[0m 内存不足 200M 且内核不支持内建 Argo，为保系统稳定已自动跳过" >&2
+        echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2
+    elif [ "$mem_total" -lt 128 ]; then
+        ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"
+        echo -e "\033[1;33m[跳过]\033[0m 内存不足 128M，为保系统稳定已自动跳过 Argo 配置" >&2
     else
         while :; do
             echo -ne "请输入 Argo 隧道的 Token: " >&2; read -r argo_t
             if [ -z "$argo_t" ]; then echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2; continue; fi
-            ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"
-            if /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
-                USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 检测到内核支持内建 Argo，开启单进程模式" >&2
-            elif [ -f "/usr/local/bin/cloudflared" ]; then
-                USE_EXTERNAL_ARGO="true"; echo -e "\033[1;33m[INFO]\033[0m 已存在外部客户端，跳过下载" >&2
+            ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"; USE_EXTERNAL_ARGO="true"
+            if [ -f "/usr/local/bin/cloudflared" ]; then
+                echo -e "\033[1;33m[INFO]\033[0m 已存在 cloudflared，跳过下载" >&2
             else
-                USE_EXTERNAL_ARGO="true"; echo -ne "\033[1;32m[INFO]\033[0m 下载官方 cloudflared... " >&2
-                wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 && chmod +x /usr/local/bin/cloudflared && echo -e "\033[1;32m[完成]\033[0m" >&2 || { echo -e "\033[1;31m[失败]\033[0m" >&2; exit 1; }
+                echo -ne "\033[1;32m[INFO]\033[0m 下载官方 cloudflared... " >&2
+                wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${SBOX_ARCH} && chmod +x /usr/local/bin/cloudflared && echo -e "\033[1;32m[完成]\033[0m" >&2 || { echo -e "\033[1;31m[失败]\033[0m" >&2; exit 1; }
             fi; break
         done
     fi
@@ -182,6 +181,7 @@ generate_cert() {
     sed -n '/BEGIN ECH KEYS/,/END ECH KEYS/p' "$TMP_ECH" > "$CERT_DIR/ech.key"
     sed -n '/BEGIN ECH CONFIGS/,/END ECH CONFIGS/p' "$TMP_ECH" > "$CERT_DIR/ech.pub"
     rm -f "$TMP_ECH"
+	
     # 校验并提取指纹
     if [ -s "$CERT_DIR/ech.key" ] && [ -s "$CERT_DIR/fullchain.pem" ]; then
         openssl x509 -in "$CERT_DIR/fullchain.pem" -noout -sha256 -fingerprint | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]' > "$CERT_DIR/cert_fingerprint.txt"
@@ -201,7 +201,6 @@ get_network_info() {
         { curl $p -ksSfL --connect-timeout 1 --max-time 3 "https://1.1.1.1/cdn-cgi/trace" | awk -F= '/ip/ {print $2}'; } || \
         { [ "$p" = "-4" ] && curl $p -ksSfL --connect-timeout 1 --max-time 2 "https://api.ipify.org" || curl $p -ksSfL --connect-timeout 2 --max-time 4 "https://api6.ipify.org" ; } || \
           curl $p -ksSfL --connect-timeout 1 --max-time 2 "https://icanhazip.com" || echo ""; }
-		  
     # 2. 异步执行：并行探测
     _f -4 >"$t4" 2>/dev/null & p4=$!; _f -6 >"$t6" 2>/dev/null & p6=$!; wait $p4 $p6 2>/dev/null
     # 3. 数据清洗 (融合版)：在主进程统一清洗数据
@@ -391,7 +390,6 @@ SINGBOX_UDP_SENDBUF=$buf
 VAR_HY2_BW=$VAR_HY2_BW
 EOF
     chmod 644 /etc/sing-box/env
-	
     # 4. CPU 亲和力 (仅多核且存在 taskset 时优化)
     [ "$real_c" -gt 1 ] && command -v taskset >/dev/null 2>&1 && taskset -pc 0-$((real_c - 1)) $$ >/dev/null 2>&1
     info "Runtime → GOMAXPROCS: $GOMAXPROCS 核 | 内存限额: $GOMEMLIMIT | GOGC: $GOGC | Buffer: $((buf/1024)) KB"
@@ -608,6 +606,9 @@ net.core.default_qdisc = fq                # BBR必备调度规则
 net.core.netdev_budget = $net_bgt          # 调度预算 (单次轮询处理包数)
 net.core.netdev_budget_usecs = $net_usc    # 调度时长 (单次轮询微秒上限)
 net.core.netdev_tstamp_prequeue = 0        # 禁用时间戳预处理 (降延迟)
+net.ipv4.tcp_keepalive_time = 60           # 60s 无数据开始探测 (防NAT断流)
+net.ipv4.tcp_keepalive_intvl = 10          # 每 10s 探测一次
+net.ipv4.tcp_keepalive_probes = 3          # 连续 3 次无响应视为断线
 
 # === 三、 协议栈缓冲与自适应加速 (TCP/UDP/BBR/MTU) ===
 # --- 全局缓冲区限制 ---
@@ -720,6 +721,7 @@ create_config() {
     mkdir -p /etc/sing-box
     local ds="ipv4_only"; local PSK=""; 
     [ "${IS_V6_OK:-false}" = "true" ] && ds="prefer_ipv4"
+	
     local mem_total=$(probe_memory_total); : ${mem_total:=64}; local timeout="30s"
     local dns_srv='{"address":"8.8.4.4","detour":"direct-out"},{"address":"1.1.1.1","detour":"direct-out"}'
     [ "$mem_total" -ge 100 ] && timeout="40s" && dns_srv='{"tag":"cloudflare-doh","address":"https://1.1.1.1/dns-query","detour":"direct-out"},{"tag":"google-doh","address":"https://8.8.8.8/dns-query","detour":"direct-out"}'
@@ -748,32 +750,21 @@ create_config() {
       "masquerade": "https://%s"
     }' "$PORT_HY2" "$PSK" "$cur_bw" "$cur_bw" "$timeout" "$TLS_DOMAIN" "$TLS_DOMAIN")
 
-    # 构造 Argo Inbound (动态适配内核能力)
-	local ARGO_IN=""
-    if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ]; then
-        if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
-		    # 外部模式：必须指定 listen 为 127.0.0.1，防止外部扫描到该端口
-            ARGO_IN=$(printf ',{
-              "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
-              "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "%s" }
-            }' "$PSK" "$A_DOMAIN")
-        else
-		    # 内建模式：内核自带 argo 驱动，不需要 listen 端口，它是主动连接 CF 的
-            ARGO_IN=$(printf ',{
-              "type": "vless", "tag": "vless-argo-in", "server_name": "%s",
-              "cloudflare": { "enabled": true, "tunnel": { "token": "%s" } },
-              "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-              "transport": { "type": "httpupgrade", "host": "%s" }
-            }' "$A_DOMAIN" "$A_TOKEN" "$PSK" "$A_DOMAIN")
-        fi
+    # 构造 Argo Inbound
+    local ARGO_IN=""
+    if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
+        ARGO_IN=$(printf ',{
+          "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
+          "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
+          "transport": { "type": "httpupgrade", "host": "%s" }
+        }' "$PSK" "$A_DOMAIN")
     fi
     
     # 写入 Sing-box 配置文件
     cat > "/etc/sing-box/config.json" <<EOF
 {
   "log": { "level": "fatal", "timestamp": true },
-  "dns": { "servers":[$dns_srv], "strategy":"$ds", "independent_cache":true, "disable_cache":false, "disable_expire":false },
+  "dns": { "servers":[$dns_srv], "strategy":"$ds", "independent_cache":true },
   "inbounds": [ $HY2_IN $ARGO_IN ],
   "outbounds": [ { "type": "direct", "tag": "direct-out", "domain_strategy": "$ds" } ]
 }
@@ -795,6 +786,7 @@ setup_service() {
     [ "$mem_total" -lt 200 ] && io_prio=7
     local final_nice="$cur_nice"
     info "配置服务 (核心: $real_c | 绑定: $core_range | Nice预设: $cur_nice)..."
+	
     if ! renice "$cur_nice" $$ >/dev/null 2>&1; then
         warn "当前环境禁止高优先级调度，已自动回退至默认权重 (Nice 0)"
         final_nice=0
@@ -872,7 +864,7 @@ EOF
 		(systemctl restart sing-box >/dev/null 2>&1 || true) &
     fi
     set +e     # 关闭 set -e，这是防止脚本在 pidof 失败时直接退出的关键核心
-    for i in {1..40}; do
+	for i in {1..40}; do
         pid=$(pgrep -x "sing-box" 2>/dev/null | head -n 1)
         [ -z "${pid}" ] && pid=$(pgrep -f "sing-box run" | awk '{print $1}' | head -n 1)
         [ -n "${pid}" ] && [ -e "/proc/${pid}" ] && break
@@ -882,9 +874,12 @@ EOF
     ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 &
 	# 双进程外部 Argo 拉起逻辑
     if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
-        pkill -9 cloudflared >/dev/null 2>&1
-        GOGC=30 nohup /usr/local/bin/cloudflared tunnel --protocol http2 --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
-    fi
+	    pkill -9 cloudflared >/dev/null 2>&1 || true
+	    local cf_memlimit; [ "${mem_total:-64}" -ge 256 ] && cf_memlimit="40MiB" || cf_memlimit="30MiB"
+	    GOGC=30 GOMEMLIMIT=${cf_memlimit} GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
+	        --protocol http2 --edge-ip-version auto --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 \
+	        run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
+	fi
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
@@ -907,7 +902,7 @@ get_env_data() {
     [ -z "$d" ] && return 1
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$d"
     # 提取 Argo 域名 (通过 transport.host 确保兼容单/双进程模式)
-    RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // empty' "$CFG" 2>/dev/null)
+	RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // empty' "$CFG" 2>/dev/null)
     # 提取 SNI 与 指纹
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
     [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
@@ -929,9 +924,9 @@ display_links() {
     local BASE_PARAM="sni=$RAW_SNI&alpn=h3&insecure=1${RAW_FP:+&pinsha256=$RAW_FP}${RAW_ECH:+&ech=$RAW_ECH}"
     local p_text="\033[1;33m${RAW_PORT:-"未知"}\033[0m" s_text="\033[1;33moffline\033[0m" p_icon="\033[1;31m[✖]\033[0m" s_icon="\033[1;31m[✖]\033[0m"
 
-    # 状态检测：单行流式判断，兼容双进程模式
+    # 状态检测
     pgrep sing-box >/dev/null 2>&1 && { [ "${USE_EXTERNAL_ARGO:-false}" != "true" ] || pgrep cloudflared >/dev/null 2>&1; } && s_text="\033[1;33monline\033[0m" && s_icon="\033[1;32m[✔]\033[0m"
-    _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.3; nc -z -u -w 1 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
+    _do_probe_raw() { [ -z "$1" ] && return; (nc -z -u -w 1 "$1" "$RAW_PORT" || { sleep 0.2; nc -z -u -w 1 "$1" "$RAW_PORT"; }) >/dev/null 2>&1 && echo "OK" || echo "FAIL"; }
     if command -v nc >/dev/null 2>&1; then
         _do_probe_raw "${RAW_IP4:-}" > /tmp/sb_v4_res 2>&1 & _do_probe_raw "${RAW_IP6:-}" > /tmp/sb_v6_res 2>&1 &
         # 替代 wait：硬超时保险，防止 nc 进程在某些路由下挂起导致脚本不往走
@@ -940,11 +935,10 @@ display_links() {
     fi
 
     echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon | 服务: $s_text $s_icon"
-    # 链接生成：紧凑排列
     [ -n "${RAW_IP4:-}" ] && LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v4" && echo -e "\n\033[1;35m[IPv4 节点]\033[0m\n$LINK_V4" && FULL_CLIP="$LINK_V4"
     [[ "${RAW_IP6:-}" == *:* ]] && LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v6" && echo -e "\n\033[1;36m[IPv6 节点]\033[0m\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
-    [ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ] && LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo" && echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
-
+	[ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ] && LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo" && echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
+	
     echo -e "\n\033[1;34m==========================================\033[0m"
     echo -e "\033[1;32m[安全增强]\033[0m 流量已混入 $RAW_SNI 的 TLS 1.3 握手池"
     [ -n "$RAW_ARGO_DOMAIN" ] && echo -e "\033[1;32m[隧道增强]\033[0m 已启用 Cloudflare Argo 反向转发"
@@ -958,6 +952,7 @@ display_system_status() {
     local CWND_LBL=$(echo "$ROUTE_DEF" | grep -q "initcwnd" && echo "(已优化)" || echo "(默认)")
     local SBOX_PID=$(pgrep sing-box | head -n1)
     local NI_VAL="(未探测)"; local NI_LBL=""
+	
     if [ -n "$SBOX_PID" ] && [ -f "/proc/$SBOX_PID/stat" ]; then
         NI_VAL=$(cat "/proc/$SBOX_PID/stat" | awk '{print $19}')
         [ "$NI_VAL" -lt 0 ] && NI_LBL="(进程优先)" || { [ "$NI_VAL" -gt 0 ] && NI_LBL="(低优先级)" || NI_LBL="(默认)"; }
