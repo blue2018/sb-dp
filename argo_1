@@ -294,7 +294,7 @@ apply_initcwnd_optimization() {
 # ZRAM/Swap 智能配置
 setup_zrm_swap() {
     local mt="$1" zs z_bytes st algo="lz4"
-    [ -z "$mt" ] || [ "$mt" -ge 600 ] && return 0  
+    { [ -z "$mt" ] || [ "$mt" -ge 600 ]; } && return 0
     grep -q "zram0" /proc/swaps && { info "ZRAM 已就绪"; return 0; }
 	
     if ! modprobe zram 2>/dev/null; then [ "$OS" = "alpine" ] && apk add linux-virt-modules >/dev/null 2>&1 && modprobe zram 2>/dev/null; fi
