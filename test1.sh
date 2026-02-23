@@ -968,7 +968,7 @@ display_links() {
     [ -n "${RAW_IP4:-}" ] && LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v4" && echo -e "\n\033[1;35m[IPv4 节点]\033[0m\n$LINK_V4" && FULL_CLIP="$LINK_V4"
     [[ "${RAW_IP6:-}" == *:* ]] && LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v6" && echo -e "\n\033[1;36m[IPv6 节点]\033[0m\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
 	[ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ] && LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo" && echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
-	local ATLS_PARAM="security=tls&type=anytls&sni=$RAW_SNI&insecure=1&fp=chrome${RAW_FP:+&pinsha256=$RAW_FP}"
+	local ATLS_PARAM="encryption=none&security=tls&type=anytls&sni=$RAW_SNI&insecure=1&fp=chrome${RAW_FP:+&pinsha256=$RAW_FP}"
     if [ -n "${RAW_ANYTLS_PORT:-}" ] && [ "$RAW_ANYTLS_PORT" != "null" ]; then
         [ -n "${RAW_IP4:-}" ] && {
             local LINK_ATLS_V4="vless://$RAW_PSK@$RAW_IP4:$RAW_ANYTLS_PORT/?${ATLS_PARAM}#${hostname_tag}_AnyTLS_v4"
