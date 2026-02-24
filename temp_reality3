@@ -297,7 +297,7 @@ apply_initcwnd_optimization() {
 # ZRAM/Swap 智能配置
 setup_zrm_swap() {
     local mt="$1" zs z_bytes st algo="lz4"
-    [ -z "$mt" ] || [ "$mt" -ge 600 ] && return 0  
+    { [ -z "$mt" ] || [ "$mt" -ge 600 ]; } && return 0
     grep -q "zram0" /proc/swaps && { info "ZRAM 已就绪"; return 0; }
 	
     if ! modprobe zram 2>/dev/null; then [ "$OS" = "alpine" ] && apk add linux-virt-modules >/dev/null 2>&1 && modprobe zram 2>/dev/null; fi
@@ -528,7 +528,7 @@ optimize_system() {
         [ "$dyn_buf" -gt 8388608 ] && dyn_buf=8388608   # 强制上限 8MB，维持高周转
         [ "$dyn_buf" -lt 4194304 ] && dyn_buf=4194304   # 保底 4MB
     else
-        [ "$mem_total" -ge 100 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
+        [ "$mem_total" -ge 200 ] && [ "$dyn_buf" -lt 33554432 ] && dyn_buf=33554432
         [ "$dyn_buf" -lt 16777216 ] && dyn_buf=16777216
     fi
     [ "$dyn_buf" -gt 67108864 ] && dyn_buf=67108864
@@ -869,8 +869,11 @@ EOF
         sync   # 确保环境文件与服务脚本落盘，防止启动瞬时读取失败
 		(rc-service sing-box restart >/dev/null 2>&1 || true) &
     else
-        local mem_config=""; local cpu_quota=$((real_c * 100))
-        local io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
+        local io_config=""; local ionice_class=2; local mem_config=""; local cpu_quota=$((real_c * 100))
+        [ "$io_class" = "realtime" ] && ionice_class=1
+        if ionice -c ${ionice_class} -n ${io_prio} true >/dev/null 2>&1; then
+            io_config="IOSchedulingClass=${io_class}"$'\n'"IOSchedulingPriority=${io_prio}"
+        fi
         [ "$cpu_quota" -lt 100 ] && cpu_quota=100
         [ -n "$SBOX_MEM_HIGH" ] && mem_config="MemoryHigh=$SBOX_MEM_HIGH"$'\n'
         [ -n "$SBOX_MEM_MAX" ] && mem_config+="MemoryMax=$SBOX_MEM_MAX"$'\n'
