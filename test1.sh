@@ -894,25 +894,33 @@ EOF
                 --protocol quic --edge-ip-version auto --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 \
                 run --post-quantum --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
         else
-            GOGC=30 GOMEMLIMIT=${cf_memlimit} GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
-                --protocol quic --edge-ip-version auto --no-autoupdate \
-                --url http://127.0.0.1:8001 --logfile /tmp/argo_tmp.log 2>&1 &
-            local tmp_domain="" n=0
-            while [ $n -lt 15 ] && [ -z "$tmp_domain" ]; do
-                sleep 1; n=$((n+1))
-                tmp_domain=$(grep -oE '[a-z0-9-]+\.trycloudflare\.com' /tmp/argo_tmp.log 2>/dev/null | head -n1)
-            done
-            if [ -n "$tmp_domain" ]; then
-                ARGO_DOMAIN="$tmp_domain"
-                jq --arg d "$tmp_domain" '(.inbounds[] | select(.tag=="vless-argo-in") | .transport.host) = $d' \
-                    /etc/sing-box/config.json > /tmp/cfg_tmp.json && mv /tmp/cfg_tmp.json /etc/sing-box/config.json
-                succ "临时隧道已建立: $tmp_domain"
-                # 等待首次启动的 sing-box 进程就绪后再用新配置重启
-                sleep 3; pkill -9 sing-box >/dev/null 2>&1 || true; sleep 1
-                ( rc-service sing-box start >/dev/null 2>&1 || systemctl start sing-box >/dev/null 2>&1 ) &
-            else
-                warn "临时隧道域名获取超时，Argo 节点链接可能为空"
-            fi
+            # 临时隧道：等 sing-box 启动完再申请，避免并发 OOM
+            { 
+                local tw=0
+                while [ $tw -lt 30 ]; do
+                    pgrep -x sing-box >/dev/null 2>&1 && break
+                    sleep 1; tw=$((tw+1))
+                done
+                GOGC=30 GOMEMLIMIT=${cf_memlimit} GOMAXPROCS="${CPU_CORE:-1}" /usr/local/bin/cloudflared tunnel \
+                    --protocol quic --edge-ip-version auto --no-autoupdate \
+                    --url http://127.0.0.1:8001 --logfile /tmp/argo_tmp.log 2>&1 &
+                local tmp_domain="" n=0
+                while [ $n -lt 15 ] && [ -z "$tmp_domain" ]; do
+                    sleep 1; n=$((n+1))
+                    tmp_domain=$(grep -oE '[a-z0-9-]+\.trycloudflare\.com' /tmp/argo_tmp.log 2>/dev/null | head -n1)
+                done
+                if [ -n "$tmp_domain" ]; then
+                    ARGO_DOMAIN="$tmp_domain"
+                    jq --arg d "$tmp_domain" '(.inbounds[] | select(.tag=="vless-argo-in") | .transport.host) = $d' \
+                        /etc/sing-box/config.json > /tmp/cfg_tmp.json && mv /tmp/cfg_tmp.json /etc/sing-box/config.json
+                    succ "临时隧道已建立: $tmp_domain"
+                    # 用新配置重启 sing-box
+                    pkill -x sing-box >/dev/null 2>&1; sleep 1
+                    rc-service sing-box start >/dev/null 2>&1 || systemctl start sing-box >/dev/null 2>&1
+                else
+                    warn "临时隧道域名获取超时，Argo 节点链接可能为空"
+                fi
+            } &
         fi
     fi
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
