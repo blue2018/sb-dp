@@ -121,7 +121,7 @@ setup_argo_logic() {
     if [ -z "$argo_d" ]; then ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2
     elif [ "$mem_total" -lt 128 ] && ! /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
         ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"
-        echo -e "\033[1;33m[跳过]\033[0m 内存不足 200M 且内核不支持内建 Argo，为保系统稳定已自动跳过" >&2
+        echo -e "\033[1;33m[跳过]\033[0m 内存不足 128M 且内核不支持内建 Argo，为保系统稳定已自动跳过" >&2
     else
         while :; do
             echo -ne "请输入 Argo 隧道的 Token: " >&2; read -r argo_t
