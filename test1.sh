@@ -116,25 +116,26 @@ prompt_for_port() {
 setup_argo_logic() {
     local argo_d argo_t mem_total=$(probe_memory_total); : ${mem_total:=64}
     echo -e "\033[1;32m[可选配置]\033[0m\nVLESS + HttpUpgrade + Argo: CF 隧道转发\n-----------------------------------------------" >&2
-    echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车跳过可选配置): " >&2; read -r argo_d
-    if [ -z "$argo_d" ]; then
+    echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车申请临时隧道): " >&2; read -r argo_d
+    if [ "$mem_total" -lt 128 ]; then
         ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"
-        echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2
-    elif [ "$mem_total" -lt 128 ]; then
-        ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"
-        echo -e "\033[1;33m[跳过]\033[0m 内存不足 128M，为保系统稳定已自动跳过 Argo 配置" >&2
-    else
+        echo -e "\033[1;33m[跳过]\033[0m 内存不足 128M，为保系统稳定已自动跳过 Argo 配置" >&2; return
+    fi
+    if [ -n "$argo_d" ]; then
         while :; do
             echo -ne "请输入 Argo 隧道的 Token: " >&2; read -r argo_t
-            if [ -z "$argo_t" ]; then echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2; continue; fi
-            ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"; USE_EXTERNAL_ARGO="true"
-            if [ -f "/usr/local/bin/cloudflared" ]; then
-                echo -e "\033[1;33m[INFO]\033[0m 已存在 cloudflared，跳过下载" >&2
-            else
-                echo -ne "\033[1;32m[INFO]\033[0m 下载官方 cloudflared... " >&2
-                wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${SBOX_ARCH} && chmod +x /usr/local/bin/cloudflared && echo -e "\033[1;32m[完成]\033[0m" >&2 || { echo -e "\033[1;31m[失败]\033[0m" >&2; exit 1; }
-            fi; break
+            [ -n "$argo_t" ] && break; echo -e "\033[1;33m[WARN]\033[0m Token 不能为空" >&2
         done
+        ARGO_DOMAIN="$argo_d"; ARGO_TOKEN="$argo_t"
+    else
+        ARGO_DOMAIN=""; ARGO_TOKEN=""
+        echo -e "\033[1;32m[INFO]\033[0m 未输入域名，将申请 trycloudflare.com 临时隧道" >&2
+    fi
+    USE_EXTERNAL_ARGO="true"
+    if [ -f "/usr/local/bin/cloudflared" ]; then echo -e "\033[1;33m[INFO]\033[0m 已存在 cloudflared，跳过下载" >&2
+    else
+        echo -ne "\033[1;32m[INFO]\033[0m 下载官方 cloudflared... " >&2
+        wget -qO /usr/local/bin/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${SBOX_ARCH} && chmod +x /usr/local/bin/cloudflared && echo -e "\033[1;32m[完成]\033[0m" >&2 || { echo -e "\033[1;31m[失败]\033[0m" >&2; exit 1; }
     fi
 }
 
@@ -752,7 +753,8 @@ create_config() {
 
     # 构造 Argo Inbound
     local ARGO_IN=""
-    if [ -n "$A_TOKEN" ] && [ -n "$A_DOMAIN" ] && [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
+    if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
+        [ -z "$A_DOMAIN" ] && A_DOMAIN="pending.trycloudflare.com"
         ARGO_IN=$(printf ',{
           "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
           "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
@@ -873,13 +875,32 @@ EOF
     # 异步补课逻辑。在进程确认拉起后，从脚本主体执行一次优化，这样既保证了优化生效，又不会因为优化脚本运行时间长而导致服务启动超时
     ([ -f "$SBOX_CORE" ] && /bin/bash "$SBOX_CORE" --apply-cwnd) >/dev/null 2>&1 &
 	# 双进程外部 Argo 拉起逻辑
-    if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
-	    pkill -9 cloudflared >/dev/null 2>&1 || true
-	    local cf_memlimit; [ "${mem_total:-64}" -ge 256 ] && cf_memlimit="40MiB" || cf_memlimit="30MiB"
-	    GOGC=30 GOMEMLIMIT=${cf_memlimit} GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
-	        --protocol auto --edge-ip-version auto --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 \
-	        run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
-	fi
+    if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
+        pkill -9 cloudflared >/dev/null 2>&1 || true
+        local cf_memlimit; [ "${mem_total:-64}" -ge 256 ] && cf_memlimit="40MiB" || cf_memlimit="30MiB"
+        if [ -n "${ARGO_TOKEN:-}" ]; then
+            GOGC=30 GOMEMLIMIT=${cf_memlimit} GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
+                --protocol quic --edge-ip-version auto --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 \
+                run --post-quantum --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
+        else
+            GOGC=30 GOMEMLIMIT=${cf_memlimit} GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
+                --protocol quic --edge-ip-version auto --no-autoupdate \
+                --url http://127.0.0.1:8001 --logfile /tmp/argo_tmp.log 2>&1 &
+            local tmp_domain="" n=0
+            while [ $n -lt 15 ] && [ -z "$tmp_domain" ]; do
+                sleep 1; n=$((n+1))
+                tmp_domain=$(grep -oE '[a-z0-9-]+\.trycloudflare\.com' /tmp/argo_tmp.log 2>/dev/null | head -n1)
+            done
+            if [ -n "$tmp_domain" ]; then
+                ARGO_DOMAIN="$tmp_domain"
+                jq --arg d "$tmp_domain" '(.inbounds[] | select(.tag=="vless-argo-in") | .transport.headers.Host) = $d' \
+                    /etc/sing-box/config.json > /tmp/cfg_tmp.json && mv /tmp/cfg_tmp.json /etc/sing-box/config.json
+                succ "临时隧道已建立: $tmp_domain"
+            else
+                warn "临时隧道域名获取超时，Argo 节点链接可能为空"
+            fi
+        fi
+    fi
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
         succ "sing-box 启动成功 | 总内存: ${mem_total:-N/A} MB | 可用: $(( ${ma:-0} / 1024 )) MB | 模式: $([[ "$INITCWND_DONE" == "true" ]] && echo "内核" || echo "应用层")"
@@ -902,7 +923,7 @@ get_env_data() {
     [ -z "$d" ] && return 1
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$d"
     # 提取 Argo 域名 (通过 transport.host 确保兼容单/双进程模式)
-	RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // empty' "$CFG" 2>/dev/null)
+	RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | (.transport.host // .transport.headers.Host) // empty' "$CFG" 2>/dev/null)
     # 提取 SNI 与 指纹
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
     [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
