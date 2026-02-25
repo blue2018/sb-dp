@@ -625,7 +625,7 @@ net.ipv4.tcp_wmem = 4096 65536 $tcp_rmem_max   # TCP 写缓存动态范围
 net.ipv4.tcp_congestion_control = $tcp_cca # 拥塞算法 (BBR/Cubic)
 net.ipv4.tcp_no_metrics_save = 1           # 实时探测不记忆旧值
 net.ipv4.tcp_fastopen = 3                  # 开启 TCP 快开 (降首包延迟)
-net.ipv4.tcp_notsent_lowat = 16384         # 限制发送队列 (防延迟抖动)
+net.ipv4.tcp_notsent_lowat = 0         # 限制发送队列 (防延迟抖动)
 net.ipv4.tcp_mtu_probing = 1               # MTU自动探测 (防UDP黑洞)
 net.ipv4.ip_no_pmtu_disc = 0               # 启用路径MTU探测 (寻找最优包大小)
 net.ipv4.tcp_frto = 2                      # 丢包环境重传判断优化
@@ -875,9 +875,9 @@ EOF
 	# 双进程外部 Argo 拉起逻辑
     if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
 	    pkill -9 cloudflared >/dev/null 2>&1 || true
-	    local cf_memlimit; [ "${mem_total:-64}" -ge 256 ] && cf_memlimit="40MiB" || cf_memlimit="30MiB"
-	    GOGC=60 GOMEMLIMIT=${cf_memlimit} GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
-	        --protocol http2 --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 \
+	    local cf_memlimit; [ "${mem_total:-64}" -ge 256 ] && cf_memlimit="45MiB" || cf_memlimit="35MiB"
+	    GOGC=30 GOMEMLIMIT=${cf_memlimit} GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
+	        --protocol auto --edge-ip-version auto --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 \
 	        run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
 	fi
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
