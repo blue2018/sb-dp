@@ -606,6 +606,9 @@ net.core.default_qdisc = fq                # BBR必备调度规则
 net.core.netdev_budget = $net_bgt          # 调度预算 (单次轮询处理包数)
 net.core.netdev_budget_usecs = $net_usc    # 调度时长 (单次轮询微秒上限)
 net.core.netdev_tstamp_prequeue = 0        # 禁用时间戳预处理 (降延迟)
+net.ipv4.tcp_keepalive_time = 60           # 60s 无数据开始探测 (防NAT断流)
+net.ipv4.tcp_keepalive_intvl = 10          # 每 10s 探测一次
+net.ipv4.tcp_keepalive_probes = 3          # 连续 3 次无响应视为断线
 
 # === 三、 协议栈缓冲与自适应加速 (TCP/UDP/BBR/MTU) ===
 # --- 全局缓冲区限制 ---
@@ -622,7 +625,7 @@ net.ipv4.tcp_wmem = 4096 65536 $tcp_rmem_max   # TCP 写缓存动态范围
 net.ipv4.tcp_congestion_control = $tcp_cca # 拥塞算法 (BBR/Cubic)
 net.ipv4.tcp_no_metrics_save = 1           # 实时探测不记忆旧值
 net.ipv4.tcp_fastopen = 3                  # 开启 TCP 快开 (降首包延迟)
-net.ipv4.tcp_notsent_lowat = 131072        # 限制发送队列 (防延迟抖动)
+net.ipv4.tcp_notsent_lowat = 16384         # 限制发送队列 (防延迟抖动)
 net.ipv4.tcp_mtu_probing = 1               # MTU自动探测 (防UDP黑洞)
 net.ipv4.ip_no_pmtu_disc = 0               # 启用路径MTU探测 (寻找最优包大小)
 net.ipv4.tcp_frto = 2                      # 丢包环境重传判断优化
@@ -873,9 +876,9 @@ EOF
     if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
 	    pkill -9 cloudflared >/dev/null 2>&1 || true
 	    local cf_memlimit; [ "${mem_total:-64}" -ge 256 ] && cf_memlimit="40MiB" || cf_memlimit="30MiB"
-	    GOGC=80 GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
-		    --protocol quic --edge-ip-version auto --no-autoupdate --tcp-keepalive-interval 30s --tunnel-socks-connection-timeout 60s --heartbeat-interval 10s --heartbeat-count 2 \
-		    run --post-quantum --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
+	    GOGC=60 GOMEMLIMIT=${cf_memlimit} GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
+	        --protocol http2 --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 \
+	        run --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
 	fi
     if [ -n "$pid" ] && [ -e "/proc/$pid" ]; then
         local ma=$(awk '/^MemAvailable:/{a=$2;f=1} /^MemFree:|Buffers:|Cached:/{s+=$2} END{print (f?a:s)}' /proc/meminfo 2>/dev/null)
@@ -938,7 +941,7 @@ display_links() {
 	
     echo -e "\n\033[1;34m==========================================\033[0m"
     echo -e "\033[1;32m[安全增强]\033[0m 流量已混入 $RAW_SNI 的 TLS 1.3 握手池"
-	[ -n "$RAW_ARGO_DOMAIN" ] && echo -e "\033[1;32m[隧道增强]\033[0m 已启用 Cloudflare Argo 反向转发 (Post-Quantum QUIC)"
+    [ -n "$RAW_ARGO_DOMAIN" ] && echo -e "\033[1;32m[隧道增强]\033[0m 已启用 Cloudflare Argo 反向转发"
     [ -n "$FULL_CLIP" ] && copy_to_clipboard "$FULL_CLIP"
 }
 
