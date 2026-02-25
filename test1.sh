@@ -877,6 +877,7 @@ EOF
 	# 双进程外部 Argo 拉起逻辑
     if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ]; then
         pkill -9 cloudflared >/dev/null 2>&1 || true
+        pkill -9 sing-box >/dev/null 2>&1 || true; sleep 1
         local cf_memlimit; [ "${mem_total:-64}" -ge 256 ] && cf_memlimit="40MiB" || cf_memlimit="30MiB"
         if [ -n "${ARGO_TOKEN:-}" ]; then
             GOGC=30 GOMEMLIMIT=${cf_memlimit} GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
