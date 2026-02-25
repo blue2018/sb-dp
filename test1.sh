@@ -902,7 +902,7 @@ get_env_data() {
     [ -z "$d" ] && return 1
     read -r RAW_PSK RAW_PORT CERT_PATH <<< "$d"
     # 提取 Argo 域名 (通过 transport.host 确保兼容单/双进程模式)
-	RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | .transport.host // empty' "$CFG" 2>/dev/null)
+	RAW_ARGO_DOMAIN=$(jq -r '.. | objects | select(.tag == "vless-argo-in") | (.transport.host // .transport.headers.Host) // empty' "$CFG" 2>/dev/null)
     # 提取 SNI 与 指纹
     RAW_SNI=$(openssl x509 -in "$CERT_PATH" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/.*CN=\([^,]*\).*/\1/')
     [[ "$RAW_SNI" == *"CloudFlare"* || -z "$RAW_SNI" ]] && RAW_SNI="$TLS_DOMAIN"
