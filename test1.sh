@@ -893,8 +893,8 @@ EOF
             done
             if [ -n "$tmp_domain" ]; then
                 ARGO_DOMAIN="$tmp_domain"
-                jq --arg d "$tmp_domain" '(.inbounds[] | select(.tag=="vless-argo-in") | .transport.headers.Host) = $d' \
-                    /etc/sing-box/config.json > /tmp/cfg_tmp.json && mv /tmp/cfg_tmp.json /etc/sing-box/config.json
+                jq --arg d "$tmp_domain" '(.inbounds[] | select(.tag=="vless-argo-in") | .transport.host) = $d' \
+    				/etc/sing-box/config.json > /tmp/cfg_tmp.json && mv /tmp/cfg_tmp.json /etc/sing-box/config.json
                 succ "临时隧道已建立: $tmp_domain"
             else
                 warn "临时隧道域名获取超时，Argo 节点链接可能为空"
