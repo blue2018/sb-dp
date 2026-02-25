@@ -905,8 +905,11 @@ EOF
             if [ -n "$tmp_domain" ]; then
                 ARGO_DOMAIN="$tmp_domain"
                 jq --arg d "$tmp_domain" '(.inbounds[] | select(.tag=="vless-argo-in") | .transport.host) = $d' \
-    				/etc/sing-box/config.json > /tmp/cfg_tmp.json && mv /tmp/cfg_tmp.json /etc/sing-box/config.json
+                    /etc/sing-box/config.json > /tmp/cfg_tmp.json && mv /tmp/cfg_tmp.json /etc/sing-box/config.json
                 succ "临时隧道已建立: $tmp_domain"
+                # 等待首次启动的 sing-box 进程就绪后再用新配置重启
+                sleep 3; pkill -9 sing-box >/dev/null 2>&1 || true; sleep 1
+                ( rc-service sing-box start >/dev/null 2>&1 || systemctl start sing-box >/dev/null 2>&1 ) &
             else
                 warn "临时隧道域名获取超时，Argo 节点链接可能为空"
             fi
