@@ -119,7 +119,7 @@ setup_argo_logic() {
     echo -e "\033[1;32m[可选配置]\033[0m\nVLESS + HttpUpgrade + Argo: CF隧道转发\n-----------------------------------------------" >&2
     echo -ne "\033[1;36m[Argo 设置]\033[0m 请输入域名 (直接回车跳过可选配置): " >&2; read -r argo_d
     if [ -z "$argo_d" ]; then ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"; echo -e "\033[1;32m[INFO]\033[0m 已跳过 Argo 配置" >&2
-    elif [ "$mem_total" -lt 150 ] && ! /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
+    elif [ "$mem_total" -lt 128 ] && ! /usr/bin/sing-box version 2>/dev/null | grep -q "with_cloudflare"; then
         ARGO_DOMAIN=""; ARGO_TOKEN=""; USE_EXTERNAL_ARGO="false"
         echo -e "\033[1;33m[跳过]\033[0m 内存不足 200M 且内核不支持内建 Argo，为保系统稳定已自动跳过" >&2
     else
