@@ -756,8 +756,8 @@ create_config() {
         ARGO_IN=$(printf ',{
           "type": "vless", "tag": "vless-argo-in", "listen": "127.0.0.1", "listen_port": 8001,
           "users": [ { "uuid": "%s", "flow": "" } ], "tls": { "enabled": false },
-          "transport": { "type": "httpupgrade", "host": "%s" }
-        }' "$PSK" "$A_DOMAIN")
+          "transport": { "type": "ws", "path": "/%s", "headers": { "Host": "%s" } }
+        }' "$PSK" "${PSK:0:8}" "$A_DOMAIN")
     fi
     
     # 写入 Sing-box 配置文件
@@ -876,7 +876,7 @@ EOF
     if [ "${USE_EXTERNAL_ARGO:-false}" = "true" ] && [ -n "${ARGO_TOKEN:-}" ]; then
 	    pkill -9 cloudflared >/dev/null 2>&1 || true
 	    local cf_memlimit; [ "${mem_total:-64}" -ge 256 ] && cf_memlimit="40MiB" || cf_memlimit="30MiB"
-	    nohup /usr/local/bin/cloudflared tunnel \
+	    GOGC=30 GOMEMLIMIT=${cf_memlimit} GOMAXPROCS="${CPU_CORE:-1}" nohup /usr/local/bin/cloudflared tunnel \
 		    --protocol quic --edge-ip-version auto --no-autoupdate --heartbeat-interval 10s --heartbeat-count 2 \
 		    run --post-quantum --token "${ARGO_TOKEN}" >/dev/null 2>&1 &
 	fi
@@ -937,7 +937,7 @@ display_links() {
     echo -e "\n\033[1;32m[节点信息]\033[0m >>> 端口: $p_text $p_icon | 服务: $s_text $s_icon"
     [ -n "${RAW_IP4:-}" ] && LINK_V4="hy2://$RAW_PSK@$RAW_IP4:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v4" && echo -e "\n\033[1;35m[IPv4 节点]\033[0m\n$LINK_V4" && FULL_CLIP="$LINK_V4"
     [[ "${RAW_IP6:-}" == *:* ]] && LINK_V6="hy2://$RAW_PSK@[$RAW_IP6]:$RAW_PORT/?${BASE_PARAM}#${hostname_tag}_Hy2_v6" && echo -e "\n\033[1;36m[IPv6 节点]\033[0m\n$LINK_V6" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_V6"
-	[ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ] && LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=httpupgrade&host=$RAW_ARGO_DOMAIN&fp=chrome#${hostname_tag}_Argo" && echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
+	[ -n "$RAW_ARGO_DOMAIN" ] && [ "$RAW_ARGO_DOMAIN" != "null" ] && LINK_ARGO="vless://$RAW_PSK@$RAW_ARGO_DOMAIN:443?encryption=none&security=tls&sni=$RAW_ARGO_DOMAIN&type=ws&host=$RAW_ARGO_DOMAIN&path=%2F${RAW_PSK:0:8}&fp=chrome#${hostname_tag}_Argo" && echo -e "\n\033[1;33m[Argo 隧道]\033[0m\n$LINK_ARGO" && FULL_CLIP="${FULL_CLIP:+$FULL_CLIP$'\n'}$LINK_ARGO"
 	
     echo -e "\n\033[1;34m==========================================\033[0m"
     echo -e "\033[1;32m[安全增强]\033[0m 流量已混入 $RAW_SNI 的 TLS 1.3 握手池"
